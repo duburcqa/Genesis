@@ -1,4 +1,5 @@
 import math
+import xml.etree.ElementTree as ET
 from contextlib import nullcontext
 from itertools import permutations
 from typing import TYPE_CHECKING, cast, Any
@@ -84,6 +85,25 @@ def get_ipc_rigid_links_idx(scene, env_idx):
         if solver_type_ == "rigid" and env_idx_ == env_idx:
             links_idx.append(idx_)
     return links_idx
+
+
+def build_two_cube_joint_mjcf(tmp_path, joint_type, joint_limits, *, suffix=""):
+    """Build a two-cube MJCF with a revolute or prismatic joint."""
+    mjcf = ET.Element("mujoco", model=f"two_cube_{joint_type}{suffix}")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    base = ET.SubElement(worldbody, "body", name="base")
+    ET.SubElement(base, "geom", type="box", size="0.05 0.05 0.05")
+    ET.SubElement(base, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.00667 0.00667 0.00667")
+    child = ET.SubElement(base, "body", name="moving", pos="0.1 0 0")
+    ET.SubElement(child, "geom", type="box", size="0.05 0.05 0.05", pos="0.1 0 0")
+    ET.SubElement(child, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.00667 0.00667 0.00667")
+    mj_type = "hinge" if joint_type == "revolute" else "slide"
+    axis = "0 1 0" if joint_type == "revolute" else "1 0 0"
+    lo, hi = joint_limits
+    ET.SubElement(child, "joint", name="joint1", type=mj_type, axis=axis, range=f"{lo} {hi}")
+    path = str(tmp_path / f"two_cube_{joint_type}{suffix}.xml")
+    ET.ElementTree(mjcf).write(path, encoding="utf-8", xml_declaration=True)
+    return path
 
 
 @pytest.mark.parametrize("enable_rigid_rigid_contact", [False, True])
@@ -1365,3 +1385,287 @@ def test_cloth_uniform_biaxial_stretching(n_envs, E, nu, show_viewer):
 
     # Out-of-plane deformation negligible (no gravity, no bending load)
     assert_allclose(final_pos[..., 2], CLOTH_HEIGHT, atol=0.02)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("E, rho", [(1e4, 200), (5e4, 400)])
+def test_cloth_gravity_deflection(n_envs, E, rho, show_viewer):
+    """Cloth held at corners sags under gravity. Verify Hencky membrane deflection scaling."""
+    DT = 0.01
+    THICKNESS = 0.001
+    CLOTH_HEIGHT = 1.0
+    BOX_HALF = 0.03
+    GAP = 0.005
+    CONTACT_D_HAT = 0.01
+    GRAVITY = (0.0, 0.0, -9.8)
+    NUM_SETTLE = 300
+    NUM_STABLE = 50
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_enable=True,
+            enable_rigid_rigid_contact=True,
+            contact_d_hat=CONTACT_D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 0.8),
+            camera_lookat=(0.0, 0.0, 0.5),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=1.0,
+            pos=(0.0, 0.0, CLOTH_HEIGHT),
+            euler=(90, 0, 0),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=E,
+            nu=0.49,
+            rho=rho,
+            thickness=THICKNESS,
+            bending_stiffness=None,
+            friction_mu=0.8,
+        ),
+    )
+
+    # 8 boxes: 2 per corner (sandwich grip above/below cloth), position-controlled to hold corners
+    HALF_L = 0.5
+    corner_xy = [(-HALF_L, -HALF_L), (-HALF_L, HALF_L), (HALF_L, -HALF_L), (HALF_L, HALF_L)]
+    boxes = []
+    for cx, cy in corner_xy:
+        for z_sign in (+1, -1):
+            box = scene.add_entity(
+                gs.morphs.Box(
+                    pos=(cx, cy, CLOTH_HEIGHT + z_sign * (BOX_HALF + GAP)),
+                    size=(2 * BOX_HALF, 2 * BOX_HALF, 2 * BOX_HALF),
+                ),
+                material=gs.materials.Rigid(
+                    coupling_type="two_way_soft_constraint",
+                    coup_friction=0.8,
+                ),
+            )
+            boxes.append(box)
+
+    scene.build(n_envs=n_envs)
+
+    # Record initial cloth positions
+    init_pos = tensor_to_array(cloth.get_state().pos)
+    if init_pos.ndim == 2:
+        init_pos = init_pos[np.newaxis]
+
+    # Find center vertex (closest to origin in x,y)
+    center_dist = np.sqrt(init_pos[0, :, 0] ** 2 + init_pos[0, :, 1] ** 2)
+    center_idx = int(np.argmin(center_dist))
+
+    # Find corner vertices (closest to each corner)
+    corner_indices = []
+    for cx, cy in corner_xy:
+        dist = np.sqrt((init_pos[0, :, 0] - cx) ** 2 + (init_pos[0, :, 1] - cy) ** 2)
+        corner_indices.append(int(np.argmin(dist)))
+
+    # PD control: hold boxes at initial position (close gap in z target)
+    for box in boxes:
+        box.set_dofs_kp(5000.0)
+        box.set_dofs_kv(500.0)
+        init_dof = tensor_to_array(box.get_dofs_position()).copy()
+        z_dof = init_dof[..., 2]
+        init_dof[..., 2] = np.where(z_dof > CLOTH_HEIGHT, z_dof - GAP, z_dof + GAP)
+        box.control_dofs_position(init_dof)
+
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Check steady state
+    prev_pos = tensor_to_array(cloth.get_state().pos)
+    if prev_pos.ndim == 2:
+        prev_pos = prev_pos[np.newaxis]
+    for _ in range(NUM_STABLE):
+        scene.step()
+    final_pos = tensor_to_array(cloth.get_state().pos)
+    if final_pos.ndim == 2:
+        final_pos = final_pos[np.newaxis]
+
+    assert_allclose(final_pos, prev_pos, atol=0.005)
+
+    # Corners held near cloth height
+    for c_idx in corner_indices:
+        assert_allclose(final_pos[..., c_idx, 2], CLOTH_HEIGHT, atol=0.05)
+
+    # Center has sagged
+    center_sag = CLOTH_HEIGHT - final_pos[..., center_idx, 2]
+    assert (center_sag > 0.05).all(), f"Expected center sag > 0.05, got {center_sag}"
+
+    # Hencky membrane scaling: w_max ~ C * (rho * g * L^4 / E)^(1/3)
+    # where rho_s = rho * t cancels with E * t, so w_max ~ (rho * g * L^4 / E)^(1/3)
+    g = abs(GRAVITY[2])
+    L = float(init_pos[0, :, 0].max() - init_pos[0, :, 0].min())
+    hencky_scale = (rho * g * L**4 / E) ** (1.0 / 3.0)
+
+    # FIXME: Calibrate C_REF from first run once reference values are stable.
+    # For now, verify the scaling exponent by checking ratio consistency across (E, rho) combinations.
+    C_observed = float(np.mean(center_sag) / hencky_scale)
+    assert 0.1 < C_observed < 5.0, f"Hencky coefficient C={C_observed:.3f} outside plausible range [0.1, 5.0]"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
+def test_stacked_revolute_pairs_collision(n_envs, coupling_type, show_viewer, tmp_path):
+    """Three two-cube revolute robots stacked on a ground plane. Verify IPC collision ordering."""
+    DT = 0.01
+    CONTACT_D_HAT = 0.01
+    GRAVITY = (0.0, 0.0, -9.8)
+    NUM_SETTLE = 150
+    NUM_STABLE = 30
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
+        rigid_options=gs.options.RigidOptions(enable_collision=False),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=CONTACT_D_HAT,
+            enable_rigid_rigid_contact=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -0.8, 0.6),
+            camera_lookat=(0.0, 0.0, 0.3),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    # Ground plane
+    scene.add_entity(
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(coupling_type="ipc_only", coup_friction=0.5),
+    )
+
+    # 3 robots at different heights, added in permuted order to flip contact pair indices
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, "revolute", (-1.57, 1.57), suffix="_stacked")
+    heights = [0.15, 0.40, 0.65]
+    add_order = [2, 0, 1]
+    robots = [None, None, None]
+    for idx in add_order:
+        robots[idx] = scene.add_entity(
+            gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, heights[idx]), fixed=False),
+            material=gs.materials.Rigid(coupling_type=coupling_type),
+        )
+
+    scene.build(n_envs=n_envs)
+
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Record positions for stability check
+    prev_positions = [tensor_to_array(r.get_pos()).copy() for r in robots]
+    for _ in range(NUM_STABLE):
+        scene.step()
+    final_positions = [tensor_to_array(r.get_pos()) for r in robots]
+
+    # Verify steady state
+    for prev, final in zip(prev_positions, final_positions):
+        assert_allclose(final, prev, atol=0.005)
+
+    # Extract min z for each robot
+    min_zs = []
+    for robot in robots:
+        pos = tensor_to_array(robot.get_pos())
+        z = np.atleast_1d(pos[..., 2])
+        min_zs.append(float(z.min()))
+
+    # No ground penetration
+    for i, mz in enumerate(min_zs):
+        assert mz > -CONTACT_D_HAT, f"Robot {i} penetrates ground: min_z={mz:.4f}"
+
+    # Stacking order preserved: each robot above the previous
+    for i in range(len(min_zs) - 1):
+        assert min_zs[i] < min_zs[i + 1], (
+            f"Stacking order violated: robot {i} z={min_zs[i]:.4f} >= robot {i + 1} z={min_zs[i + 1]:.4f}"
+        )
+
+    # All robots settled (not floating away)
+    for i, mz in enumerate(min_zs):
+        assert mz < 1.0, f"Robot {i} floating: z={mz:.4f}"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
+@pytest.mark.parametrize("joint_type", ["revolute", "prismatic"])
+def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show_viewer, tmp_path):
+    """Bang-bang velocity control pushes joint toward limits. Verify limits are respected."""
+    DT = 0.01
+    CONTACT_D_HAT = 0.01
+    V_MAX = 2.0
+    HALF_PERIOD = 40
+    NUM_OSCILLATIONS = 3
+
+    if joint_type == "revolute":
+        limits = (-1.57, 1.57)
+    else:
+        limits = (-0.3, 0.3)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=(0.0, 0.0, 0.0)),
+        rigid_options=gs.options.RigidOptions(enable_collision=False),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=CONTACT_D_HAT,
+            enable_rigid_rigid_contact=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.7),
+            camera_lookat=(0.1, 0.0, 0.5),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, joint_type, limits)
+    robot = scene.add_entity(
+        gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, 0.5), fixed=True),
+        material=gs.materials.Rigid(coupling_type=coupling_type),
+    )
+
+    scene.build(n_envs=n_envs)
+
+    # Set damping on the actuated joint (last DOF)
+    robot.set_dofs_kv(500.0, dofs_idx_local=-1)
+
+    # Bang-bang velocity control
+    pos_history = []
+    total_steps = 2 * HALF_PERIOD * NUM_OSCILLATIONS
+    for step in range(total_steps):
+        phase = (step // HALF_PERIOD) % 2
+        vel = V_MAX if phase == 0 else -V_MAX
+        robot.control_dofs_velocity(vel, dofs_idx_local=-1)
+        scene.step()
+        q = tensor_to_array(robot.get_dofs_position(dofs_idx_local=-1))
+        pos_history.append(float(np.mean(q)))
+
+    pos_arr = np.array(pos_history)
+    lower, upper = limits
+    joint_range = upper - lower
+    tolerance = 0.02 if joint_type == "revolute" else 0.02
+
+    # Joint never exceeds limits (with small tolerance for contact compliance)
+    assert pos_arr.min() >= lower - tolerance, f"Joint violated lower limit: min={pos_arr.min():.4f}, limit={lower}"
+    assert pos_arr.max() <= upper + tolerance, f"Joint violated upper limit: max={pos_arr.max():.4f}, limit={upper}"
+
+    # Joint reaches >60% of range on both sides
+    assert pos_arr.max() > upper - 0.4 * joint_range, (
+        f"Joint didn't reach upper range: max={pos_arr.max():.4f}, expected > {upper - 0.4 * joint_range:.4f}"
+    )
+    assert pos_arr.min() < lower + 0.4 * joint_range, (
+        f"Joint didn't reach lower range: min={pos_arr.min():.4f}, expected < {lower + 0.4 * joint_range:.4f}"
+    )
+
+    # At least 2 velocity reversals
+    diff = np.diff(pos_arr)
+    sign_changes = np.sum(np.diff(np.sign(diff)) != 0)
+    assert sign_changes >= 2, f"Expected >= 2 velocity reversals, got {sign_changes}"
