@@ -1828,3 +1828,157 @@ def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show
     diff = np.diff(pos_arr)
     sign_changes = np.sum(np.diff(np.sign(diff)) != 0)
     assert sign_changes >= 2, f"Expected >= 2 velocity reversals, got {sign_changes}"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_cloth_grip_friction_drag(n_envs, show_viewer):
+    """Cloth gripped at center by two fixed boxes, then moved sideways and upward.
+
+    Verify friction grip drags the cloth center along with the boxes, while non-grip
+    vertices are displaced less (cloth stretches rather than translating rigidly).
+    """
+    DT = 0.02
+    CLOTH_HEIGHT = 0.5
+    CLOTH_SCALE = 0.5
+    BOX_HALF = 0.05  # half-extent: size = 0.1
+    GAP = 0.005
+    NUM_SETTLE = 50
+    NUM_MOVE = 200
+
+    # Teleop-like IPC settings
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, -9.8),
+        ),
+        coupler_options=gs.options.IPCCouplerOptions(
+            constraint_strength_translation=100.0,
+            constraint_strength_rotation=100.0,
+            n_linesearch_iterations=8,
+            newton_tolerance=1e-1,
+            newton_translation_tolerance=1,
+            newton_semi_implicit_enable=False,
+            linear_system_tolerance=1e-3,
+            contact_enable=True,
+            enable_rigid_rigid_contact=True,
+            contact_d_hat=0.001,
+            contact_resistance=1e7,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.5, CLOTH_HEIGHT + 0.3),
+            camera_lookat=(0.0, 0.0, CLOTH_HEIGHT),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=CLOTH_SCALE,
+            pos=(0.0, 0.0, CLOTH_HEIGHT),
+            euler=(90, 0, 0),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=6e4,
+            nu=0.49,
+            rho=200,
+            thickness=0.001,
+            bending_stiffness=10.0,
+            friction_mu=0.5,
+        ),
+    )
+
+    # Two fixed boxes for sandwich grip at cloth center
+    boxes = []
+    for z_sign in (+1, -1):
+        box = scene.add_entity(
+            gs.morphs.Box(
+                pos=(0.0, 0.0, CLOTH_HEIGHT + z_sign * (BOX_HALF + GAP)),
+                size=(2 * BOX_HALF, 2 * BOX_HALF, 2 * BOX_HALF),
+            ),
+            material=gs.materials.Rigid(
+                coupling_type="two_way_soft_constraint",
+                coup_friction=0.5,
+            ),
+        )
+        boxes.append(box)
+
+    scene.build(n_envs=n_envs)
+
+    # Record initial cloth positions
+    init_pos = tensor_to_array(cloth.get_state().pos)
+    if init_pos.ndim == 2:
+        init_pos = init_pos[np.newaxis]
+
+    # Find center vertex (closest to origin in x,y)
+    center_dist = np.sqrt(init_pos[0, :, 0] ** 2 + init_pos[0, :, 1] ** 2)
+    center_idx = int(np.argmin(center_dist))
+    center_radius = 0.08
+    center_mask = center_dist < center_radius
+
+    # Find edge vertices (far from center)
+    HALF_L = CLOTH_SCALE * 0.5
+    edge_mask = center_dist > 0.8 * HALF_L * np.sqrt(2)
+
+    # PD control: close gap, hold position
+    for box in boxes:
+        box.set_dofs_kp(5000.0)
+        box.set_dofs_kv(500.0)
+        init_dof = tensor_to_array(box.get_dofs_position()).copy()
+        z_dof = init_dof[..., 2]
+        init_dof[..., 2] = np.where(z_dof > CLOTH_HEIGHT, z_dof - GAP, z_dof + GAP)
+        box.control_dofs_position(init_dof)
+
+    # Settle
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    settled_pos = tensor_to_array(cloth.get_state().pos)
+    if settled_pos.ndim == 2:
+        settled_pos = settled_pos[np.newaxis]
+
+    # After settling, cloth center should be near box center
+    assert_allclose(settled_pos[:, center_idx, 2], CLOTH_HEIGHT, atol=0.05)
+
+    # Record box settled DOF targets
+    box_settled_dofs = []
+    for box in boxes:
+        box_settled_dofs.append(tensor_to_array(box.get_dofs_position()).copy())
+
+    # Move boxes sideways (+x) and up (+z) linearly
+    MOVE_X = 0.1
+    MOVE_Z = 0.1
+    for step in range(NUM_MOVE):
+        t = (step + 1) / NUM_MOVE
+        for box, base_dof in zip(boxes, box_settled_dofs):
+            target = base_dof.copy()
+            target[..., 0] += MOVE_X * t
+            target[..., 2] += MOVE_Z * t
+            box.control_dofs_position(target)
+        scene.step()
+
+    final_pos = tensor_to_array(cloth.get_state().pos)
+    if final_pos.ndim == 2:
+        final_pos = final_pos[np.newaxis]
+
+    # Center vertex has displaced in +X
+    center_dx = float(np.mean(final_pos[:, center_mask, 0] - settled_pos[:, center_mask, 0]))
+    assert center_dx > 0.03, f"Center cloth didn't follow +X: dx={center_dx:.4f}"
+
+    # Center vertex has displaced in +Z
+    center_dz = float(np.mean(final_pos[:, center_mask, 2] - settled_pos[:, center_mask, 2]))
+    assert center_dz > 0.03, f"Center cloth didn't follow +Z: dz={center_dz:.4f}"
+
+    # Edge vertices also moved (friction grip drags the whole cloth)
+    edge_dx = float(np.mean(final_pos[:, edge_mask, 0] - settled_pos[:, edge_mask, 0]))
+    assert edge_dx > 0.01, f"Edge vertices should also move in +X: edge_dx={edge_dx:.4f}"
+
+    # Gravity causes edges to sag relative to center (cloth is not perfectly rigid)
+    edge_z_mean = float(np.mean(final_pos[:, edge_mask, 2]))
+    center_z_mean = float(np.mean(final_pos[:, center_mask, 2]))
+    assert center_z_mean > edge_z_mean, (
+        f"Center should be above edges due to grip: center_z={center_z_mean:.4f}, edge_z={edge_z_mean:.4f}"
+    )
