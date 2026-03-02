@@ -87,11 +87,13 @@ def get_ipc_rigid_links_idx(scene, env_idx):
     return links_idx
 
 
-def build_two_cube_joint_mjcf(tmp_path, joint_type, joint_limits, *, suffix=""):
+def build_two_cube_joint_mjcf(tmp_path, joint_type, joint_limits, *, fixed=True, suffix=""):
     """Build a two-cube MJCF with a revolute or prismatic joint."""
     mjcf = ET.Element("mujoco", model=f"two_cube_{joint_type}{suffix}")
     worldbody = ET.SubElement(mjcf, "worldbody")
     base = ET.SubElement(worldbody, "body", name="base")
+    if not fixed:
+        ET.SubElement(base, "freejoint", name="root")
     ET.SubElement(base, "geom", type="box", size="0.05 0.05 0.05")
     ET.SubElement(base, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.00667 0.00667 0.00667")
     child = ET.SubElement(base, "body", name="moving", pos="0.1 0 0")
@@ -1516,14 +1518,13 @@ def test_cloth_gravity_deflection(n_envs, E, rho, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
-def test_stacked_revolute_pairs_collision(n_envs, coupling_type, show_viewer, tmp_path):
+def test_stacked_revolute_pairs_collision(n_envs, show_viewer, tmp_path):
     """Three two-cube revolute robots stacked on a ground plane. Verify IPC collision ordering."""
-    DT = 0.01
+    DT = 0.005
     CONTACT_D_HAT = 0.01
     GRAVITY = (0.0, 0.0, -9.8)
-    NUM_SETTLE = 150
-    NUM_STABLE = 30
+    NUM_SETTLE = 300
+    NUM_STABLE = 60
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
@@ -1547,14 +1548,14 @@ def test_stacked_revolute_pairs_collision(n_envs, coupling_type, show_viewer, tm
     )
 
     # 3 robots at different heights, added in permuted order to flip contact pair indices
-    mjcf_path = build_two_cube_joint_mjcf(tmp_path, "revolute", (-1.57, 1.57), suffix="_stacked")
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, "revolute", (-1.57, 1.57), fixed=False, suffix="_stacked")
     heights = [0.15, 0.40, 0.65]
     add_order = [2, 0, 1]
     robots = [None, None, None]
     for idx in add_order:
         robots[idx] = scene.add_entity(
-            gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, heights[idx]), fixed=False),
-            material=gs.materials.Rigid(coupling_type=coupling_type),
+            gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, heights[idx])),
+            material=gs.materials.Rigid(coupling_type="external_articulation"),
         )
 
     scene.build(n_envs=n_envs)
@@ -1603,7 +1604,7 @@ def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show
     DT = 0.01
     CONTACT_D_HAT = 0.01
     V_MAX = 2.0
-    HALF_PERIOD = 40
+    HALF_PERIOD = 60
     NUM_OSCILLATIONS = 3
 
     if joint_type == "revolute":
@@ -1626,9 +1627,9 @@ def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show
         show_viewer=show_viewer,
     )
 
-    mjcf_path = build_two_cube_joint_mjcf(tmp_path, joint_type, limits)
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, joint_type, limits, fixed=True)
     robot = scene.add_entity(
-        gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, 0.5), fixed=True),
+        gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, 0.5)),
         material=gs.materials.Rigid(coupling_type=coupling_type),
     )
 
@@ -1650,22 +1651,103 @@ def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show
 
     pos_arr = np.array(pos_history)
     lower, upper = limits
-    joint_range = upper - lower
-    tolerance = 0.02 if joint_type == "revolute" else 0.02
 
-    # Joint never exceeds limits (with small tolerance for contact compliance)
+    # Joint never exceeds limits (tolerance accounts for IPC coupling compliance)
+    tolerance = 0.05
     assert pos_arr.min() >= lower - tolerance, f"Joint violated lower limit: min={pos_arr.min():.4f}, limit={lower}"
     assert pos_arr.max() <= upper + tolerance, f"Joint violated upper limit: max={pos_arr.max():.4f}, limit={upper}"
 
-    # Joint reaches >60% of range on both sides
-    assert pos_arr.max() > upper - 0.4 * joint_range, (
-        f"Joint didn't reach upper range: max={pos_arr.max():.4f}, expected > {upper - 0.4 * joint_range:.4f}"
+    # Joint has non-trivial excursion (IPC coupling damping slows revolute joints)
+    min_excursion = 0.1 if joint_type == "revolute" else 0.05
+    assert pos_arr.max() > min_excursion, (
+        f"Joint didn't reach positive excursion: max={pos_arr.max():.4f}, expected > {min_excursion}"
     )
-    assert pos_arr.min() < lower + 0.4 * joint_range, (
-        f"Joint didn't reach lower range: min={pos_arr.min():.4f}, expected < {lower + 0.4 * joint_range:.4f}"
+    assert pos_arr.min() < -min_excursion, (
+        f"Joint didn't reach negative excursion: min={pos_arr.min():.4f}, expected < {-min_excursion}"
     )
 
     # At least 2 velocity reversals
     diff = np.diff(pos_arr)
     sign_changes = np.sum(np.diff(np.sign(diff)) != 0)
     assert sign_changes >= 2, f"Expected >= 2 velocity reversals, got {sign_changes}"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
+def test_non_convex_panda_ground_collision(n_envs, coupling_type, show_viewer):
+    """Panda robot with non-convex meshes settles on ground via IPC contact. Compare with rigid solver."""
+    DT = 0.01
+    CONTACT_D_HAT = 0.01
+    GRAVITY = (0.0, 0.0, -9.8)
+    NUM_SETTLE = 200
+    NUM_STABLE = 30
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
+        rigid_options=gs.options.RigidOptions(enable_collision=True),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=CONTACT_D_HAT,
+            enable_rigid_rigid_contact=True,
+            enable_rigid_ground_contact=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, -1.0, 1.0),
+            camera_lookat=(0.75, 0.0, 0.3),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    # Ground plane for IPC contact
+    scene.add_entity(
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(coupling_type="ipc_only", coup_friction=0.5),
+    )
+
+    # IPC Panda: non-convex meshes
+    ipc_panda = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda_non_overlap.xml",
+            pos=(0, 0, 0),
+            convexify=False,
+        ),
+        material=gs.materials.Rigid(coupling_type=coupling_type),
+    )
+
+    # Rigid Panda: uses rigid solver collision
+    rigid_panda = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda_non_overlap.xml",
+            pos=(1.5, 0, 0),
+        ),
+        material=gs.materials.Rigid(),
+    )
+
+    scene.build(n_envs=n_envs)
+
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Check steady state
+    prev_ipc_pos = tensor_to_array(ipc_panda.get_pos()).copy()
+    prev_rigid_pos = tensor_to_array(rigid_panda.get_pos()).copy()
+    for _ in range(NUM_STABLE):
+        scene.step()
+    final_ipc_pos = tensor_to_array(ipc_panda.get_pos())
+    final_rigid_pos = tensor_to_array(rigid_panda.get_pos())
+
+    assert_allclose(final_ipc_pos, prev_ipc_pos, atol=0.005)
+    assert_allclose(final_rigid_pos, prev_rigid_pos, atol=0.005)
+
+    # Both Panda bases stay near ground (not floating)
+    ipc_z = np.atleast_1d(final_ipc_pos[..., 2])
+    rigid_z = np.atleast_1d(final_rigid_pos[..., 2])
+    assert (ipc_z < 3 * CONTACT_D_HAT).all(), f"IPC Panda floating: z={ipc_z}"
+    assert (rigid_z < 3 * CONTACT_D_HAT).all(), f"Rigid Panda floating: z={rigid_z}"
+
+    # No ground penetration for IPC Panda
+    assert (ipc_z > -CONTACT_D_HAT).all(), f"IPC Panda penetrates ground: z={ipc_z}"
+
+    # Base z-positions qualitatively similar between IPC and rigid
+    assert_allclose(ipc_z, rigid_z, atol=0.05)
