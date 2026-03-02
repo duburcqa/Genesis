@@ -1,4 +1,5 @@
 import math
+import xml.etree.ElementTree as ET
 from contextlib import nullcontext
 from itertools import permutations
 from typing import TYPE_CHECKING, cast, Any
@@ -83,6 +84,27 @@ def get_ipc_rigid_links_idx(scene, env_idx):
         if solver_type_ == "rigid" and env_idx_ == env_idx:
             links_idx.append(idx_)
     return links_idx
+
+
+def build_two_cube_joint_mjcf(tmp_path, joint_type, joint_limits, *, fixed=True, suffix=""):
+    """Build a two-cube MJCF with a revolute or prismatic joint."""
+    mjcf = ET.Element("mujoco", model=f"two_cube_{joint_type}{suffix}")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    base = ET.SubElement(worldbody, "body", name="base")
+    if not fixed:
+        ET.SubElement(base, "freejoint", name="root")
+    ET.SubElement(base, "geom", type="box", size="0.05 0.05 0.05")
+    ET.SubElement(base, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.00667 0.00667 0.00667")
+    child = ET.SubElement(base, "body", name="moving", pos="0.1 0 0")
+    ET.SubElement(child, "geom", type="box", size="0.05 0.05 0.05", pos="0.1 0 0")
+    ET.SubElement(child, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.00667 0.00667 0.00667")
+    mj_type = "hinge" if joint_type == "revolute" else "slide"
+    axis = "0 1 0" if joint_type == "revolute" else "1 0 0"
+    lo, hi = joint_limits
+    ET.SubElement(child, "joint", name="joint1", type=mj_type, axis=axis, range=f"{lo} {hi}")
+    path = str(tmp_path / f"two_cube_{joint_type}{suffix}.xml")
+    ET.ElementTree(mjcf).write(path, encoding="utf-8", xml_declaration=True)
+    return path
 
 
 @pytest.mark.parametrize("enable_rigid_rigid_contact", [False, True])
@@ -1545,7 +1567,13 @@ def test_cloth_gravity_deflection(n_envs, E, rho, show_viewer):
                     pos=(
                         x_sign * (CLOTH_HALF - BOX_SIZE),
                         y_sign * (CLOTH_HALF - BOX_SIZE),
-                        z_sign * (0.5 * BOX_SIZE + GAP),
+                        z_sign * (0.5 * math.sqrt(3) * BOX_SIZE + GAP),
+                    ),
+                    quat=(
+                        math.sqrt(2 * (math.sqrt(3) + 1)),
+                        y_sign * math.sqrt((math.sqrt(3) - 1)),
+                        -y_sign * math.sqrt((math.sqrt(3) - 1)),
+                        0.0,
                     ),
                 ),
                 material=gs.materials.Rigid(
@@ -1574,12 +1602,179 @@ def test_cloth_gravity_deflection(n_envs, E, rho, show_viewer):
 
     # ============= REMOVE AFTER FIXING VERTEX SOFT CONSTRAINT BUG =============
     for box in boxes:
-        box.set_dofs_kp(2000.0)
-        box.set_dofs_kv(500.0)
+        box.set_dofs_kp(500.0)
+        box.set_dofs_kv(50.0)
         init_dof = tensor_to_array(box.get_dofs_position())
         init_dof[..., 2] = 0.0
         box.control_dofs_position(init_dof)
     # ==========================================================================
 
-    for _ in range(50):
+    for _ in range(150):
         scene.step()
+
+    # TODO: Compare the position of the vertices at equilibrium with the analytical formula
+    breakpoint()
+    cloth_positions = tensor_to_array(cloth.get_state().pos)
+    L = 2 * CLOTH_HALF
+    g = np.linalg.norm(GRAVITY)
+    delta_center = (rho * g * L**4) / (E * THICKNESS**2)
+    x = cloth_positions[:, 0]
+    y = cloth_positions[:, 1]
+    z_expected = -delta_center * (1 - (x / CLOTH_HALF) ** 2) * (1 - (y / CLOTH_HALF) ** 2)
+    assert_allclose(cloth_positions[:, 2], z_expected, rtol=0, atol=0.05 * delta_center)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_stacked_revolute_pairs_collision(n_envs, show_viewer, tmp_path):
+    """Three two-cube revolute robots stacked on a ground plane. Verify IPC collision ordering."""
+    DT = 0.005
+    CONTACT_D_HAT = 0.01
+    GRAVITY = (0.0, 0.0, -9.8)
+    NUM_SETTLE = 300
+    NUM_STABLE = 60
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
+        rigid_options=gs.options.RigidOptions(enable_collision=False),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=CONTACT_D_HAT,
+            enable_rigid_rigid_contact=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -0.8, 0.6),
+            camera_lookat=(0.0, 0.0, 0.3),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    # Ground plane
+    scene.add_entity(
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(coupling_type="ipc_only", coup_friction=0.5),
+    )
+
+    # 3 robots at different heights, added in permuted order to flip contact pair indices
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, "revolute", (-1.57, 1.57), fixed=False, suffix="_stacked")
+    heights = [0.15, 0.40, 0.65]
+    add_order = [2, 0, 1]
+    robots = [None, None, None]
+    for idx in add_order:
+        robots[idx] = scene.add_entity(
+            gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, heights[idx])),
+            material=gs.materials.Rigid(coupling_type="external_articulation"),
+        )
+
+    scene.build(n_envs=n_envs)
+
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Record positions for stability check
+    prev_positions = [tensor_to_array(r.get_pos()).copy() for r in robots]
+    for _ in range(NUM_STABLE):
+        scene.step()
+    final_positions = [tensor_to_array(r.get_pos()) for r in robots]
+
+    # Verify steady state
+    for prev, final in zip(prev_positions, final_positions):
+        assert_allclose(final, prev, atol=0.005)
+
+    # Extract min z for each robot
+    min_zs = []
+    for robot in robots:
+        pos = tensor_to_array(robot.get_pos())
+        z = np.atleast_1d(pos[..., 2])
+        min_zs.append(float(z.min()))
+
+    # No ground penetration
+    for i, mz in enumerate(min_zs):
+        assert mz > -CONTACT_D_HAT, f"Robot {i} penetrates ground: min_z={mz:.4f}"
+
+    # Stacking order preserved: each robot above the previous
+    for i in range(len(min_zs) - 1):
+        assert min_zs[i] < min_zs[i + 1], (
+            f"Stacking order violated: robot {i} z={min_zs[i]:.4f} >= robot {i + 1} z={min_zs[i + 1]:.4f}"
+        )
+
+    # All robots settled (not floating away)
+    for i, mz in enumerate(min_zs):
+        assert mz < 1.0, f"Robot {i} floating: z={mz:.4f}"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
+@pytest.mark.parametrize("joint_type", ["revolute", "prismatic"])
+def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show_viewer, tmp_path):
+    """Bang-bang velocity control pushes joint toward limits. Verify limits are respected."""
+    DT = 0.01
+    CONTACT_D_HAT = 0.01
+    V_MAX = 2.0
+    HALF_PERIOD = 60
+    NUM_OSCILLATIONS = 3
+
+    if joint_type == "revolute":
+        limits = (-1.57, 1.57)
+    else:
+        limits = (-0.3, 0.3)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=(0.0, 0.0, 0.0)),
+        rigid_options=gs.options.RigidOptions(enable_collision=False),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=CONTACT_D_HAT,
+            enable_rigid_rigid_contact=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.7),
+            camera_lookat=(0.1, 0.0, 0.5),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    mjcf_path = build_two_cube_joint_mjcf(tmp_path, joint_type, limits, fixed=True)
+    robot = scene.add_entity(
+        gs.morphs.MJCF(file=mjcf_path, pos=(0, 0, 0.5)),
+        material=gs.materials.Rigid(coupling_type=coupling_type),
+    )
+
+    scene.build(n_envs=n_envs)
+
+    # Set damping on the actuated joint (last DOF)
+    robot.set_dofs_kv(500.0, dofs_idx_local=-1)
+
+    # Bang-bang velocity control
+    pos_history = []
+    total_steps = 2 * HALF_PERIOD * NUM_OSCILLATIONS
+    for step in range(total_steps):
+        phase = (step // HALF_PERIOD) % 2
+        vel = V_MAX if phase == 0 else -V_MAX
+        robot.control_dofs_velocity(vel, dofs_idx_local=-1)
+        scene.step()
+        q = tensor_to_array(robot.get_dofs_position(dofs_idx_local=-1))
+        pos_history.append(float(np.mean(q)))
+
+    pos_arr = np.array(pos_history)
+    lower, upper = limits
+
+    # Joint never exceeds limits (tolerance accounts for IPC coupling compliance)
+    tolerance = 0.05
+    assert pos_arr.min() >= lower - tolerance, f"Joint violated lower limit: min={pos_arr.min():.4f}, limit={lower}"
+    assert pos_arr.max() <= upper + tolerance, f"Joint violated upper limit: max={pos_arr.max():.4f}, limit={upper}"
+
+    # Joint has non-trivial excursion (IPC coupling damping slows revolute joints)
+    min_excursion = 0.1 if joint_type == "revolute" else 0.05
+    assert pos_arr.max() > min_excursion, (
+        f"Joint didn't reach positive excursion: max={pos_arr.max():.4f}, expected > {min_excursion}"
+    )
+    assert pos_arr.min() < -min_excursion, (
+        f"Joint didn't reach negative excursion: min={pos_arr.min():.4f}, expected < {-min_excursion}"
+    )
+
+    # At least 2 velocity reversals
+    diff = np.diff(pos_arr)
+    sign_changes = np.sum(np.diff(np.sign(diff)) != 0)
+    assert sign_changes >= 2, f"Expected >= 2 velocity reversals, got {sign_changes}"
