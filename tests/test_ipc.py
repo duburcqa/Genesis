@@ -1233,3 +1233,135 @@ def test_collision_delegation_ipc_vs_rigid(coupling_type, enable_rigid_ground_co
     if rigid_kept_geoms:
         assert any(pair_idx[min(a, b), max(a, b)] >= 0 for a in rigid_kept_geoms for b in ground_geoms)
         assert any(pair_idx[min(a, b), max(a, b)] >= 0 for a in rigid_kept_geoms for b in rigid_kept_geoms if a < b)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("E, nu", [(1e4, 0.3), (5e4, 0.49)])
+def test_cloth_uniform_biaxial_stretching(n_envs, E, nu, show_viewer):
+    """Stretch a square cloth uniformly via position-controlled boxes at corners. Verify stretch physics."""
+    DT = 0.01
+    THICKNESS = 0.001
+    RHO = 200.0
+    CLOTH_HEIGHT = 0.5
+    BOX_HALF = 0.03
+    GAP = 0.005  # Must exceed cloth thickness (0.001) to pass UIPC distance sanity check
+    CONTACT_D_HAT = 0.01
+    PULL_DISTANCE = 0.03  # Radial displacement per corner
+    NUM_SETTLE = 200
+    NUM_STABLE = 50
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT, gravity=(0.0, 0.0, 0.0)),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_enable=True,
+            enable_rigid_rigid_contact=True,
+            contact_d_hat=CONTACT_D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -2.0, CLOTH_HEIGHT),
+            camera_lookat=(0.0, 0.0, CLOTH_HEIGHT),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=1.0,
+            pos=(0.0, 0.0, CLOTH_HEIGHT),
+            euler=(90, 0, 0),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=E,
+            nu=nu,
+            rho=RHO,
+            thickness=THICKNESS,
+            bending_stiffness=None,
+            friction_mu=0.8,
+        ),
+    )
+
+    # 8 boxes: 2 per corner (sandwich grip above/below cloth).
+    # Box `size` is FULL edge length; `BOX_HALF` is the half-extent used for positioning.
+    HALF_L = 0.5  # grid20x20 at scale=1.0 is ~1m x 1m
+    corner_xy = [(-HALF_L, -HALF_L), (-HALF_L, HALF_L), (HALF_L, -HALF_L), (HALF_L, HALF_L)]
+    diagonal_signs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+    inv_sqrt2 = 1.0 / np.sqrt(2)
+
+    boxes = []  # list of (box_entity, diagonal_sign_x, diagonal_sign_y)
+    for (cx, cy), (sx, sy) in zip(corner_xy, diagonal_signs):
+        for z_sign in (+1, -1):
+            box = scene.add_entity(
+                gs.morphs.Box(
+                    pos=(cx, cy, CLOTH_HEIGHT + z_sign * (BOX_HALF + GAP)),
+                    size=(2 * BOX_HALF, 2 * BOX_HALF, 2 * BOX_HALF),
+                ),
+                material=gs.materials.Rigid(
+                    coupling_type="two_way_soft_constraint",
+                    coup_friction=0.8,
+                ),
+            )
+            boxes.append((box, sx, sy))
+
+    scene.build(n_envs=n_envs)
+
+    # Record initial cloth vertex positions
+    init_pos = tensor_to_array(cloth.get_state().pos)
+    if init_pos.ndim == 2:
+        init_pos = init_pos[np.newaxis]
+    L = float(init_pos[0, :, 0].max() - init_pos[0, :, 0].min())
+
+    # Configure PD: position-controlled outward pull on x,y; hold z + rotation
+    for box, sx, sy in boxes:
+        box.set_dofs_kp(5000.0)
+        box.set_dofs_kv(500.0)
+        init_dof = tensor_to_array(box.get_dofs_position()).copy()
+        # Close the init gap in z target
+        z_dof = init_dof[..., 2]
+        init_dof[..., 2] = np.where(z_dof > CLOTH_HEIGHT, z_dof - GAP, z_dof + GAP)
+        # Pull corners outward along diagonal
+        init_dof[..., 0] += PULL_DISTANCE * sx * inv_sqrt2
+        init_dof[..., 1] += PULL_DISTANCE * sy * inv_sqrt2
+        box.control_dofs_position(init_dof)
+
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Check steady state over additional steps
+    prev_pos = tensor_to_array(cloth.get_state().pos)
+    if prev_pos.ndim == 2:
+        prev_pos = prev_pos[np.newaxis]
+    for _ in range(NUM_STABLE):
+        scene.step()
+    final_pos = tensor_to_array(cloth.get_state().pos)
+    if final_pos.ndim == 2:
+        final_pos = final_pos[np.newaxis]
+
+    # Verify steady state (loose tolerance — cloth oscillates under IPC contact)
+    assert_allclose(final_pos, prev_pos, atol=0.005)
+
+    # Compute observed radial strain
+    init_center = init_pos.mean(axis=-2, keepdims=True)
+    final_center = final_pos.mean(axis=-2, keepdims=True)
+    init_r = np.linalg.norm((init_pos - init_center)[..., :2], axis=-1)
+    final_r = np.linalg.norm((final_pos - final_center)[..., :2], axis=-1)
+    interior = init_r > 0.02
+    observed_strain = np.mean((final_r[interior] / init_r[interior]) - 1.0)
+
+    # Cloth is being stretched outward: positive strain expected
+    assert observed_strain > 0.001, f"Expected positive stretch, got strain={observed_strain:.6f}"
+
+    # Deformation symmetric: x-scale ~ y-scale
+    init_xy = (init_pos - init_center)[..., :2]
+    final_xy = (final_pos - final_center)[..., :2]
+    x_mask = np.abs(init_xy[..., 0]) > 0.02
+    y_mask = np.abs(init_xy[..., 1]) > 0.02
+    scale_x = np.mean(final_xy[x_mask, 0] / init_xy[x_mask, 0])
+    scale_y = np.mean(final_xy[y_mask, 1] / init_xy[y_mask, 1])
+    assert_allclose(scale_x, scale_y, rtol=0.1)
+
+    # Out-of-plane deformation negligible (no gravity, no bending load)
+    assert_allclose(final_pos[..., 2], CLOTH_HEIGHT, atol=0.02)
