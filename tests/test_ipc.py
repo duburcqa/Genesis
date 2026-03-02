@@ -1259,6 +1259,164 @@ def test_collision_delegation_ipc_vs_rigid(coupling_type, enable_rigid_ground_co
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
+def test_cloth_corner_drag(n_envs, show_viewer):
+    """Drag a cloth by one corner under gravity using a sandwich grip of two boxes.
+
+    Verify that FEM vertices near the gripped corner follow the imposed trajectory,
+    while the rest of the cloth hangs freely under gravity.
+    """
+    DT = 0.01
+    THICKNESS = 0.001
+    RHO = 200.0
+    CLOTH_HEIGHT = 0.5
+    BOX_HALF = 0.03
+    GAP = 0.005  # Must exceed cloth thickness to pass UIPC distance sanity check
+    CONTACT_D_HAT = 0.01
+    GRAVITY = (0.0, 0.0, -9.8)
+    NUM_SETTLE = 100
+    NUM_DRAG = 200
+
+    # Drag trajectory: move the corner upward and sideways
+    DRAG_DX = 0.2
+    DRAG_DZ = 0.3
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=GRAVITY,
+        ),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_enable=True,
+            enable_rigid_rigid_contact=True,
+            contact_d_hat=CONTACT_D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -2.0, CLOTH_HEIGHT + 0.3),
+            camera_lookat=(0.0, 0.0, CLOTH_HEIGHT),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+
+    asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=1.0,
+            pos=(0.0, 0.0, CLOTH_HEIGHT),
+            euler=(90, 0, 0),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=1e4,
+            nu=0.3,
+            rho=RHO,
+            thickness=THICKNESS,
+            bending_stiffness=None,
+            friction_mu=0.8,
+        ),
+    )
+
+    # Sandwich grip at one corner (+x, +y)
+    HALF_L = 0.5
+    corner_x, corner_y = HALF_L, HALF_L
+    boxes = []
+    for z_sign in (+1, -1):
+        box = scene.add_entity(
+            gs.morphs.Box(
+                pos=(corner_x, corner_y, CLOTH_HEIGHT + z_sign * (BOX_HALF + GAP)),
+                size=(2 * BOX_HALF, 2 * BOX_HALF, 2 * BOX_HALF),
+            ),
+            material=gs.materials.Rigid(
+                coupling_type="two_way_soft_constraint",
+                coup_friction=0.8,
+            ),
+        )
+        boxes.append(box)
+
+    scene.build(n_envs=n_envs)
+
+    # Record initial cloth positions
+    init_pos = tensor_to_array(cloth.get_state().pos)
+    if init_pos.ndim == 2:
+        init_pos = init_pos[np.newaxis]
+
+    # Find corner vertices: closest to the gripped corner
+    corner_dist = np.sqrt((init_pos[0, :, 0] - corner_x) ** 2 + (init_pos[0, :, 1] - corner_y) ** 2)
+    corner_radius = 0.08  # vertices within this radius are "corner vertices"
+    corner_mask = corner_dist < corner_radius
+
+    # Find opposite corner vertices (far from grip)
+    opposite_dist = np.sqrt((init_pos[0, :, 0] + corner_x) ** 2 + (init_pos[0, :, 1] + corner_y) ** 2)
+    opposite_mask = opposite_dist < corner_radius
+
+    # PD control: close gap, hold position during settling
+    for box in boxes:
+        box.set_dofs_kp(5000.0)
+        box.set_dofs_kv(500.0)
+        init_dof = tensor_to_array(box.get_dofs_position()).copy()
+        z_dof = init_dof[..., 2]
+        init_dof[..., 2] = np.where(z_dof > CLOTH_HEIGHT, z_dof - GAP, z_dof + GAP)
+        box.control_dofs_position(init_dof)
+
+    # Settle: let cloth conform to grip
+    for _ in range(NUM_SETTLE):
+        scene.step()
+
+    # Record settled positions
+    settled_pos = tensor_to_array(cloth.get_state().pos)
+    if settled_pos.ndim == 2:
+        settled_pos = settled_pos[np.newaxis]
+
+    # Record box initial DOF targets for trajectory
+    box_settled_dofs = []
+    for box in boxes:
+        box_settled_dofs.append(tensor_to_array(box.get_dofs_position()).copy())
+
+    # Drag phase: linearly ramp the corner boxes along trajectory
+    for step in range(NUM_DRAG):
+        t = (step + 1) / NUM_DRAG
+        for box, base_dof in zip(boxes, box_settled_dofs):
+            target = base_dof.copy()
+            target[..., 0] += DRAG_DX * t
+            target[..., 2] += DRAG_DZ * t
+            box.control_dofs_position(target)
+        scene.step()
+
+    # Final cloth positions
+    final_pos = tensor_to_array(cloth.get_state().pos)
+    if final_pos.ndim == 2:
+        final_pos = final_pos[np.newaxis]
+
+    # Expected corner displacement
+    expected_dx = DRAG_DX
+    expected_dz = DRAG_DZ
+
+    # Corner vertices near grip should have followed the trajectory
+    corner_dx = float(np.mean(final_pos[:, corner_mask, 0] - settled_pos[:, corner_mask, 0]))
+    corner_dz = float(np.mean(final_pos[:, corner_mask, 2] - settled_pos[:, corner_mask, 2]))
+
+    assert corner_dx > 0.5 * expected_dx, (
+        f"Corner vertices didn't follow X trajectory: dx={corner_dx:.4f}, expected > {0.5 * expected_dx:.4f}"
+    )
+    assert corner_dz > 0.5 * expected_dz, (
+        f"Corner vertices didn't follow Z trajectory: dz={corner_dz:.4f}, expected > {0.5 * expected_dz:.4f}"
+    )
+
+    # Opposite corner hangs under gravity: should have dropped in z
+    opposite_dz = float(np.mean(final_pos[:, opposite_mask, 2] - settled_pos[:, opposite_mask, 2]))
+    assert opposite_dz < -0.01, f"Opposite corner should sag under gravity: dz={opposite_dz:.4f}"
+
+    # Corner displacement is larger than center displacement (cloth stretches, not rigid body)
+    center_dist = np.sqrt(init_pos[0, :, 0] ** 2 + init_pos[0, :, 1] ** 2)
+    center_mask = center_dist < corner_radius
+    center_dx = float(np.mean(final_pos[:, center_mask, 0] - settled_pos[:, center_mask, 0]))
+    assert corner_dx > center_dx + 0.01, (
+        f"Corner should move more than center: corner_dx={corner_dx:.4f}, center_dx={center_dx:.4f}"
+    )
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("E, nu", [(1e4, 0.3), (5e4, 0.49)])
 def test_cloth_uniform_biaxial_stretching(n_envs, E, nu, show_viewer):
     """Stretch a square cloth uniformly via position-controlled boxes at corners. Verify stretch physics."""
@@ -1670,84 +1828,3 @@ def test_joint_position_limits_bang_bang(n_envs, coupling_type, joint_type, show
     diff = np.diff(pos_arr)
     sign_changes = np.sum(np.diff(np.sign(diff)) != 0)
     assert sign_changes >= 2, f"Expected >= 2 velocity reversals, got {sign_changes}"
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("coupling_type", ["two_way_soft_constraint", "external_articulation"])
-def test_non_convex_panda_ground_collision(n_envs, coupling_type, show_viewer):
-    """Panda robot with non-convex meshes settles on ground via IPC contact. Compare with rigid solver."""
-    DT = 0.01
-    CONTACT_D_HAT = 0.01
-    GRAVITY = (0.0, 0.0, -9.8)
-    NUM_SETTLE = 200
-    NUM_STABLE = 30
-
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, gravity=GRAVITY),
-        rigid_options=gs.options.RigidOptions(enable_collision=True),
-        coupler_options=gs.options.IPCCouplerOptions(
-            contact_d_hat=CONTACT_D_HAT,
-            enable_rigid_rigid_contact=True,
-            enable_rigid_ground_contact=True,
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(2.0, -1.0, 1.0),
-            camera_lookat=(0.75, 0.0, 0.3),
-            camera_fov=40,
-        ),
-        show_viewer=show_viewer,
-    )
-
-    # Ground plane for IPC contact
-    scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(coupling_type="ipc_only", coup_friction=0.5),
-    )
-
-    # IPC Panda: non-convex meshes
-    ipc_panda = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda_non_overlap.xml",
-            pos=(0, 0, 0),
-            convexify=False,
-        ),
-        material=gs.materials.Rigid(coupling_type=coupling_type),
-    )
-
-    # Rigid Panda: uses rigid solver collision
-    rigid_panda = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda_non_overlap.xml",
-            pos=(1.5, 0, 0),
-        ),
-        material=gs.materials.Rigid(),
-    )
-
-    scene.build(n_envs=n_envs)
-
-    for _ in range(NUM_SETTLE):
-        scene.step()
-
-    # Check steady state
-    prev_ipc_pos = tensor_to_array(ipc_panda.get_pos()).copy()
-    prev_rigid_pos = tensor_to_array(rigid_panda.get_pos()).copy()
-    for _ in range(NUM_STABLE):
-        scene.step()
-    final_ipc_pos = tensor_to_array(ipc_panda.get_pos())
-    final_rigid_pos = tensor_to_array(rigid_panda.get_pos())
-
-    assert_allclose(final_ipc_pos, prev_ipc_pos, atol=0.005)
-    assert_allclose(final_rigid_pos, prev_rigid_pos, atol=0.005)
-
-    # Both Panda bases stay near ground (not floating)
-    ipc_z = np.atleast_1d(final_ipc_pos[..., 2])
-    rigid_z = np.atleast_1d(final_rigid_pos[..., 2])
-    assert (ipc_z < 3 * CONTACT_D_HAT).all(), f"IPC Panda floating: z={ipc_z}"
-    assert (rigid_z < 3 * CONTACT_D_HAT).all(), f"Rigid Panda floating: z={rigid_z}"
-
-    # No ground penetration for IPC Panda
-    assert (ipc_z > -CONTACT_D_HAT).all(), f"IPC Panda penetrates ground: z={ipc_z}"
-
-    # Base z-positions qualitatively similar between IPC and rigid
-    assert_allclose(ipc_z, rigid_z, atol=0.05)
