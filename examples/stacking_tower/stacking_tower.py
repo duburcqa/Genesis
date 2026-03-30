@@ -28,24 +28,24 @@ RING_HEIGHT = 0.020
 RINGS_ORDER = (0, 1, 2, 3, 5, 4)
 BALL_HEIGHT = 0.0215
 POLE_HEIGHT = 0.145
-TABLE_HEIGHT = 0.74
+TABLE_HEIGHT = 0.755
 TOWER_OFFSET_X = -0.02
 
 LIFT_CLEARANCE = 0.02
 BALL_TABLE_OFFSET_Y = -0.18
 
-APPROACH_DIST = 0.06
+APPROACH_DIST = 0.05
 GRASP_DEPTH = 0.03
 
 # Maximum per-DOF acceleration (rad/s²)
-MAX_ACCEL = 12.0  # rad/s²
+MAX_ACCEL = 13.0  # rad/s²
 # Velocity overhead factor: accounts for the acceleration/deceleration ramps that reduce the effective cruise velocity
 # in trapezoidal-like velocity profiles.
 VEL_OVERHEAD = 1.875
 
 GRIPPER_OPEN = 0.045
 GRIPPER_CLOSE = 0.0
-GRIPPER_DURATION = 0.2  # seconds (full open/close); scaled by travel fraction for partial moves
+GRIPPER_DURATION = 0.3  # seconds (full open/close); scaled by travel fraction for partial moves
 
 RING_COLORS = [
     (0.95, 0.95, 0.95, 1.0),
@@ -281,7 +281,7 @@ def add_robot(scene, args):
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             file=os.path.join(ROBOT_DIR, "urdf/marvin_pika.urdf"),
-            pos=(-0.6, 0, 1.08),
+            pos=(-0.6, 0, 1.1),
             fixed=True,
             merge_fixed_links=False,
         ),
@@ -306,7 +306,7 @@ def add_robot(scene, args):
 def build_scene(args):
     gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="64" if args.cpu else "32", performance_mode=False)
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
+        sim_options=gs.options.SimOptions(dt=0.005, substeps=1),
         rigid_options=gs.options.RigidOptions(
             constraint_solver=gs.constraint_solver.Newton,
             constraint_timeconst=0.005,
@@ -423,9 +423,11 @@ def _resolve_waypoint_to_qpos(waypoint, robot, timeline, prev_qpos, scene=None):
             quat=quat,
             init_qpos=prev_qpos,
             dofs_idx_local=ik_dofs,
+            pos_tol=1e-4,
+            rot_tol=1e-4,
             return_error=True,
         )
-        assert (error.abs() < 2e-3).all(), f"IK failed: {error}"
+        assert (error.abs() < 2e-4).all(), f"IK failed: {error}"
         if scene is not None and scene.viewer is not None:
             robot.set_dofs_position(qpos)
             scene.viewer.update(force=True)
@@ -514,7 +516,8 @@ def evaluate_trajectory(scene, robot, timelines, cache_path=None):
             chunk_key = (tl_idx, id(chunk)) if not all_joint else (-1, id(chunk))
             entry_chunk_key[(tl_idx, id(chunk))] = chunk_key
             if chunk_key in chunk_data:
-                prev_qpos = chunk_data[chunk_key]["ik"][-1]
+                cd = chunk_data[chunk_key]
+                prev_qpos = cd["ik"][-1] if cd["ik"] else cd["init_qpos"]
                 continue
 
             # Resolve waypoints to qpos, expanding plan_path connectors. A leading connector
@@ -585,7 +588,8 @@ def evaluate_trajectory(scene, robot, timelines, cache_path=None):
                 if other_ck == chunk_key:
                     break
                 if other_ck is not None and other_ck in chunk_data:
-                    init_qpos_for_chunk = chunk_data[other_ck]["ik"][-1]
+                    other_cd = chunk_data[other_ck]
+                    init_qpos_for_chunk = other_cd["ik"][-1] if other_cd["ik"] else other_cd["init_qpos"]
             if init_qpos_for_chunk is None:
                 init_qpos_for_chunk = global_init_qpos.clone()
 
@@ -839,7 +843,7 @@ def _build_trajectory(ik_solutions, init_qpos, segment_steps, connectors=None, t
         # Max per-DOF direction change
         dir_change = (dir_after - dir_before).abs().max().item()
         if dir_change > 1e-6:
-            # v_arc * dir_change ≤ MAX_ACCEL * dt  →  v_arc ≤ max_dv / dir_change
+            # v_arc * dir_change ≤ MAX_ACCEL * dt  ->  v_arc ≤ max_dv / dir_change
             v_limit = max_dv / dir_change
             v_max[bnd - 1] = min(v_max[bnd - 1].item(), v_limit)
             v_max[bnd] = min(v_max[bnd].item(), v_limit)
@@ -887,14 +891,14 @@ def _build_trajectory(ik_solutions, init_qpos, segment_steps, connectors=None, t
 
 
 def wp_ball_grab(link_name, ball_z):
-    direction = _direction(110.0)
+    direction = _direction(135.0)
     center = np.array([TOWER_OFFSET_X, 0.0])
     approach_xy = center - APPROACH_DIST * direction
     grasp_xy = center + GRASP_DEPTH * direction
     grab_z = ball_z
     lift_z = TABLE_HEIGHT + BASE_HEIGHT + POLE_HEIGHT + LIFT_CLEARANCE
     mid_z = (grab_z + lift_z) / 2
-    orientation = _quat(115.0, 110.0)
+    orientation = _quat(115.0, 135.0)
     return [
         Connector(max_joint_vel=1.3),
         EndEffectorWaypoint(pos=[*approach_xy, grab_z], quat=orientation, link_name=link_name),
@@ -908,10 +912,10 @@ def wp_ball_grab(link_name, ball_z):
 
 def wp_ball_place(link_name):
     table_pos = np.array([0.0, BALL_TABLE_OFFSET_Y, TABLE_HEIGHT + BALL_HEIGHT])
-    direction = _direction(110.0)
+    direction = _direction(135.0)
     place_xy = table_pos[:2] + GRASP_DEPTH * direction
     lift_z = TABLE_HEIGHT + BASE_HEIGHT + POLE_HEIGHT + LIFT_CLEARANCE
-    orientation = _quat(115.0, 110.0)
+    orientation = _quat(115.0, 135.0)
     return [
         Connector(max_joint_vel=1.0),
         EndEffectorWaypoint(pos=[TOWER_OFFSET_X, -0.05, lift_z], quat=orientation, link_name=link_name),
@@ -974,8 +978,8 @@ def wp_insert(link_name, roll, yaw_approach, use_shift=False):
         ]
     wps += [
         EndEffectorWaypoint(pos=[*insert_xy, pole_z + RING_HEIGHT / 2 + 0.015], quat=orientation, link_name=link_name),
-        # align → lower: gap filled by chunk default_connector (careful insertion speed)
-        EndEffectorWaypoint(pos=[*insert_xy, pole_z + RING_HEIGHT / 2], quat=orientation, link_name=link_name),
+        # align -> lower: gap filled by chunk default_connector (careful insertion speed)
+        EndEffectorWaypoint(pos=[*insert_xy, pole_z + RING_HEIGHT / 2 - 0.008], quat=orientation, link_name=link_name),
         Connector(max_joint_vel=1.3),
         EndEffectorWaypoint(pos=[*insert_xy, pole_z + 0.045], quat=orientation, link_name=link_name),
         Connector(max_joint_vel=1.3),
@@ -987,9 +991,9 @@ def wp_insert(link_name, roll, yaw_approach, use_shift=False):
 def wp_ball_pickup(link_name):
     """Pick ball from table. Chunk default_connector should be 1.0 rad/s."""
     table_pos = np.array([0.0, BALL_TABLE_OFFSET_Y, TABLE_HEIGHT + BALL_HEIGHT])
-    direction = _direction(110.0)
+    direction = _direction(135.0)
     pickup_xy = table_pos[:2] + GRASP_DEPTH * direction
-    orientation = _quat(115.0, 110.0)
+    orientation = _quat(115.0, 135.0)
     return [
         Connector(max_joint_vel=2.0),  # fast approach above ball
         EndEffectorWaypoint(pos=[*pickup_xy, table_pos[2] + 0.02], quat=orientation, link_name=link_name),
@@ -1005,7 +1009,7 @@ def wp_push(link_name, yaw_approach, push_distance):
     side = np.sign(np.cos(yaw_rad))
     push_z = TABLE_HEIGHT + BASE_HEIGHT + RING_HEIGHT
     start_z = TABLE_HEIGHT + BASE_HEIGHT + POLE_HEIGHT + 0.03
-    orientation = _quat(120.0, 40.0)
+    orientation = _quat(135.0, 35.0)
     return [
         # Fast approach and descent use chunk default (2.0)
         EndEffectorWaypoint(pos=[TOWER_OFFSET_X + 0.01, side * 0.06, start_z], quat=orientation, link_name=link_name),
@@ -1042,24 +1046,23 @@ def build_timelines(tower_top_z, left_arm, right_arm):
 
     init_chunk_right = Chunk(
         entries=[
-            JointWaypoint(qpos=right_zero_qpos, dofs_idx_local=right_arm.arm_dofs_idx_local),
-            Connector(method="plan_path", avoid_collision=True),
+            # JointWaypoint(qpos=right_zero_qpos, dofs_idx_local=right_arm.arm_dofs_idx_local),
+            # Connector(method="plan_path", avoid_collision=True),
             JointWaypoint(qpos=right_ready_qpos, dofs_idx_local=right_arm.arm_dofs_idx_local),
         ],
     )
-
     init_chunk_left = Chunk(
         entries=[
-            JointWaypoint(qpos=left_zero_qpos, dofs_idx_local=left_arm.arm_dofs_idx_local),
-            Connector(method="plan_path", avoid_collision=True),
+            # JointWaypoint(qpos=left_zero_qpos, dofs_idx_local=left_arm.arm_dofs_idx_local),
+            # Connector(method="plan_path", avoid_collision=True),
             JointWaypoint(qpos=left_ready_qpos, dofs_idx_local=left_arm.arm_dofs_idx_local),
         ],
     )
 
-    right_roll, right_yaw = 96.0, 140.0
-    left_roll, left_yaw = 96.0, 40.0
+    right_roll, right_yaw = 96.0, 135.0
+    left_roll, left_yaw = 96.0, 35.0
 
-    # Insertion connectors: careful descent speed for align→lower gap in wp_insert
+    # Insertion connectors: careful descent speed for align->lower gap in wp_insert
     ring_insert_conn = Connector(max_joint_vel=0.45)
     ball_insert_conn = Connector(max_joint_vel=0.38)
 
@@ -1068,19 +1071,19 @@ def build_timelines(tower_top_z, left_arm, right_arm):
     r_ball_place = Chunk(entries=wp_ball_place(right_arm.tip_link_name))
     r_ring_grab = Chunk(
         # Grasp at ring center height; +0.009 compensates for contact settling
-        entries=wp_grab(right_arm.tip_link_name, right_roll, right_yaw, tower_top_z - 1.5 * RING_HEIGHT + 0.009),
+        entries=wp_grab(right_arm.tip_link_name, right_roll, right_yaw, tower_top_z - RING_HEIGHT),
     )
     r_ring_ins = Chunk(
         entries=wp_insert(right_arm.tip_link_name, right_roll, right_yaw), default_connector=ring_insert_conn
     )
     r_ball_pick = Chunk(entries=wp_ball_pickup(right_arm.tip_link_name), default_connector=Connector(max_joint_vel=1.0))
     r_ball_ins = Chunk(
-        entries=wp_insert(right_arm.tip_link_name, right_roll, right_yaw, use_shift=True),
+        entries=wp_insert(right_arm.tip_link_name, 110, right_yaw, use_shift=True),
         default_connector=ball_insert_conn,
     )
     r_return = Chunk(
         entries=[
-            Connector(max_joint_vel=2.4),
+            Connector(max_joint_vel=2.2),
             JointWaypoint(qpos=right_ready_qpos, dofs_idx_local=right_arm.arm_dofs_idx_local),
         ],
     )
@@ -1088,7 +1091,7 @@ def build_timelines(tower_top_z, left_arm, right_arm):
     # Left arm chunks
     l_ring_grab = Chunk(
         # Grasp at ring center height; +0.002 compensates for contact settling
-        entries=wp_grab(left_arm.tip_link_name, left_roll, left_yaw, tower_top_z - RING_HEIGHT / 2 + 0.002),
+        entries=wp_grab(left_arm.tip_link_name, left_roll, left_yaw, tower_top_z),
     )
     l_ring_ins = Chunk(
         entries=wp_insert(left_arm.tip_link_name, left_roll, left_yaw), default_connector=ring_insert_conn
@@ -1128,7 +1131,7 @@ def build_timelines(tower_top_z, left_arm, right_arm):
             TimelineEntry(chunk=init_chunk_left),
             TimelineEntry(chunk=l_ring_grab, sync=ChunkSync(chunk=r_ball_place, fraction=-0.2)),
             TimelineEntry(chunk=l_ring_ins, sync=ChunkSync(chunk=r_ring_grab, fraction=0.85)),
-            TimelineEntry(chunk=l_push, sync=ChunkSync(chunk=r_ball_ins, fraction=0.2)),
+            TimelineEntry(chunk=l_push, sync=ChunkSync(chunk=r_ball_ins, fraction=0.3)),
             TimelineEntry(chunk=l_return),
         ],
     )
@@ -1158,7 +1161,7 @@ def build_timelines(tower_top_z, left_arm, right_arm):
             ),
             TimelineEntry(  # open to release ring on pole
                 chunk=_grip_chunk(GRIPPER_OPEN, r_grip),
-                sync=WaypointSync(waypoint=r_ring_ins.waypoints[1]),
+                sync=WaypointSync(waypoint=r_ring_ins.waypoints[1], offset=grip_close_offset),
             ),
             TimelineEntry(  # close to pick ball from table
                 chunk=_grip_chunk(GRIPPER_CLOSE, r_grip),
@@ -1182,15 +1185,15 @@ def build_timelines(tower_top_z, left_arm, right_arm):
             ),
             TimelineEntry(  # open to release ring on pole
                 chunk=_grip_chunk(GRIPPER_OPEN, l_grip),
-                sync=WaypointSync(waypoint=l_ring_ins.waypoints[1]),
+                sync=WaypointSync(waypoint=l_ring_ins.waypoints[1], offset=grip_close_offset),
             ),
             TimelineEntry(  # close for push contact
                 chunk=_grip_chunk(GRIPPER_CLOSE, l_grip),
-                sync=ChunkSync(chunk=l_push, fraction=0.10 * 1.05),
+                sync=WaypointSync(waypoint=l_ring_ins.waypoints[-1]),
             ),
             TimelineEntry(  # open after return
                 chunk=_grip_chunk(GRIPPER_OPEN, l_grip),
-                sync=ChunkSync(chunk=l_return, fraction=0.40 * 1.05),
+                sync=ChunkSync(chunk=l_return, fraction=0.42),
             ),
         ],
     )
@@ -1215,7 +1218,6 @@ def main():
 
     timelines = build_timelines(tower_top_z, left_arm, right_arm)
     plan = evaluate_trajectory(scene, robot, timelines, cache_path=MOTION_CACHE_PATH)
-    scene.reset()
 
     cam.start_recording()
     video_path = os.path.join(os.path.dirname(__file__), "stacking_tower.mp4")
@@ -1232,6 +1234,7 @@ def main():
 
     time_dilation = args.time_dilation
     tracking_failure = None
+    robot.set_dofs_position(positions[0])
     try:
         for step_idx in range(n_steps):
             target_pos = positions[step_idx]

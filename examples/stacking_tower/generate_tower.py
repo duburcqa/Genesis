@@ -20,30 +20,25 @@ logger = logging.getLogger(__name__)
 
 ########################## dimensions (meters) ##########################
 
-BASE_DIAMETER = 0.105  # 10.5 cm
-BASE_HEIGHT = 0.020  # 2.0 cm
+BASE_DIAMETER = 0.105
+BASE_HEIGHT = 0.02037
 
-POLE_DIAMETER = 0.015  # 1.5 cm
-POLE_HEIGHT = 0.145  # 14.5 cm (from top of base to top of pole)
+POLE_DIAMETER = 0.015
+POLE_HEIGHT = 0.14425  # from top of base to top of pole
 
-RING_HEIGHT = 0.020  # 2.0 cm each
-RING_HOLE_DIAMETER = 0.017  # 1.7 cm (1 mm clearance per side around pole)
-RING_LARGEST_DIAMETER = 0.095  # 9.5 cm
-RING_SMALLEST_DIAMETER = 0.050  # 5.0 cm
-NUM_RINGS = 6
+RING_HEIGHT = 0.02037
+RING_HOLE_DIAMETER = 0.016  # 1 mm clearance per side around pole
+RING_DIAMETERS = (0.0953, 0.0854, 0.075, 0.0653, 0.0584, 0.050)
 
-BALL_DIAMETER = 0.045  # 4.5 cm
-BALL_HOLE_DEPTH = 0.025  # 2.5 cm
+BALL_DIAMETER = 0.045
+BALL_HOLE_DEPTH = 0.025
 
-FILLET_RADIUS = 0.003  # 3 mm fillet on ring edges
+FILLET_RADIUS = 0.003  # fillet on ring edges
 FILLET_ARC_POINTS = 8
 
 CYLINDER_SECTIONS = 64
 COLLISION_WEDGES = 16  # number of convex wedges for ring collision meshes
-
-########################## derived ##########################
-
-RING_DIAMETERS = np.linspace(RING_LARGEST_DIAMETER, RING_SMALLEST_DIAMETER, NUM_RINGS)
+COLLISION_THICKNESS_MARGIN = 0.001  # Extra thickness to compensate for penetration at rest
 
 RING_COLORS = [
     ("white", (0.95, 0.95, 0.95, 1.0)),
@@ -222,7 +217,8 @@ def _ring_collision_mesh(outer_radius, inner_radius, height, fillet_r=FILLET_RAD
 
 ########################## URDF generation ##########################
 
-_URDF_TEMPLATE = textwrap.dedent("""\
+_URDF_TEMPLATE = textwrap.dedent(
+    """\
     <?xml version="1.0" encoding="utf-8"?>
     <robot name="{name}">
       <link name="world"/>
@@ -246,7 +242,8 @@ _URDF_TEMPLATE = textwrap.dedent("""\
         </collision>
       </link>
     </robot>
-""")
+"""
+)
 
 
 def _write_urdf(name, vis_file, coll_file):
@@ -294,8 +291,8 @@ def generate_base_pole():
     _write_urdf("base_pole", vis_file, vis_file)
 
     logger.info(
-        f"  base_pole  | base {BASE_DIAMETER * 100:.1f}cm"
-        f" + pole {POLE_DIAMETER * 100:.1f}cm x {POLE_HEIGHT * 100:.1f}cm"
+        f"  base_pole  | base {BASE_DIAMETER * 100:.2f}cm"
+        f" + pole {POLE_DIAMETER * 100:.2f}cm x {POLE_HEIGHT * 100:.2f}cm"
     )
 
 
@@ -312,15 +309,15 @@ def generate_ring(index, outer_diameter):
     vis_file = f"{name}.glb"
     _auto_smooth(ring).export(os.path.join(ASSETS_DIR, vis_file))
 
-    # Collision: pre-decomposed convex wedges (1mm thicker to compensate for penetration at rest)
+    # Collision: pre-decomposed convex wedges (thicker to compensate for penetration at rest)
     coll_file = f"{name}_coll.glb"
-    coll_scene = _ring_collision_mesh(outer_r, inner_r, RING_HEIGHT + 0.001)
+    coll_scene = _ring_collision_mesh(outer_r, inner_r, RING_HEIGHT + COLLISION_THICKNESS_MARGIN)
     coll_scene.export(os.path.join(ASSETS_DIR, coll_file))
 
     _write_urdf(name, vis_file, coll_file)
 
     color_name = RING_COLORS[index][0]
-    logger.info(f"  {name}     | diam {outer_diameter * 100:.1f}cm | {color_name}")
+    logger.info(f"  {name}     | diam {outer_diameter * 100:.2f}cm | {color_name}")
 
 
 def generate_ball():
@@ -402,7 +399,7 @@ def generate_ball():
 
     _write_urdf("ball", vis_file, coll_file)
 
-    logger.info(f"  ball       | diam {BALL_DIAMETER * 100:.1f}cm | hole {BALL_HOLE_DEPTH * 100:.1f}cm deep")
+    logger.info(f"  ball       | diam {BALL_DIAMETER * 100:.2f}cm | hole {BALL_HOLE_DEPTH * 100:.2f}cm deep")
 
 
 ########################## main ##########################
