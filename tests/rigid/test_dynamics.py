@@ -431,10 +431,13 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, n_envs, show_viewer, tol):
+@pytest.mark.parametrize("box_position", ["after", "between"])
+def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_position, n_envs, show_viewer, tol):
     # A tree merged across two entities by attach() has the same mass matrix, LTDL factor, and one-step dynamics as
     # the single equivalent entity built as one model, and a dynamically-independent free body stays block-diagonal
-    # from it. The equivalent entity is added first so its mass block is the contiguous prefix [0, n).
+    # from it. The equivalent entity is added first so its mass block is the contiguous prefix [0, n). A free body
+    # placed 'between' the arm and hand makes the merged pair's DOFs non-contiguous until attach reorders them, while
+    # 'after' is already contiguous.
     mono_xml, arm_xml, hand_xml = merged_arm_hand_models
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -452,17 +455,19 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, n_envs, 
             file=arm_xml,
         ),
     )
+    box_morph = gs.morphs.Box(
+        size=(0.1, 0.1, 0.1),
+        pos=(0.0, 2.0, 1.0),
+    )
+    if box_position == "between":
+        box = scene.add_entity(box_morph)
     hand = scene.add_entity(
         gs.morphs.MJCF(
             file=hand_xml,
         ),
     )
-    box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 2.0, 1.0),
-        ),
-    )
+    if box_position == "after":
+        box = scene.add_entity(box_morph)
     hand.attach(arm, "tip")
     scene.build(n_envs=n_envs)
 

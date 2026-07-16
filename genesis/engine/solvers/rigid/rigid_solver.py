@@ -346,7 +346,175 @@ class RigidSolver(KinematicSolver):
 
         return entity
 
+    @staticmethod
+    def _index_shifts(starts, total, order):
+        """Per-entity shift that relays one index space to a new entity order while keeping it contiguous.
+
+        starts[pos] is entity pos's current start in the space; the space is currently contiguous, so an entity's block
+        size is the gap to the next start (the last runs to total). Returns shifts[pos] = new_start - old_start, where
+        new starts accumulate block sizes in the given order.
+        """
+        n = len(starts)
+        ascending = sorted(range(n), key=starts.__getitem__)
+        sizes = [0] * n
+        for i, pos in enumerate(ascending):
+            next_start = starts[ascending[i + 1]] if i + 1 < n else total
+            sizes[pos] = next_start - starts[pos]
+        shifts = [0] * n
+        running = 0
+        for pos in order:
+            shifts[pos] = running - starts[pos]
+            running += sizes[pos]
+        return shifts
+
+    def _reorder_merged_entities(self):
+        """Renumber entities so each merged kinematic tree (a parent and the entities attached into it; see
+        RigidEntity.attach) is contiguous in every index space.
+
+        attach() grafts a child into the parent's tree but leaves it a separate entity, which can end up numbered
+        non-adjacently when a third entity was created between them. The mass-block partition, the per-tree
+        composite-inertia fold, and the per-block factor all require each tree's DOFs and links contiguous, so an
+        attached child's whole entity block is moved immediately after its parent's and any entity in between shifts up.
+        The solver derives links/joints/geoms from the entity list in order, so reordering the list makes iteration
+        position the new global index; every stored absolute index is shifted to match, and cross-entity link
+        references (parent_idx/root_idx) and joint/link-based equalities are remapped. Scenes without attach() reduce to
+        the identity.
+        """
+        entities = self._entities
+        n_entities = len(entities)
+
+        link_entity_pos = {link.idx: pos for pos, entity in enumerate(entities) for link in entity.links}
+        parent_pos = {
+            pos: link_entity_pos[entity.base_link.parent_idx]
+            for pos, entity in enumerate(entities)
+            if entity.is_attached
+        }
+        if not parent_pos:
+            return
+
+        # Target order: a depth-first walk of the attach forest, roots in creation order and each attached child right
+        # after its parent, so every merged group is consecutive with parents before children.
+        children_pos = [[] for _ in range(n_entities)]
+        for child, parent in parent_pos.items():
+            children_pos[parent].append(child)
+        order = []
+        stack = [pos for pos in range(n_entities - 1, -1, -1) if pos not in parent_pos]
+        while stack:
+            pos = stack.pop()
+            order.append(pos)
+            stack.extend(reversed(children_pos[pos]))
+        if order == list(range(n_entities)):
+            return
+
+        # Per-entity shift (new start minus old start) in each index space, so that space stays contiguous under the
+        # new order; adding it to the entity start and to every sub-object index in the same space relays that entity's
+        # whole block. Block sizes are gaps between consecutive current starts, so no per-entity size accessor is
+        # needed. new_pos maps an old position to its position in the new order.
+        shift_link = self._index_shifts([entity._link_start for entity in entities], self.n_links, order)
+        shift_joint = self._index_shifts([entity._joint_start for entity in entities], self.n_joints, order)
+        shift_dof = self._index_shifts([entity._dof_start for entity in entities], self.n_dofs, order)
+        shift_q = self._index_shifts([entity._q_start for entity in entities], self.n_qs, order)
+        shift_geom = self._index_shifts([entity._geom_start for entity in entities], self.n_geoms, order)
+        shift_cell = self._index_shifts([entity._cell_start for entity in entities], self.n_cells, order)
+        shift_vert = self._index_shifts([entity._vert_start for entity in entities], self.n_verts, order)
+        shift_face = self._index_shifts([entity._face_start for entity in entities], self.n_faces, order)
+        shift_edge = self._index_shifts([entity._edge_start for entity in entities], self.n_edges, order)
+        shift_vgeom = self._index_shifts([entity._vgeom_start for entity in entities], self.n_vgeoms, order)
+        shift_vvert = self._index_shifts([entity._vvert_start for entity in entities], self.n_vverts, order)
+        shift_vface = self._index_shifts([entity._vface_start for entity in entities], self.n_vfaces, order)
+        shift_cvvert = self._index_shifts(
+            [entity._custom_vvert_start for entity in entities], self.n_custom_vverts, order
+        )
+        shift_cvface = self._index_shifts(
+            [entity._custom_vface_start for entity in entities], self.n_custom_vfaces, order
+        )
+        shift_vs_free = self._index_shifts(
+            [entity._free_verts_state_start for entity in entities], self.n_free_verts, order
+        )
+        shift_vs_fixed = self._index_shifts(
+            [entity._fixed_verts_state_start for entity in entities], self.n_fixed_verts, order
+        )
+        shift_equality = self._index_shifts([entity._equality_start for entity in entities], self.n_equalities, order)
+        new_pos = [0] * n_entities
+        for i, pos in enumerate(order):
+            new_pos[pos] = i
+
+        old_to_new_link = {}
+        old_to_new_joint = {}
+        for pos, entity in enumerate(entities):
+            for link in entity.links:
+                old_to_new_link[link.idx] = link.idx + shift_link[pos]
+            for joint in entity.joints:
+                old_to_new_joint[joint.idx] = joint.idx + shift_joint[pos]
+
+        for pos, entity in enumerate(entities):
+            entity._link_start += shift_link[pos]
+            entity._joint_start += shift_joint[pos]
+            entity._dof_start += shift_dof[pos]
+            entity._q_start += shift_q[pos]
+            entity._geom_start += shift_geom[pos]
+            entity._cell_start += shift_cell[pos]
+            entity._vert_start += shift_vert[pos]
+            entity._face_start += shift_face[pos]
+            entity._edge_start += shift_edge[pos]
+            entity._vgeom_start += shift_vgeom[pos]
+            entity._vvert_start += shift_vvert[pos]
+            entity._vface_start += shift_vface[pos]
+            entity._custom_vvert_start += shift_cvvert[pos]
+            entity._custom_vface_start += shift_cvface[pos]
+            entity._free_verts_state_start += shift_vs_free[pos]
+            entity._fixed_verts_state_start += shift_vs_fixed[pos]
+            entity._equality_start += shift_equality[pos]
+            entity._idx_in_solver = new_pos[pos]
+
+            for link in entity.links:
+                link._idx = old_to_new_link[link._idx]
+                if link._parent_idx != -1:
+                    link._parent_idx = old_to_new_link[link._parent_idx]
+                link._root_idx = old_to_new_link[link._root_idx]
+                link._entity_idx_in_solver = new_pos[pos]
+                link._joint_start += shift_joint[pos]
+                link._geom_start += shift_geom[pos]
+                link._cell_start += shift_cell[pos]
+                link._vert_start += shift_vert[pos]
+                link._face_start += shift_face[pos]
+                link._edge_start += shift_edge[pos]
+                link._vgeom_start += shift_vgeom[pos]
+                link._vvert_start += shift_vvert[pos]
+                link._vface_start += shift_vface[pos]
+                # The verts-state pool is split by link fixedness (see RigidLink build).
+                link_in_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                link._verts_state_start += shift_vs_fixed[pos] if link_in_fixed_pool else shift_vs_free[pos]
+            for joint in entity.joints:
+                joint._idx += shift_joint[pos]
+                joint._dof_start += shift_dof[pos]
+                joint._q_start += shift_q[pos]
+            for geom in entity.geoms:
+                geom._idx += shift_geom[pos]
+                geom._cell_start += shift_cell[pos]
+                geom._vert_start += shift_vert[pos]
+                geom._face_start += shift_face[pos]
+                geom._edge_start += shift_edge[pos]
+                geom_in_fixed_pool = geom.link.is_fixed and not entity._batch_fixed_verts
+                geom._verts_state_start += shift_vs_fixed[pos] if geom_in_fixed_pool else shift_vs_free[pos]
+            for vgeom in entity.vgeoms:
+                vgeom._idx += shift_vgeom[pos]
+                vgeom._vvert_start += shift_vvert[pos]
+                vgeom._vface_start += shift_vface[pos]
+
+        for equality in self.equalities:
+            if equality.type == gs.EQUALITY_TYPE.JOINT:
+                equality._eq_obj1id = old_to_new_joint[equality._eq_obj1id]
+                equality._eq_obj2id = old_to_new_joint[equality._eq_obj2id]
+            else:
+                equality._eq_obj1id = old_to_new_link[equality._eq_obj1id]
+                equality._eq_obj2id = old_to_new_link[equality._eq_obj2id]
+
+        self._entities = gs.List(entities[pos] for pos in order)
+
     def build(self):
+        self._reorder_merged_entities()
+
         self._n_geoms = self.n_geoms
         self._n_cells = self.n_cells
         self._n_verts = self.n_verts
