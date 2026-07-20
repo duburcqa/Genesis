@@ -1664,7 +1664,6 @@ class DofsState:
     vel_prev: qd.Tensor
     vel_next: qd.Tensor
     acc: qd.Tensor
-    acc_bw: qd.Tensor
     acc_smooth: qd.Tensor
     acc_smooth_bw: qd.Tensor
     qf_smooth: qd.Tensor
@@ -1701,7 +1700,6 @@ def get_dofs_state(solver):
         vel_prev=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         vel_next=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         acc=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
         acc_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
         qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
