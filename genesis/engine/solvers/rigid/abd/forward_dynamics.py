@@ -1073,6 +1073,72 @@ def func_torque_and_passive_force(
                             )
 
 
+@qd.kernel(fastcache=True)
+def kernel_tendon_force(
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
+    dofs_state: array_class.DofsState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    n_tendons = tendons_info.wrap_start.shape[0]
+    n_dofs = dofs_state.ctrl_mode.shape[0]
+    _B = dofs_state.ctrl_mode.shape[1]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        dofs_state.qf_tendon[i_d, i_b] = gs.qd_float(0.0)
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t, i_b in qd.ndrange(n_tendons, _B):
+        wrap_start = tendons_info.wrap_start[i_t]
+        wrap_end = wrap_start + tendons_info.n_wraps[i_t]
+
+        # Tendon length and rate. 'dofs_state.pos = qpos - qpos0', so the absolute length is recovered by adding the
+        # tendon length at the reference configuration 'length0'.
+        length = tendons_info.length0[i_t]
+        velocity = gs.qd_float(0.0)
+        for i_w in range(wrap_start, wrap_end):
+            i_d = tendons_info.wrap_dof[i_w]
+            coef = tendons_info.wrap_coef[i_w]
+            length += coef * dofs_state.pos[i_d, i_b]
+            velocity += coef * dofs_state.vel[i_d, i_b]
+        tendons_state.length[i_t, i_b] = length
+        tendons_state.velocity[i_t, i_b] = velocity
+
+        # Passive force: damping and (deadband) spring along the tendon.
+        force = -tendons_info.damping[i_t] * velocity
+        if tendons_info.stiffness[i_t] > gs.qd_float(0.0):
+            lower = tendons_info.spring_length[i_t][0]
+            upper = tendons_info.spring_length[i_t][1]
+            if length < lower:
+                force += -tendons_info.stiffness[i_t] * (length - lower)
+            elif length > upper:
+                force += -tendons_info.stiffness[i_t] * (length - upper)
+
+        # Actuator force, following the per-DOF control model but driven by the tendon length and rate.
+        ctrl_mode = tendons_state.ctrl_mode[i_t, i_b]
+        act_force = gs.qd_float(0.0)
+        if ctrl_mode == gs.CTRL_MODE.FORCE:
+            act_force = tendons_state.ctrl_force[i_t, i_b]
+        elif ctrl_mode == gs.CTRL_MODE.VELOCITY:
+            act_force = -tendons_info.act_bias[i_t][2] * (tendons_state.ctrl_vel[i_t, i_b] - velocity)
+        elif ctrl_mode == gs.CTRL_MODE.POSITION:
+            act_force = (
+                tendons_info.act_gain[i_t] * (tendons_state.ctrl_pos[i_t, i_b] - length)
+                + tendons_info.act_bias[i_t][0]
+                + (tendons_info.act_gain[i_t] + tendons_info.act_bias[i_t][1]) * length
+                + tendons_info.act_bias[i_t][2] * (velocity - tendons_state.ctrl_vel[i_t, i_b])
+            )
+        act_force = qd.math.clamp(act_force, tendons_info.act_force_range[i_t][0], tendons_info.act_force_range[i_t][1])
+
+        # Distribute the scalar tendon force to the coupled DOFs through the tendon coefficients.
+        total_force = force + act_force
+        for i_w in range(wrap_start, wrap_end):
+            i_d = tendons_info.wrap_dof[i_w]
+            qd.atomic_add(dofs_state.qf_tendon[i_d, i_b], tendons_info.wrap_coef[i_w] * total_force)
+
+
 @qd.func
 def func_update_acc(
     update_cacc: qd.template(),
@@ -1302,8 +1368,10 @@ def func_bias_force(
                     ) + dofs_state.cdof_vel[i_d, i_b].dot(links_state.cfrc_vel[i_l, i_b])
 
                     dofs_state.force[i_d, i_b] = (
-                        dofs_state.qf_passive[i_d, i_b] - dofs_state.qf_bias[i_d, i_b] + dofs_state.qf_applied[i_d, i_b]
-                        # + self.dofs_state.qf_actuator[i_d, i_b]
+                        dofs_state.qf_passive[i_d, i_b]
+                        - dofs_state.qf_bias[i_d, i_b]
+                        + dofs_state.qf_applied[i_d, i_b]
+                        + dofs_state.qf_tendon[i_d, i_b]
                     )
 
                     dofs_state.qf_smooth[i_d, i_b] = dofs_state.force[i_d, i_b]

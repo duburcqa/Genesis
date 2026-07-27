@@ -1440,6 +1440,7 @@ class DofsState:
     qf_passive: qd.Tensor
     qf_actuator: qd.Tensor
     qf_applied: qd.Tensor
+    qf_tendon: qd.Tensor
     act_length: qd.Tensor
     pos: qd.Tensor
     vel: qd.Tensor
@@ -1477,6 +1478,7 @@ def get_dofs_state(solver):
         qf_passive=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         qf_actuator=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         qf_applied=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        qf_tendon=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         act_length=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
@@ -2028,6 +2030,78 @@ def get_equalities_info(solver):
     )
 
 
+# =========================================== Tendons ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class TendonsInfo:
+    # Per-tendon static topology and parameters, indexed by tendon index.
+    wrap_start: qd.Tensor
+    n_wraps: qd.Tensor
+    stiffness: qd.Tensor
+    damping: qd.Tensor
+    frictionloss: qd.Tensor
+    invweight: qd.Tensor
+    length0: qd.Tensor
+    spring_length: qd.Tensor
+    limited: qd.Tensor
+    length_range: qd.Tensor
+    sol_params: qd.Tensor
+    act_gain: qd.Tensor
+    act_bias: qd.Tensor
+    act_force_range: qd.Tensor
+    # Per-wrap arrays of the linear joint combination, indexed by wrap index.
+    wrap_dof: qd.Tensor
+    wrap_coef: qd.Tensor
+
+
+def get_tendons_info(solver):
+    shape = (solver.n_tendons_,)
+    wrap_shape = (solver.n_tendon_wraps_,)
+
+    return TendonsInfo(
+        wrap_start=V(dtype=gs.qd_int, shape=shape),
+        n_wraps=V(dtype=gs.qd_int, shape=shape),
+        stiffness=V(dtype=gs.qd_float, shape=shape),
+        damping=V(dtype=gs.qd_float, shape=shape),
+        frictionloss=V(dtype=gs.qd_float, shape=shape),
+        invweight=V(dtype=gs.qd_float, shape=shape),
+        length0=V(dtype=gs.qd_float, shape=shape),
+        spring_length=V(dtype=gs.qd_vec2, shape=shape),
+        limited=V(dtype=gs.qd_int, shape=shape),
+        length_range=V(dtype=gs.qd_vec2, shape=shape),
+        sol_params=V(dtype=gs.qd_vec7, shape=shape),
+        act_gain=V(dtype=gs.qd_float, shape=shape),
+        act_bias=V(dtype=gs.qd_vec3, shape=shape),
+        act_force_range=V(dtype=gs.qd_vec2, shape=shape),
+        wrap_dof=V(dtype=gs.qd_int, shape=wrap_shape),
+        wrap_coef=V(dtype=gs.qd_float, shape=wrap_shape),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class TendonsState:
+    length: qd.Tensor
+    velocity: qd.Tensor
+    ctrl_force: qd.Tensor
+    ctrl_pos: qd.Tensor
+    ctrl_vel: qd.Tensor
+    ctrl_mode: qd.Tensor
+
+
+def get_tendons_state(solver):
+    shape = (solver.n_tendons_, solver._B)
+
+    return TendonsState(
+        length=V(dtype=gs.qd_float, shape=shape),
+        velocity=V(dtype=gs.qd_float, shape=shape),
+        ctrl_force=V(dtype=gs.qd_float, shape=shape),
+        ctrl_pos=V(dtype=gs.qd_float, shape=shape),
+        ctrl_vel=V(dtype=gs.qd_float, shape=shape),
+        ctrl_mode=V(dtype=gs.qd_int, shape=shape),
+    )
+
+
 # =========================================== EntitiesInfo ===========================================
 
 
@@ -2194,6 +2268,8 @@ class DataManager:
             self.fixed_verts_state = get_fixed_verts_state(solver)
 
             self.equalities_info = get_equalities_info(solver)
+            self.tendons_info = get_tendons_info(solver)
+            self.tendons_state = get_tendons_state(solver)
 
         if solver._static_rigid_sim_config.requires_grad:
             # Data structures required for backward pass

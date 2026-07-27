@@ -2,7 +2,6 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from itertools import chain
-from bisect import bisect_right
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
@@ -208,11 +207,6 @@ def parse_xml(morph, surface):
     # Build model from XML (either URDF or MJCF)
     mj = build_model(morph.file, not morph.visualization, morph.default_armature, merge_fixed_links, links_to_keep)
 
-    # We have another more informative warning later so we suppress this one
-    # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
-    # if mj.ntendon:
-    #     gs.logger.warning("(MJCF) Tendon not supported")
-
     # Parse all geometries grouped by parent joint (or world)
     links_g_infos = parse_geoms(mj, morph.scale, surface, morph.file)
 
@@ -225,7 +219,10 @@ def parse_xml(morph, surface):
     # Parsing all equality constraints
     eqs_info = parse_equalities(mj, morph.scale)
 
-    return l_infos, links_j_infos, links_g_infos, eqs_info
+    # Parsing all tendons
+    tendons_info = parse_tendons(mj, morph.scale)
+
+    return l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info
 
 
 def parse_link(mj, i_l, scale):
@@ -350,22 +347,12 @@ def parse_link(mj, i_l, scale):
         j_info["dofs_act_bias"] = np.zeros((n_dofs, 3), dtype=gs.np_float)
         j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (n_dofs, 1))
 
+        # Tendon-driven actuators are parsed separately in 'parse_tendons'.
         i_a = -1
         try:
             actuator_mask_j = (mj.actuator_trnid[:, 0] == i_j) & (mj.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT)
             if actuator_mask_j.any():
                 (i_a,) = np.nonzero(actuator_mask_j)[0]
-            else:  # No actuator directly attached to the joint via mechanical transmission
-                # Special case where all tendon are attached to joint. Very common in practice.
-                if (mj.wrap_type == mujoco.mjtWrap.mjWRAP_JOINT).all():
-                    if i_j in mj.wrap_objid:
-                        (m,) = np.nonzero(mj.wrap_objid == i_j)[0]
-                        i_t = bisect_right(np.cumsum(mj.tendon_num), m)
-                        actuator_mask_t = (mj.actuator_trnid[:, 0] == i_t) & (
-                            mj.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON
-                        )
-                        (i_a,) = np.nonzero(actuator_mask_t)[0]
-                        gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
         except ValueError:
             gs.logger.warning(f"(MJCF) Failed to parse actuator for joint `{j_info['name']}`.")
 
@@ -794,3 +781,74 @@ def parse_equalities(mj, scale):
         eqs_info.append(eq_info)
 
     return eqs_info
+
+
+def parse_tendons(mj, scale):
+    # Only fixed tendons (a scalar length defined as a linear combination of joint coordinates) are supported. Spatial
+    # tendons (geometric paths through sites, pulleys and wrapping geometries) are not implemented yet.
+    tendons_info = []
+    for i_t in range(mj.ntendon):
+        mj_tendon = mj.tendon(i_t)
+
+        wrap_start = mj.tendon_adr[i_t]
+        wrap_end = wrap_start + mj.tendon_num[i_t]
+        if not (mj.wrap_type[wrap_start:wrap_end] == mujoco.mjtWrap.mjWRAP_JOINT).all():
+            gs.raise_exception(
+                f"(MJCF) Spatial tendons are not supported yet (tendon '{mj_tendon.name}'). Only fixed tendons "
+                "(linear combinations of joint coordinates) are currently supported."
+            )
+
+        joints_name = []
+        for i_w in range(wrap_start, wrap_end):
+            name_start = mj.name_jntadr[mj.wrap_objid[i_w]]
+            joint_name, *_ = mj.names[name_start:].decode("utf-8").split("\x00")
+            joints_name.append(joint_name)
+
+        tendon_info = dict()
+        tendon_info["name"] = mj_tendon.name
+        tendon_info["joints_name"] = tuple(joints_name)
+        tendon_info["coefs"] = np.array(mj.wrap_prm[wrap_start:wrap_end], dtype=gs.np_float)
+
+        # Passive and limit parameters. The length-related quantities are scaled by 'scale', which is exact for the
+        # common case of a uniform model scale and for tendons spanning prismatic joints only.
+        tendon_info["stiffness"] = float(mj.tendon_stiffness[i_t])
+        tendon_info["damping"] = float(mj.tendon_damping[i_t])
+        tendon_info["frictionloss"] = float(mj.tendon_frictionloss[i_t])
+        tendon_info["length0"] = float(mj.tendon_length0[i_t]) * scale
+        tendon_info["spring_length"] = np.array(mj.tendon_lengthspring[i_t], dtype=gs.np_float) * scale
+        tendon_info["limited"] = bool(mj.tendon_limited[i_t])
+        tendon_info["length_range"] = np.array(mj.tendon_range[i_t], dtype=gs.np_float) * scale
+        tendon_info["sol_params"] = np.concatenate((mj.tendon_solref_lim[i_t], mj.tendon_solimp_lim[i_t]))
+
+        # Tendon-driven actuator, if any. MuJoCo general actuator model (gaintype=FIXED, biastype=AFFINE):
+        #   force = gainprm[0] * ctrl + biasprm[0] + biasprm[1] * length + biasprm[2] * velocity
+        tendon_info["act_gain"] = 0.0
+        tendon_info["act_bias"] = np.zeros((3,), dtype=gs.np_float)
+        tendon_info["act_force_range"] = np.array([-np.inf, np.inf], dtype=gs.np_float)
+        actuator_mask = (mj.actuator_trnid[:, 0] == i_t) & (mj.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON)
+        if actuator_mask.any():
+            (i_a,) = np.nonzero(actuator_mask)[0]
+            if mj.actuator_dyntype[i_a] != mujoco.mjtDyn.mjDYN_NONE:
+                gs.logger.warning("(MJCF) Actuator internal dynamics not supported")
+            gaintype = mujoco.mjtGain(mj.actuator_gaintype[i_a])
+            if gaintype != mujoco.mjtGain.mjGAIN_FIXED:
+                gs.logger.warning(f"(MJCF) Actuator control gain of type '{gaintype}' not supported")
+            biastype = mujoco.mjtBias(mj.actuator_biastype[i_a])
+            if biastype not in (mujoco.mjtBias.mjBIAS_NONE, mujoco.mjtBias.mjBIAS_AFFINE):
+                gs.logger.warning(f"(MJCF) Actuator control bias of type '{biastype}' not supported")
+
+            gear = mj.actuator_gear[i_a, 0]
+            tendon_info["act_gain"] = float(gear * mj.actuator_gainprm[i_a, 0] * scale**3)
+            if biastype == mujoco.mjtBias.mjBIAS_AFFINE:
+                tendon_info["act_bias"] = (gear * mj.actuator_biasprm[i_a, :3] * scale**3).astype(gs.np_float)
+
+            if mj.actuator_forcelimited[i_a]:
+                tendon_info["act_force_range"] = np.array(mj.actuator_forcerange[i_a], dtype=gs.np_float)
+            if mj.actuator_ctrllimited[i_a] and biastype == mujoco.mjtBias.mjBIAS_NONE:
+                tendon_info["act_force_range"] = np.minimum(
+                    tendon_info["act_force_range"], gear * mj.actuator_ctrlrange[i_a]
+                )
+
+        tendons_info.append(tendon_info)
+
+    return tendons_info

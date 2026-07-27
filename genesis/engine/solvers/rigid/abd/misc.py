@@ -672,6 +672,76 @@ def kernel_init_equality_fields(
             equalities_info.sol_params[i_eq, i_b][j] = equalities_sol_params[i_eq, j]
 
 
+@qd.kernel(fastcache=True)
+def kernel_init_tendon_fields(
+    tendons_wrap_start: qd.types.ndarray(),
+    tendons_n_wraps: qd.types.ndarray(),
+    tendons_stiffness: qd.types.ndarray(),
+    tendons_damping: qd.types.ndarray(),
+    tendons_frictionloss: qd.types.ndarray(),
+    tendons_length0: qd.types.ndarray(),
+    tendons_spring_length: qd.types.ndarray(),
+    tendons_limited: qd.types.ndarray(),
+    tendons_length_range: qd.types.ndarray(),
+    tendons_sol_params: qd.types.ndarray(),
+    tendons_act_gain: qd.types.ndarray(),
+    tendons_act_bias: qd.types.ndarray(),
+    tendons_act_force_range: qd.types.ndarray(),
+    tendons_wrap_dof: qd.types.ndarray(),
+    tendons_wrap_coef: qd.types.ndarray(),
+    # Quadrants variables
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
+    dofs_info: array_class.DofsInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    n_tendons = tendons_wrap_start.shape[0]
+    n_wraps = tendons_wrap_dof.shape[0]
+    _B = tendons_state.length.shape[1]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_w in range(n_wraps):
+        tendons_info.wrap_dof[i_w] = tendons_wrap_dof[i_w]
+        tendons_info.wrap_coef[i_w] = tendons_wrap_coef[i_w]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t in range(n_tendons):
+        tendons_info.wrap_start[i_t] = tendons_wrap_start[i_t]
+        tendons_info.n_wraps[i_t] = tendons_n_wraps[i_t]
+        tendons_info.stiffness[i_t] = tendons_stiffness[i_t]
+        tendons_info.damping[i_t] = tendons_damping[i_t]
+        tendons_info.frictionloss[i_t] = tendons_frictionloss[i_t]
+        tendons_info.length0[i_t] = tendons_length0[i_t]
+        tendons_info.limited[i_t] = tendons_limited[i_t]
+        tendons_info.act_gain[i_t] = tendons_act_gain[i_t]
+        for j in qd.static(range(2)):
+            tendons_info.spring_length[i_t][j] = tendons_spring_length[i_t, j]
+            tendons_info.length_range[i_t][j] = tendons_length_range[i_t, j]
+            tendons_info.act_force_range[i_t][j] = tendons_act_force_range[i_t, j]
+        for j in qd.static(range(3)):
+            tendons_info.act_bias[i_t][j] = tendons_act_bias[i_t, j]
+        for j in qd.static(range(7)):
+            tendons_info.sol_params[i_t][j] = tendons_sol_params[i_t, j]
+
+        # Diagonal approximation of the tendon inertia: sum_i coef_i^2 * invweight(dof_i). The DOF inverse weights are
+        # env-independent, so the first env is representative.
+        invweight = gs.qd_float(0.0)
+        for i_w in range(tendons_wrap_start[i_t], tendons_wrap_start[i_t] + tendons_n_wraps[i_t]):
+            i_d = tendons_wrap_dof[i_w]
+            I_d = [i_d, 0] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+            invweight += tendons_wrap_coef[i_w] ** 2 * dofs_info.invweight[I_d]
+        tendons_info.invweight[i_t] = invweight
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t, i_b in qd.ndrange(n_tendons, _B):
+        tendons_state.length[i_t, i_b] = gs.qd_float(0.0)
+        tendons_state.velocity[i_t, i_b] = gs.qd_float(0.0)
+        tendons_state.ctrl_force[i_t, i_b] = gs.qd_float(0.0)
+        tendons_state.ctrl_pos[i_t, i_b] = gs.qd_float(0.0)
+        tendons_state.ctrl_vel[i_t, i_b] = gs.qd_float(0.0)
+        tendons_state.ctrl_mode[i_t, i_b] = gs.CTRL_MODE.FORCE
+
+
 # --------------------------------------------------------------------------------------
 # External force kernels
 # --------------------------------------------------------------------------------------

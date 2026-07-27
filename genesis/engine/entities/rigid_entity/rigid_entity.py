@@ -26,6 +26,7 @@ from genesis.engine.states.entities import RigidEntityState
 
 from ..base_entity import Entity
 from .rigid_equality import RigidEquality
+from .rigid_tendon import RigidTendon
 from .rigid_geom import RigidGeom
 from .rigid_joint import RigidJoint
 from .rigid_link import KinematicLink, RigidLink, compose_inertial_properties
@@ -164,7 +165,7 @@ class KinematicEntity(Entity):
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
                 # Parse variant scene file
                 morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                v_l_infos, v_links_j_infos, v_links_g_infos, _, _ = self._parse_scene(morph, self._surface)
 
                 # Validate that the variant has the same joint structure as the primary
                 if len(v_l_infos) != n_links:
@@ -517,9 +518,11 @@ class KinematicEntity(Entity):
         # First, it would happen when loading visual meshes having supported format (i.e. Collada files '.dae').
         # Second, it does not take into account URDF 'mimic' joint constraints. However, it does a better job at
         # initialized undetermined physics parameters.
+        # Tendons are only parsed for MJCF files. The legacy URDF parser and Mujoco's URDF parser both ignore them.
+        tendons_info = []
         if isinstance(morph, gs.morphs.MJCF):
             # Mujoco's unified MJCF+URDF parser systematically for MJCF files
-            l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, surface)
+            l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info = mju.parse_xml(morph, surface)
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
@@ -530,7 +533,7 @@ class KinematicEntity(Entity):
             try:
                 # Mujoco's unified MJCF+URDF parser for URDF files.
                 # Note that Mujoco URDF parser completely ignores equality constraints.
-                l_infos_mj, links_j_infos_mj, links_g_infos_mj, _ = mju.parse_xml(morph_, surface)
+                l_infos_mj, links_j_infos_mj, links_g_infos_mj, _, _ = mju.parse_xml(morph_, surface)
 
                 # Unset link inertial properties that are actually undefined to force recomputation by genesis
                 if not morph._enable_mujoco_compatibility:
@@ -773,10 +776,10 @@ class KinematicEntity(Entity):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
-        return l_infos, links_j_infos, links_g_infos, eqs_info
+        return l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info
 
     def _load_scene(self, morph, surface):
-        l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, surface)
+        l_infos, links_j_infos, links_g_infos, _eqs_info, _tendons_info = self._parse_scene(morph, surface)
 
         # Add (link, joints, geoms) tuples sequentially
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
@@ -2031,6 +2034,7 @@ class RigidEntity(KinematicEntity):
         custom_vvert_start=0,
         custom_vface_start=0,
         equality_start=0,
+        tendon_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
         name: str | None = None,
@@ -2043,6 +2047,7 @@ class RigidEntity(KinematicEntity):
         self._free_verts_state_start = free_verts_state_start
         self._fixed_verts_state_start = fixed_verts_state_start
         self._equality_start = equality_start
+        self._tendon_start = tendon_start
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._visualize_contact: bool = visualize_contact
@@ -2157,6 +2162,7 @@ class RigidEntity(KinematicEntity):
 
     def _load_model(self):
         self._equalities = gs.List()
+        self._tendons = gs.List()
         self._requires_jac_and_IK = self._morph.requires_jac_and_IK
         self._is_local_collision_mask = isinstance(self._morph, gs.morphs.MJCF)
 
@@ -2165,7 +2171,7 @@ class RigidEntity(KinematicEntity):
     def _load_scene(self, morph, surface):
         from genesis.engine.couplers import IPCCoupler
 
-        l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
+        l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info = self._parse_scene(morph, surface)
 
         # Make sure that the entity is not object
         if (
@@ -2188,6 +2194,10 @@ class RigidEntity(KinematicEntity):
                 data=eq_info["data"],
                 sol_params=eq_info["sol_params"],
             )
+
+        # Add tendons sequentially
+        for tendon_info in tendons_info:
+            self._add_tendon(**tendon_info)
 
     def _build(self):
         self._n_geoms = self.n_geoms
@@ -2379,6 +2389,54 @@ class RigidEntity(KinematicEntity):
         )
         self._equalities.append(equality)
         return equality
+
+    def _add_tendon(
+        self,
+        name,
+        joints_name,
+        coefs,
+        stiffness,
+        damping,
+        frictionloss,
+        length0,
+        spring_length,
+        limited,
+        length_range,
+        sol_params,
+        act_gain,
+        act_bias,
+        act_force_range,
+    ):
+        dofs_idx = []
+        for joint_name in joints_name:
+            joint = self.get_joint(joint_name)
+            if joint.n_dofs != 1:
+                gs.raise_exception(
+                    f"Fixed tendon '{name}' couples joint '{joint_name}' with {joint.n_dofs} DoFs. Only single-DoF "
+                    "joints (revolute, prismatic) are supported in fixed tendons."
+                )
+            dofs_idx.append(joint.dof_start)
+
+        tendon = RigidTendon(
+            entity=self,
+            name=name,
+            idx=self.n_tendons + self._tendon_start,
+            dofs_idx=tuple(dofs_idx),
+            coefs=coefs,
+            stiffness=stiffness,
+            damping=damping,
+            frictionloss=frictionloss,
+            length0=length0,
+            spring_length=spring_length,
+            limited=limited,
+            length_range=length_range,
+            sol_params=sol_params,
+            act_gain=act_gain,
+            act_bias=act_bias,
+            act_force_range=act_force_range,
+        )
+        self._tendons.append(tendon)
+        return tendon
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Jacobian & IK ------------------------------------
@@ -4312,6 +4370,33 @@ class RigidEntity(KinematicEntity):
     def equalities(self):
         """The list of equality constraints (`RigidEquality`) in the entity."""
         return self._equalities
+
+    @property
+    def n_tendons(self):
+        """The number of tendons in the entity."""
+        return len(self._tendons)
+
+    @property
+    def tendon_start(self):
+        """The index of the entity's first RigidTendon in the scene."""
+        return self._tendon_start
+
+    @property
+    def tendon_end(self):
+        """The index of the entity's last RigidTendon in the scene *plus one*."""
+        return self._tendon_start + self.n_tendons
+
+    @property
+    def tendons(self):
+        """The list of tendons (`RigidTendon`) in the entity."""
+        return self._tendons
+
+    def get_tendon(self, name):
+        """Get a tendon (`RigidTendon`) of the entity by name."""
+        for tendon in self._tendons:
+            if tendon.name == name:
+                return tendon
+        gs.raise_exception(f"Tendon not found for name: {name}.")
 
     @property
     def is_free(self) -> bool:

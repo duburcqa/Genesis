@@ -56,6 +56,7 @@ from .abd.misc import (
     kernel_init_vgeom_fields,
     kernel_init_entity_fields,
     kernel_init_equality_fields,
+    kernel_init_tendon_fields,
     kernel_apply_links_external_force,
     kernel_apply_links_external_torque,
     kernel_update_geoms_render_T,
@@ -113,6 +114,7 @@ from .abd.forward_dynamics import (
     func_vel_at_point,
     kernel_compute_mass_matrix,
     kernel_forward_dynamics,
+    kernel_tendon_force,
     kernel_update_acc,
     kernel_compute_qacc,
     kernel_forward_dynamics_without_qacc,
@@ -150,6 +152,10 @@ from .abd.accessor import (
     kernel_control_dofs_velocity,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
+    kernel_control_tendons_force,
+    kernel_control_tendons_velocity,
+    kernel_control_tendons_position,
+    kernel_set_tendons_sol_params,
     kernel_get_links_vel,
     kernel_get_links_acc,
     kernel_get_dofs_control_force,
@@ -330,9 +336,11 @@ class RigidSolver(KinematicSolver):
         self._n_faces = self.n_faces
         self._n_edges = self.n_edges
         self._n_equalities = self.n_equalities
+        self._n_tendons = self.n_tendons
 
         self._geoms = self.geoms
         self._equalities = self.equalities
+        self._tendons = self.tendons
 
         self.n_geoms_ = max(1, self.n_geoms)
         self.n_cells_ = max(1, self.n_cells)
@@ -342,6 +350,8 @@ class RigidSolver(KinematicSolver):
         self.n_free_verts_ = max(1, self.n_free_verts)
         self.n_fixed_verts_ = max(1, self.n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
+        self.n_tendons_ = max(1, self.n_tendons)
+        self.n_tendon_wraps_ = max(1, sum(len(tendon.dofs_idx) for tendon in self.tendons))
 
         # Resolve precision-dependent tolerance default
         if self._options.tolerance is None:
@@ -356,6 +366,7 @@ class RigidSolver(KinematicSolver):
         self._init_equality_fields()
 
         self._init_invweight_and_meaninertia(force_update=False)
+        self._init_tendon_fields()
         self._func_update_geoms(self._scene._envs_idx, force_update_fixed_geoms=True)
 
         self._init_collider()
@@ -949,6 +960,49 @@ class RigidSolver(KinematicSolver):
             if self._use_contact_island:
                 gs.logger.warn("contact island is not supported for equality constraints yet")
 
+    def _init_tendon_fields(self):
+        self.tendons_info = self.data_manager.tendons_info
+        self.tendons_state = self.data_manager.tendons_state
+        if self.n_tendons > 0:
+            tendons = self.tendons
+
+            wrap_start, n_wraps, wrap_dof, wrap_coef = [], [], [], []
+            offset = 0
+            for tendon in tendons:
+                wrap_start.append(offset)
+                n_wraps.append(len(tendon.dofs_idx))
+                wrap_dof.extend(tendon.dofs_idx)
+                wrap_coef.extend(tendon.coefs)
+                offset += len(tendon.dofs_idx)
+
+            tendons_sol_params = np.array([tendon.sol_params for tendon in tendons], dtype=gs.np_float)
+            _sanitize_sol_params(tendons_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+
+            kernel_init_tendon_fields(
+                tendons_wrap_start=np.array(wrap_start, dtype=gs.np_int),
+                tendons_n_wraps=np.array(n_wraps, dtype=gs.np_int),
+                tendons_stiffness=np.array([tendon._stiffness for tendon in tendons], dtype=gs.np_float),
+                tendons_damping=np.array([tendon._damping for tendon in tendons], dtype=gs.np_float),
+                tendons_frictionloss=np.array([tendon._frictionloss for tendon in tendons], dtype=gs.np_float),
+                tendons_length0=np.array([tendon._length0 for tendon in tendons], dtype=gs.np_float),
+                tendons_spring_length=np.array([tendon._spring_length for tendon in tendons], dtype=gs.np_float),
+                tendons_limited=np.array([tendon._limited for tendon in tendons], dtype=gs.np_int),
+                tendons_length_range=np.array([tendon._length_range for tendon in tendons], dtype=gs.np_float),
+                tendons_sol_params=tendons_sol_params,
+                tendons_act_gain=np.array([tendon._act_gain for tendon in tendons], dtype=gs.np_float),
+                tendons_act_bias=np.array([tendon._act_bias for tendon in tendons], dtype=gs.np_float),
+                tendons_act_force_range=np.array([tendon._act_force_range for tendon in tendons], dtype=gs.np_float),
+                tendons_wrap_dof=np.array(wrap_dof, dtype=gs.np_int),
+                tendons_wrap_coef=np.array(wrap_coef, dtype=gs.np_float),
+                # Quadrants variables
+                tendons_info=self.tendons_info,
+                tendons_state=self.tendons_state,
+                dofs_info=self.dofs_info,
+                static_rigid_sim_config=self._static_rigid_sim_config,
+            )
+            if self._use_contact_island:
+                gs.logger.warn("contact island is not supported for tendon limit and friction constraints yet")
+
     def _init_collider(self):
         self.collider = Collider(self)
 
@@ -997,6 +1051,17 @@ class RigidSolver(KinematicSolver):
                 rigid_global_info=self._rigid_global_info,
                 rigid_adjoint_cache=self._rigid_adjoint_cache,
                 static_rigid_sim_config=self._static_rigid_sim_config,
+            )
+
+        # Tendon length, rate and generalized force are computed from the current generalized state, before the fused
+        # forward dynamics kernel accumulates 'qf_tendon' into the total DOF force.
+        if self._n_tendons > 0:
+            kernel_tendon_force(
+                self.tendons_info,
+                self.tendons_state,
+                self.dofs_state,
+                self._rigid_global_info,
+                self._static_rigid_sim_config,
             )
 
         kernel_step_1(
@@ -2383,6 +2448,56 @@ class RigidSolver(KinematicSolver):
             position, velocity, dofs_idx, envs_idx, self.dofs_state, self._static_rigid_sim_config
         )
 
+    def control_tendons_force(self, force, tendons_idx=None, envs_idx=None):
+        force, tendons_idx, envs_idx = self._sanitize_io_variables(
+            force, tendons_idx, self.n_tendons, "tendons_idx", envs_idx, skip_allocation=True
+        )
+        if self.n_envs == 0:
+            force = force[None]
+        kernel_control_tendons_force(force, tendons_idx, envs_idx, self.tendons_state, self._static_rigid_sim_config)
+
+    def control_tendons_velocity(self, velocity, tendons_idx=None, envs_idx=None):
+        velocity, tendons_idx, envs_idx = self._sanitize_io_variables(
+            velocity, tendons_idx, self.n_tendons, "tendons_idx", envs_idx, skip_allocation=True
+        )
+        if self.n_envs == 0:
+            velocity = velocity[None]
+        kernel_control_tendons_velocity(
+            velocity, tendons_idx, envs_idx, self.tendons_state, self._static_rigid_sim_config
+        )
+
+    def control_tendons_position(self, position, tendons_idx=None, envs_idx=None):
+        position, tendons_idx, envs_idx = self._sanitize_io_variables(
+            position, tendons_idx, self.n_tendons, "tendons_idx", envs_idx, skip_allocation=True
+        )
+        if self.n_envs == 0:
+            position = position[None]
+        kernel_control_tendons_position(
+            position, tendons_idx, envs_idx, self.tendons_state, self._static_rigid_sim_config
+        )
+
+    def get_tendons_length(self, tendons_idx=None, envs_idx=None):
+        """Get the current length of the selected tendons."""
+        tensor = qd_to_torch(self.tendons_state.length, envs_idx, tendons_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
+
+    def get_tendons_velocity(self, tendons_idx=None, envs_idx=None):
+        """Get the current length rate of the selected tendons."""
+        tensor = qd_to_torch(self.tendons_state.velocity, envs_idx, tendons_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
+
+    def get_tendons_sol_params(self, tendons_idx=None):
+        """Get the constraint solver parameters of the selected tendons."""
+        return qd_to_torch(self.tendons_info.sol_params, tendons_idx, transpose=True, copy=True)
+
+    def set_tendons_sol_params(self, sol_params, tendons_idx=None):
+        """Set the constraint solver parameters of the selected tendons."""
+        sol_params, tendons_idx, _ = self._sanitize_io_variables(
+            sol_params, tendons_idx, self.n_tendons, "tendons_idx", None, (7,), batched=False, skip_allocation=True
+        )
+        _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+        kernel_set_tendons_sol_params(sol_params, tendons_idx, self.tendons_info, self._static_rigid_sim_config)
+
     def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
         """
         Get constraint solver parameters.
@@ -2811,6 +2926,18 @@ class RigidSolver(KinematicSolver):
         if self.is_built:
             return self._equalities
         return gs.List(equality for entity in self._entities for equality in entity.equalities)
+
+    @property
+    def n_tendons(self):
+        if self.is_built:
+            return self._n_tendons
+        return sum(entity.n_tendons for entity in self._entities)
+
+    @property
+    def tendons(self):
+        if self.is_built:
+            return self._tendons
+        return gs.List(tendon for entity in self._entities for tendon in entity.tendons)
 
 
 @qd.kernel(fastcache=True)
