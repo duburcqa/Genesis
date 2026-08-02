@@ -11,10 +11,22 @@ class MPR:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
+        # CCD_EPS is dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
+        # ignore the scene scale: sin^2 of an angle against a Gram determinant, slack in parameter space against a
+        # barycentric coordinate, a relative magnitude in the support tie-break. That last use sets the single-precision
+        # value, which has to match the rounding a dot product accumulates - flop count times unit roundoff, near 1e-6:
+        # above it distinct vertices merge, below it a genuine tie goes unseen, and only the upper bound is exercised by
+        # a test. Reproducing the reference behaviour keeps the value tuned against it.
+        ccd_eps = 1e-10
+        if gs.qd_float == qd.f32:
+            ccd_eps = 1e-5 if rigid_solver._enable_mujoco_compatibility else 1e-6
+
+        # CCD_TOLERANCE is a length: how close the portal must come to the surface to count as having reached it, and
+        # the magnitude the ray is re-seeded with when the two geoms' centres coincide. CCD_ITERATIONS bounds that
+        # refinement, which is not otherwise guaranteed to terminate.
+
         self._mpr_info = array_class.get_mpr_info(
-            # Relative tolerance of the geometric degeneracy tests: every comparison scales it by the magnitudes of
-            # its operands, making the tests dimensionless and scene-scale-invariant.
-            CCD_EPS=1e-5 if gs.qd_float == qd.f32 else 1e-10,
+            CCD_EPS=ccd_eps,
             CCD_TOLERANCE=1e-6,
             CCD_ITERATIONS=50,
         )
@@ -172,7 +184,7 @@ def support_driver(
             # Terrain is global and not perturbed, so we use the global state directly
             v, _ = support_field._func_support_prism(i_b, direction, collider_state)
     else:
-        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, collider_info)
+        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, dyn_info, collider_info)
 
     return v
 

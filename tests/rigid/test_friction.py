@@ -240,8 +240,12 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
     for _ in range(2000):
         scene.step()
 
-    # The floating boxes stay static
-    assert_allclose([box.get_pos() for box in floating_boxes], boxes_pos_init, atol=5e-3)
+    # The floating boxes stay static. The shear they have to resist is lateral, so that is what the creep bound is for
+    # and it is held two orders tighter than the drift along it; how far the stack settles is set instead by the
+    # compliance of its contacts, which follows how many points share each patch, and gets its own bound.
+    drift = torch.stack([box.get_pos() - box_pos_init for box, box_pos_init in zip(floating_boxes, boxes_pos_init)])
+    assert_allclose(drift[..., :2], 0.0, atol=1e-4)
+    assert_allclose(drift[..., 2], 0.0, atol=1e-2)
 
     # Drop the force below the theoretical threshold; the stack loses its brace and falls
     floating_boxes[-1].control_dofs_force(0.95 * force_x, dofs_idx_local=0)
@@ -521,9 +525,11 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     )
 
 
-@pytest.mark.required
+# Only the mesh box is required: it reaches the support of a face normal through the sampled table, the harder of the
+# two paths, and holding it also holds the primitive.
+@pytest.mark.parametrize("is_box_mesh", [False, pytest.param(True, marks=pytest.mark.required)])
 @pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
-def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
+def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewer, tol):
     N_ENVS = 8
     FRICTION = 0.5
     BOX_POS = (0.0, 0.0, 0.05)
@@ -532,17 +538,24 @@ def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
     # leaves the box on the verge of lifting a leading corner, where each env's own rounding decides where it settles.
     PILLAR_HEIGHT = 0.04
     PILLAR_RADIUS = 0.0316
-    # Pusher path in the box's local frame; the shared +y offset gives the push a lever arm that spins the box.
-    PUSH_START_LOCAL = (-0.15, 0.03, 0.5 * PILLAR_HEIGHT)
-    PUSH_END_LOCAL = (0.02, 0.03, 0.5 * PILLAR_HEIGHT)
+    # Pusher path in the box's local frame; the shared +y offset gives the push a lever arm that spins the box. The
+    # height presses the pillar a definite amount into the ground rather than resting it exactly on the plane: held
+    # exactly there, its ground contact sits on the boundary of existing at all, and which side of that boundary each
+    # env lands on is decided by rounding, so the envs disagree over how many contacts the scene has.
+    PUSH_PRESS = 2e-4
+    PUSH_START_LOCAL = (-0.15, 0.03, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
+    PUSH_END_LOCAL = (0.02, 0.03, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
     # Single precision sets these: one ulp of a coordinate this far off the rotation axis is 1.5e-08, and the contact
     # stiffness carries it into a milli-newton of force, so each bound sits a few times over what rounding alone
-    # reaches. Double precision agrees to 1e-15 throughout, well inside them, and anything that is not rounding - a
+    # reaches. Double precision agrees to 1e-12 throughout, well inside them, and anything that is not rounding - a
     # detection branch reading the world orientation, say - exceeds them by orders of magnitude at either precision.
-    CONTACT_TOL = tol
-    VEL_TOL = 10.0 * tol
-    # Force also carries the stiffness gain, and coplanar contacts of one pair share the load with a null space the
-    # solve may resolve anywhere inside.
+    # Each multiple is a small factor over the worst single-precision spread measured across the backends, the two
+    # array layouts and both box geometries, the mesh box being the demanding one: it presents the wider manifold, so
+    # more contacts share the load and the spread of what each carries grows with them.
+    CONTACT_TOL = 0.5 * tol
+    VEL_TOL = 5.0 * tol
+    # Force carries the stiffness gain on top, and coplanar contacts of one pair share the load with a null space the
+    # solve may resolve anywhere inside, so only their resultant is determined and the bound has to cover the split.
     FORCE_TOL = 1000.0 * tol
     # How far either body may be from the plane: being pressed into it, or lifted by the bouncier contact resolution.
     GROUND_TOL = 5e-3
@@ -556,7 +569,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
             contact_resolution=contact_resolution,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.7, 0.7, 0.45),
+            camera_pos=(0.7, 0.7, 0.8),
             camera_lookat=(0.0, 0.0, 0.05),
         ),
         show_viewer=show_viewer,
@@ -567,14 +580,28 @@ def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
             friction=FRICTION,
         ),
     )
-    box = scene.add_entity(
-        gs.morphs.Box(
+    # The box is swept over both geometries the push can act through, because they reach the support of a face normal -
+    # the direction whose support vertices tie - by different means: the primitive resolves it analytically from the
+    # sign of each component, the mesh reads the sampled table. Either may pick a different one of the tied vertices
+    # for a rotated copy of the same scene, and only sweeping both holds each to the same manifold.
+    box_morph = (
+        gs.morphs.MeshSet(
+            files=(trimesh.creation.box(extents=BOX_SIZE),),
+            pos=BOX_POS,
+        )
+        if is_box_mesh
+        else gs.morphs.Box(
             pos=BOX_POS,
             size=BOX_SIZE,
-        ),
+        )
+    )
+    box = scene.add_entity(
+        box_morph,
         material=gs.materials.Rigid(
             friction=FRICTION,
         ),
+        visualize_contact=True,
+        vis_mode="collision",
     )
     # The pusher is a pillar with a triangular cross-section, so it stands on three corners fixed in its own frame. A
     # circular cross-section rests on a degenerate manifold instead, one whose sampled points follow the world frame,
@@ -587,8 +614,13 @@ def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
         material=gs.materials.Rigid(
             friction=FRICTION,
         ),
+        surface=gs.surfaces.Default(
+            smooth=False,
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
     )
-    scene.build(n_envs=N_ENVS)
+    scene.build(n_envs=N_ENVS, env_spacing=(0.3, 0.3))
 
     yaw = 2.0 * torch.pi * torch.arange(N_ENVS, device=gs.device) / N_ENVS
     yaw_euler = torch.stack((torch.zeros_like(yaw), torch.zeros_like(yaw), yaw), dim=1)
@@ -682,7 +714,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, show_viewer, tol):
 
     # The pusher holds the height and orientation it was commanded to, so the push it applies is the one intended:
     # sinking would bury it in the plane and tilting would lift a corner of its stance clear of it.
-    assert_allclose(pusher.get_pos()[:, 2], 0.5 * PILLAR_HEIGHT, atol=1e-3)
+    assert_allclose(pusher.get_pos()[:, 2], 0.5 * PILLAR_HEIGHT - PUSH_PRESS, atol=1e-3)
     assert_allclose(
         gu.transform_quat_by_quat(pusher.get_quat(), gu.inv_quat(box_quat)), (1.0, 0.0, 0.0, 0.0), atol=1e-3
     )

@@ -49,6 +49,23 @@ class SupportField:
         band = slice(band_start, band_start + band_rows)
         return np.stack((v[:, band], np.stack((x, z, -y), axis=-1)[:, band]))
 
+    def _compute_is_alone(self, vids):
+        """
+        Whether a cell's whole neighbourhood names the vertex it does, for every cell of a geom's two charts.
+
+        The neighbourhood is the one the lookup reads, so the azimuth wraps around and the polar row clamps inside the
+        stored band. A lookup landing on such a cell has nothing to resolve and reads that vertex alone.
+        """
+        band_rows = self._polar_band()[1]
+        vids_grid = vids.reshape((2, self._support_res, band_rows))
+        is_alone = np.ones(vids_grid.shape, dtype=bool)
+        for i_azimuth_shift in (-1, 0, 1):
+            vids_shifted = np.roll(vids_grid, -i_azimuth_shift, axis=1)
+            for i_polar_shift in (-1, 0, 1):
+                rows = np.clip(np.arange(band_rows) + i_polar_shift, 0, band_rows - 1)
+                is_alone &= vids_shifted[:, :, rows] == vids_grid
+        return is_alone.reshape(-1)
+
     def _polar_band(self):
         """First stored polar row of a chart, and how many rows it stores."""
         return self._support_res // 4 - 1, self._support_res // 2 + 3
@@ -63,6 +80,7 @@ class SupportField:
 
         support_v = []
         support_vid = []
+        support_is_alone = []
         support_cell_start = []
         n_support_cells = 0
         if self.solver.n_geoms > 0:
@@ -85,14 +103,17 @@ class SupportField:
                 support_cell_start.append(n_support_cells)
                 support_v.append(support)
                 support_vid.append(max_indices)
+                support_is_alone.append(self._compute_is_alone(max_indices))
                 n_support_cells += support.shape[0]
 
             support_v = np.concatenate(support_v)
             support_vid = np.concatenate(support_vid, dtype=gs.np_int)
+            support_is_alone = np.concatenate(support_is_alone, dtype=gs.np_int)
             support_cell_start = np.array(support_cell_start, dtype=gs.np_int)
         else:
             support_v = np.zeros((1, 3), dtype=gs.np_float)
             support_vid = np.zeros((1,), dtype=gs.np_int)
+            support_is_alone = np.zeros((1,), dtype=gs.np_int)
             support_cell_start = np.zeros((1,), dtype=gs.np_int)
 
         self._support_field_info = array_class.get_support_field_info(
@@ -100,7 +121,12 @@ class SupportField:
         )
 
         _kernel_init_support(
-            support_cell_start, support_v, support_vid, self._support_field_info, self.solver.rigid_config
+            support_cell_start,
+            support_v,
+            support_vid,
+            support_is_alone,
+            self._support_field_info,
+            self.solver.rigid_config,
         )
 
         self._is_active = True
@@ -115,6 +141,7 @@ def _kernel_init_support(
     support_cell_start: qd.types.ndarray(),
     support_v: qd.types.ndarray(),
     support_vid: qd.types.ndarray(),
+    support_is_alone: qd.types.ndarray(),
     support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
 ):
@@ -128,20 +155,26 @@ def _kernel_init_support(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i in range(n_support_cells):
         support_field_info.support_vid[i] = support_vid[i]
+        support_field_info.support_is_alone[i] = support_is_alone[i]
         for j in qd.static(range(3)):
             support_field_info.support_v[i][j] = support_v[i, j]
 
 
 @qd.func
 def _func_support_world(
-    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), collider_info: array_class.ColliderInfo
+    i_g,
+    d,
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
 ):
     """
     support position for a world direction
     """
 
     d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
-    v_, vid = _func_support_mesh(i_g, d_mesh, collider_info)
+    v_, vid = _func_support_mesh(i_g, d_mesh, dyn_info, collider_info)
     v = gu.qd_transform_by_trans_quat_fast(v_, pos, quat)
     return v, v_, vid
 
@@ -172,7 +205,7 @@ def _func_direction_grid_coords(d_mesh, support_res):
 
 
 @qd.func
-def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
+def _func_support_mesh(i_g, d_mesh, dyn_info: array_class.DynInfo, collider_info: array_class.ColliderInfo):
     """
     support point at mesh frame coordinate.
     """
@@ -182,30 +215,53 @@ def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
     vid = 0
 
     band_start, band_rows = support_res // 4 - 1, support_res // 2 + 3
-    i_chart, ii, jj = _func_direction_grid_coords(d_mesh, support_res)
+    i_chart, azimuth_idx, polar_idx = _func_direction_grid_coords(d_mesh, support_res)
     chart_start = gs.qd_int(collider_info.support_field.support_cell_start[i_g] + i_chart * support_res * band_rows)
 
-    for i4 in range(4):
-        i, j = gs.qd_int(0), gs.qd_int(0)
-        if i4 % 2:
-            i = gs.qd_int(qd.math.ceil(ii)) % support_res
-        else:
-            i = gs.qd_int(qd.math.floor(ii)) % support_res
+    # A direction along a geometric feature - a face normal, an axis, the equator between two vertices tied along it -
+    # falls exactly on a sample, and that is where the support is set-valued. Rounding to the nearest sample is stable
+    # to the rounding of the direction, and reading the neighbours either way keeps every tied vertex a candidate.
+    i_azimuth_center = gs.qd_int(qd.math.floor(azimuth_idx + 0.5))
+    i_polar_center = gs.qd_int(qd.math.floor(polar_idx + 0.5))
 
-        if i4 // 2 > 0:
-            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj) - band_start, 0, band_rows - 1))
-        else:
-            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj) - band_start, 0, band_rows - 1))
+    i_azimuth = (i_azimuth_center + support_res) % support_res
+    i_polar = gs.qd_int(qd.math.clamp(i_polar_center - band_start, 0, band_rows - 1))
+    support_idx = gs.qd_int(chart_start + i_azimuth * band_rows + i_polar)
 
-        support_idx = gs.qd_int(chart_start + i * band_rows + j)
-        _vid = collider_info.support_field.support_vid[support_idx]
-        pos = collider_info.support_field.support_v[support_idx]
-        dot = pos.dot(d_mesh)
+    if collider_info.support_field.support_is_alone[support_idx]:
+        v = collider_info.support_field.support_v[support_idx]
+        vid = collider_info.support_field.support_vid[support_idx]
+    else:
+        support_idxs = qd.Vector([0, 0, 0, 0, 0, 0, 0, 0, 0], dt=gs.qd_int)
+        vids = qd.Vector([0, 0, 0, 0, 0, 0, 0, 0, 0], dt=gs.qd_int)
+        for i_azimuth_shift, i_polar_shift in qd.static(qd.ndrange((-1, 2), (-1, 2))):
+            i_azimuth = (i_azimuth_center + i_azimuth_shift + support_res) % support_res
+            i_polar = gs.qd_int(qd.math.clamp(i_polar_center + i_polar_shift - band_start, 0, band_rows - 1))
+            i_cell = (i_azimuth_shift + 1) * 3 + i_polar_shift + 1
+            support_idxs[i_cell] = gs.qd_int(chart_start + i_azimuth * band_rows + i_polar)
+            vids[i_cell] = collider_info.support_field.support_vid[support_idxs[i_cell]]
 
-        if dot > dot_max:
-            v = pos
-            dot_max = dot
-            vid = _vid
+        pos_scale = gs.qd_float(0.0)
+        for i_cell in qd.static(range(9)):
+            pos = collider_info.support_field.support_v[support_idxs[i_cell]]
+            offset = pos - dyn_info.geoms.center[i_g]
+            pos_scale = qd.max(pos_scale, qd.abs(offset[0]), qd.abs(offset[1]), qd.abs(offset[2]))
+            dot_max = qd.max(dot_max, pos.dot(d_mesh))
+
+        # Tied vertices score the same dot, so breaking the tie by the lowest index - a property of the mesh alone -
+        # returns the same vertex for a geom as for any rotated copy of it. The window is relative to the dot and, since
+        # that vanishes for a support plane through the geom's centre, to how far the candidates spread about it: the
+        # direction is shared between any two of them and drops out of the difference their tie is about. A second pass
+        # keeps this a tie-break on the maximum, which folding it into the first would let a lower score lower.
+        ccd_eps = collider_info.mpr.CCD_EPS[None]
+        tie_tol = ccd_eps * qd.max(qd.abs(dot_max), 0.1 * pos_scale)
+        is_found = False
+        for i_cell in qd.static(range(9)):
+            pos = collider_info.support_field.support_v[support_idxs[i_cell]]
+            if pos.dot(d_mesh) >= dot_max - tie_tol and (not is_found or vids[i_cell] < vid):
+                v = pos
+                vid = vids[i_cell]
+                is_found = True
 
     return v, vid
 

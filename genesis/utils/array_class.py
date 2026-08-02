@@ -1455,6 +1455,7 @@ class SupportFieldInfo:
     support_cell_start: qd.Tensor
     support_v: qd.Tensor
     support_vid: qd.Tensor
+    support_is_alone: qd.Tensor
     support_res: qd.Tensor
 
 
@@ -1463,6 +1464,9 @@ def get_support_field_info(n_geoms, n_support_cells, support_res):
         support_cell_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
         support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_cells, 1),)),
         support_vid=V(dtype=gs.qd_int, shape=(max(n_support_cells, 1),)),
+        # Whether every cell of a cell's own neighbourhood names the vertex it does, so a lookup landing there has no
+        # tie to resolve and reads that vertex alone. Held per cell so the lookup pays one read to find out.
+        support_is_alone=V(dtype=gs.qd_int, shape=(max(n_support_cells, 1),)),
         support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
     )
 

@@ -100,7 +100,7 @@ def support_driver(
         # If mujoco-compatible, do exhaustive search for the vertex
         v, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, collider_info)
     else:
-        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, collider_info)
+        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, dyn_info, collider_info)
     return v, v_, vid
 
 

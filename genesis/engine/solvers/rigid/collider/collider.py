@@ -172,34 +172,23 @@ class Collider:
             self._large_contact_pair_mask,
         ) = self._compute_collision_pair_idx()
 
-        # Link-pair pruning can do useful work only when contacts from distinct geom-pairs can accumulate into the same
-        # (link_a, link_b) bucket. That happens when any link has more than one geom (compound/decomposed body), when
-        # any geom is nonconvex (vertex-based narrowphase emits many contacts per pair), or when terrain is present.
-        # Composes with contact islands: pruning writes a logical permutation into contact_sort_idx, and the island
-        # construction reads contacts through that permutation, so pruning collapses the contacts before islands
+        # Link-pair pruning does useful work whenever a (link_a, link_b) bucket can hold a point interior to the hull of
+        # the others, which the hull prune drops. Nonconvex geoms and terrain reach that through a vertex-based
+        # narrowphase emitting many contacts per pair, and multi-contact detection reaches it from a single convex pair,
+        # whose perturbed points bound a patch that the unperturbed one may land inside of. One geom per link therefore
+        # suffices. Composes with contact islands: pruning writes a logical permutation into contact_sort_idx, and the
+        # island construction reads contacts through that permutation, so pruning collapses the contacts before islands
         # partition the (smaller) solve.
-        if has_nonconvex_nonterrain or has_terrain:
-            has_prunable_contacts = True
-        else:
-            has_prunable_contacts = False
-            for link in self._solver.links:
-                variant_geom_ranges = link._variant_geom_ranges
-                if variant_geom_ranges is None:
-                    variant_geom_ranges = ((link.geom_start, link.geom_end),)
-                for geom_range in variant_geom_ranges:
-                    n_geoms = geom_range[1] - geom_range[0]
-                    if n_geoms < 2:
-                        continue
-                    if n_geoms >= 5:
-                        has_prunable_contacts = True
-                        continue
-                    for geom_idx in range(*geom_range):
-                        geom = self._solver.geoms[geom_idx]
-                        if self._solver._options.enable_multi_contact and geom.type not in (
-                            gs.GEOM_TYPE.SPHERE,
-                            gs.GEOM_TYPE.ELLIPSOID,
-                        ):
-                            has_prunable_contacts = True
+        has_prunable_contacts = has_nonconvex_nonterrain or has_terrain
+        if not has_prunable_contacts and self._solver._options.enable_multi_contact:
+            # Multi-contact is declined for a pair holding a sphere or an ellipsoid, which leaves it a single point, so
+            # what earns the pass is a pair where neither geom is one of those.
+            geoms_type = [geom.type for geom in self._solver.geoms]
+            has_prunable_contacts = any(
+                geoms_type[i_ga] not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)
+                and geoms_type[i_gb] not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)
+                for i_ga, i_gb in self._valid_collision_pairs
+            )
 
         # Spatial sort by x-position (with a geom-pair tie-break) only runs on GPU for convex-convex scenes whose
         # contacts could benefit from locality, and is also what makes the GPU contact order run-independent: the
