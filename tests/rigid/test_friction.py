@@ -525,52 +525,67 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     )
 
 
-# Only the mesh box is required: it reaches the support of a face normal through the sampled table, the harder of the
-# two paths, and holding it also holds the primitive.
-@pytest.mark.parametrize("is_box_mesh", [False, pytest.param(True, marks=pytest.mark.required)])
+# The mesh box at the larger scale is the demanding case, so it is the required one: it reaches the support of a face
+# normal through the sampled table rather than analytically, and it is where the measured spreads sit closest to their
+# bounds. Holding it holds the primitive and the unit scale with it. What bounds the smallest scale is the similitude
+# rather than the solver: scaling gravity with the geometry shrinks a contact force by four powers of the scale, while
+# the constraint solve resolves a residual set by the mean inertia and so by three, so the spread a contact carries
+# grows against its bound as the scene shrinks, and it does so fastest for the convex resolution.
+@pytest.mark.parametrize(
+    "is_box_mesh, scale",
+    [(False, 1.0), (True, 0.2), (True, 1.0), pytest.param(True, 100.0, marks=pytest.mark.required)],
+)
 @pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
-def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewer, tol):
+def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, show_viewer, tol):
     N_ENVS = 8
     FRICTION = 0.5
-    BOX_POS = (0.0, 0.0, 0.05)
-    BOX_SIZE = (0.1, 0.2, 0.1)
+    # Every length below is quoted at unit scale and multiplied by it, and gravity with it. That leaves the motion
+    # geometrically similar at any scale, over the same timestep and the same number of steps, so one scene serves the
+    # whole sweep and each bound only takes the power of the scale its own quantity carries. What the sweep holds is
+    # that the tolerances contact detection compares against are relative to the pair of geoms it is given: it spans
+    # two orders of magnitude of geometry, and eight of contact force.
+    GRAVITY = 9.81 * scale
+    BOX_POS = (0.0, 0.0, 0.05 * scale)
+    BOX_SIZE = (0.1 * scale, 0.2 * scale, 0.1 * scale)
     # The pillar pushes the box below its centre of mass so the box slides rather than tipping: pushing level with it
     # leaves the box on the verge of lifting a leading corner, where each env's own rounding decides where it settles.
-    PILLAR_HEIGHT = 0.04
-    PILLAR_RADIUS = 0.0316
+    PILLAR_HEIGHT = 0.04 * scale
+    PILLAR_RADIUS = 0.0316 * scale
     # Pusher path in the box's local frame; the shared +y offset gives the push a lever arm that spins the box. The
     # height presses the pillar a definite amount into the ground rather than resting it exactly on the plane: held
     # exactly there, its ground contact sits on the boundary of existing at all, and which side of that boundary each
     # env lands on is decided by rounding, so the envs disagree over how many contacts the scene has.
-    PUSH_PRESS = 2e-4
-    PUSH_START_LOCAL = (-0.15, 0.03, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
-    PUSH_END_LOCAL = (0.02, 0.03, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
-    # Single precision sets these: one ulp of a coordinate this far off the rotation axis is 1.5e-08, and the contact
-    # stiffness carries it into a milli-newton of force, so each bound sits a few times over what rounding alone
-    # reaches. Double precision agrees to 1e-12 throughout, well inside them, and anything that is not rounding - a
-    # detection branch reading the world orientation, say - exceeds them by orders of magnitude at either precision.
-    # Each multiple is a small factor over the worst single-precision spread measured across the backends, the two
-    # array layouts and both box geometries, the mesh box being the demanding one: it presents the wider manifold, so
-    # more contacts share the load and the spread of what each carries grows with them.
-    CONTACT_TOL = 0.5 * tol
-    VEL_TOL = 5.0 * tol
+    PUSH_PRESS = 2e-4 * scale
+    PUSH_START_LOCAL = (-0.15 * scale, 0.03 * scale, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
+    PUSH_END_LOCAL = (0.02 * scale, 0.03 * scale, 0.5 * PILLAR_HEIGHT - PUSH_PRESS)
+    # Each bound is a small factor over the worst single-precision spread measured across the backends, both array
+    # layouts, both box geometries and both scales; anything that is not rounding - a detection branch reading the
+    # world orientation, say - exceeds them by orders of magnitude. Rounding being relative, each bound carries its
+    # quantity's power of the scale, which is none for a direction, nor for an angular rate, time being held fixed.
+    LENGTH_TOL = 0.5 * tol * scale
+    DIRECTION_TOL = 0.5 * tol
+    LIN_VEL_TOL = 5.0 * tol * scale
+    ANG_VEL_TOL = 5.0 * tol
     # Force carries the stiffness gain on top, and coplanar contacts of one pair share the load with a null space the
-    # solve may resolve anywhere inside, so only their resultant is determined and the bound has to cover the split.
-    FORCE_TOL = 1000.0 * tol
+    # solve may resolve anywhere inside, so the bound has to cover the split. Being a mass times an acceleration it
+    # takes three powers of the scale from the mass and one from gravity, and a torque one more from its lever arm.
+    FORCE_TOL = 1000.0 * tol * scale**4
+    TORQUE_TOL = 1000.0 * tol * scale**5
     # How far either body may be from the plane: being pressed into it, or lifted by the bouncier contact resolution.
-    GROUND_TOL = 5e-3
+    GROUND_TOL = 5e-3 * scale
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
             friction_cone=gs.friction_cone.elliptic,
             contact_resolution=contact_resolution,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.7, 0.7, 0.8),
-            camera_lookat=(0.0, 0.0, 0.05),
+            camera_pos=(0.7 * scale, 0.7 * scale, 0.8 * scale),
+            camera_lookat=(0.0, 0.0, 0.05 * scale),
         ),
         show_viewer=show_viewer,
     )
@@ -620,7 +635,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
         visualize_contact=True,
         vis_mode="collision",
     )
-    scene.build(n_envs=N_ENVS, env_spacing=(0.3, 0.3))
+    scene.build(n_envs=N_ENVS, env_spacing=(0.3 * scale, 0.3 * scale))
 
     yaw = 2.0 * torch.pi * torch.arange(N_ENVS, device=gs.device) / N_ENVS
     yaw_euler = torch.stack((torch.zeros_like(yaw), torch.zeros_like(yaw), yaw), dim=1)
@@ -632,10 +647,12 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
     push_end = gu.transform_by_quat(torch.tensor(PUSH_END_LOCAL, device=gs.device).repeat(N_ENVS, 1), box_quat)
     pusher.set_pos(push_start)
     pusher.set_quat(box_quat)
-    pusher.set_dofs_kp(
-        pusher.get_mass() * torch.tensor((2000.0, 2000.0, 2000.0, 5000.0, 5000.0, 5000.0), device=gs.device)
-    )
-    pusher.set_dofs_kv(pusher.get_mass() * torch.tensor((200.0, 200.0, 200.0, 500.0, 500.0, 500.0), device=gs.device))
+    # Quoted per unit mass, the linear gains are accelerations per unit error, and holding those fixed is what keeps the
+    # pusher tracking the same path at any scale. The angular ones act on the inertia instead, which grows two powers of
+    # length faster than the mass they are quoted against, so they carry that difference.
+    gains_scale = pusher.get_mass() * torch.tensor((1.0, 1.0, 1.0, scale**2, scale**2, scale**2), device=gs.device)
+    pusher.set_dofs_kp(gains_scale * torch.tensor((2000.0, 2000.0, 2000.0, 5000.0, 5000.0, 5000.0), device=gs.device))
+    pusher.set_dofs_kv(gains_scale * torch.tensor((200.0, 200.0, 200.0, 500.0, 500.0, 500.0), device=gs.device))
 
     # Let the box resolve its initial ground contact before the push starts, so the two transients do not couple.
     scene.step()
@@ -677,9 +694,9 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
         paired = torch.stack(blocks)
         assert_equal(paired[:, :, 10:], paired[0, :, 10:], err_msg=f"geom pairs differ at step {i_step}")
         for key, columns, atol in (
-            ("position", slice(0, 3), CONTACT_TOL),
-            ("normal", slice(3, 6), CONTACT_TOL),
-            ("penetration", slice(9, 10), CONTACT_TOL),
+            ("position", slice(0, 3), LENGTH_TOL),
+            ("normal", slice(3, 6), DIRECTION_TOL),
+            ("penetration", slice(9, 10), LENGTH_TOL),
             ("force", slice(6, 9), FORCE_TOL),
         ):
             values = paired[:, :, columns]
@@ -691,10 +708,10 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
             rows = (paired[0, :, 10] == pair[0]) & (paired[0, :, 11] == pair[1])
             if not rows.any():
                 continue
-            force = paired[:, rows, 6:9]
-            torque = torch.cross(paired[:, rows, 0:3], force, dim=-1)
-            wrench = torch.cat((force.sum(dim=1), torque.sum(dim=1)), dim=1)
-            assert_allclose(wrench, wrench[0], atol=FORCE_TOL, err_msg=f"net wrench differs at step {i_step}")
+            net_force = paired[:, rows, 6:9].sum(dim=1)
+            net_torque = torch.cross(paired[:, rows, 0:3], paired[:, rows, 6:9], dim=-1).sum(dim=1)
+            assert_allclose(net_force, net_force[0], atol=FORCE_TOL, err_msg=f"net force differs at step {i_step}")
+            assert_allclose(net_torque, net_torque[0], atol=TORQUE_TOL, err_msg=f"net torque differs at step {i_step}")
         # Dropping through the plane, or leaving it altogether, would leave eight envs identically wrong with every
         # comparison above still green.
         for entity in (box, pusher):
@@ -705,16 +722,18 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
         velocity = scene.rigid_solver.get_dofs_velocity().reshape((N_ENVS, -1, 6))
         quat = box_quat_inv[:, None].expand(N_ENVS, velocity.shape[1], 4)
         linear = gu.transform_by_quat(velocity[:, :, :3], quat)
-        assert_allclose(linear, linear[0], atol=VEL_TOL, err_msg=f"linear velocity differs at step {i_step}")
+        assert_allclose(linear, linear[0], atol=LIN_VEL_TOL, err_msg=f"linear velocity differs at step {i_step}")
         angular = velocity[:, :, 3:]
-        assert_allclose(angular, angular[0], atol=VEL_TOL, err_msg=f"angular velocity differs at step {i_step}")
+        assert_allclose(angular, angular[0], atol=ANG_VEL_TOL, err_msg=f"angular velocity differs at step {i_step}")
 
     # The box and pusher settle at rest by the end.
-    assert_allclose(scene.rigid_solver.get_dofs_velocity(), 0.0, atol=0.01)
+    velocity = scene.rigid_solver.get_dofs_velocity().reshape((N_ENVS, -1, 6))
+    assert_allclose(velocity[:, :, :3], 0.0, atol=0.01 * scale)
+    assert_allclose(velocity[:, :, 3:], 0.0, atol=0.01)
 
     # The pusher holds the height and orientation it was commanded to, so the push it applies is the one intended:
     # sinking would bury it in the plane and tilting would lift a corner of its stance clear of it.
-    assert_allclose(pusher.get_pos()[:, 2], 0.5 * PILLAR_HEIGHT - PUSH_PRESS, atol=1e-3)
+    assert_allclose(pusher.get_pos()[:, 2], 0.5 * PILLAR_HEIGHT - PUSH_PRESS, atol=1e-3 * scale)
     assert_allclose(
         gu.transform_quat_by_quat(pusher.get_quat(), gu.inv_quat(box_quat)), (1.0, 0.0, 0.0, 0.0), atol=1e-3
     )
@@ -723,9 +742,9 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, show_viewe
     rel_pos = gu.transform_by_quat(box.get_pos() - torch.tensor(BOX_POS, device=gs.device), gu.inv_quat(box_quat))
     rel_yaw = gu.quat_to_xyz(gu.transform_quat_by_quat(box.get_quat(), gu.inv_quat(box_quat)), rpy=True)[:, 2]
     # A push that moved the box hardly at all would satisfy the comparison below without exercising anything.
-    assert (rel_pos[:, 0] > 0.01).all() and (rel_yaw.abs() > 0.05).all()
-    assert_allclose(rel_pos, rel_pos.mean(dim=0), atol=CONTACT_TOL)
-    assert_allclose(rel_yaw, rel_yaw.mean(), atol=CONTACT_TOL)
+    assert (rel_pos[:, 0] > 0.01 * scale).all() and (rel_yaw.abs() > 0.05).all()
+    assert_allclose(rel_pos, rel_pos.mean(dim=0), atol=LENGTH_TOL)
+    assert_allclose(rel_yaw, rel_yaw.mean(), atol=DIRECTION_TOL)
 
 
 @pytest.mark.required
