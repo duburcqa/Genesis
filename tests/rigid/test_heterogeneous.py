@@ -75,7 +75,7 @@ def test_physics_parity(show_viewer, tol):
     # After the drop each environment matches the homogeneous reference of its variant in pose, velocity and mass.
     ref_pos = torch.cat([ref_obj.get_pos(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
     ref_vel = torch.cat([ref_obj.get_vel(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
-    assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=tol)
+    assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-6)
     assert_allclose(het_obj.get_vel(), ref_vel, tol=tol)
     assert_allclose(het_obj.get_mass(), [ref_obj.get_mass() for ref_obj in ref_objs], tol=tol)
 
