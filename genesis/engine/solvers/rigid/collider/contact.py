@@ -343,7 +343,7 @@ def func_add_contact(
         if qd.math.isnan(
             contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
         ):
-            qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_CONTACT_NAN)
+            errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_CONTACT_NAN
 
         # b to a
         collider_state.contact_data.geom_a[i_c, i_b] = i_ga
