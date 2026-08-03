@@ -527,13 +527,12 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
 
 # The mesh box at the larger scale is the demanding case, so it is the required one: it reaches the support of a face
 # normal through the sampled table rather than analytically, and it is where the measured spreads sit closest to their
-# bounds. Holding it holds the primitive and the unit scale with it. What bounds the smallest scale is the similitude
-# rather than the solver: scaling gravity with the geometry shrinks a contact force by four powers of the scale, while
-# the constraint solve resolves a residual set by the mean inertia and so by three, so the spread a contact carries
-# grows against its bound as the scene shrinks, and it does so fastest for the convex resolution.
+# bounds. Holding it holds the primitive and the unit scale with it. The two ends of the sweep are four orders of
+# magnitude apart, which is what holds every tolerance the step goes through to being relative to the quantity it
+# bounds: an absolute one is invisible at unit scale and takes over the answer at one end or the other.
 @pytest.mark.parametrize(
     "is_box_mesh, scale",
-    [(False, 1.0), (True, 0.2), (True, 1.0), pytest.param(True, 100.0, marks=pytest.mark.required)],
+    [(False, 1.0), (True, 0.01), (True, 1.0), pytest.param(True, 100.0, marks=pytest.mark.required)],
 )
 @pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
 def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, show_viewer, tol):
@@ -670,48 +669,53 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, sho
         contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=True)
         counts = [len(positions) for positions in contacts["position"]]
         assert counts == counts[:1] * N_ENVS, f"contact count differs across envs at step {i_step}: {counts}"
-        blocks = []
-        for i_env in range(N_ENVS):
-            quat = box_quat_inv[i_env].expand(counts[i_env], 4)
-            columns = (
-                gu.transform_by_quat(contacts["position"][i_env], quat),
-                gu.transform_by_quat(contacts["normal"][i_env], quat),
-                gu.transform_by_quat(contacts["force"][i_env], quat),
-                contacts["penetration"][i_env][:, None],
-                contacts["geom_a"][i_env][:, None],
-                contacts["geom_b"][i_env][:, None],
-            )
-            block = torch.cat([column.to(gs.tc_float) for column in columns], dim=1)
-            if i_env == 0:
-                blocks.append(block)
-                continue
-            # Matched to env 0 by nearest de-rotated position within the same geom pair, which is unambiguous because
-            # contacts sit millimetres apart while they agree to a fraction of that. Ordering by coordinate instead
-            # lets rounding swap two contacts that share one.
-            is_same_pair = (block[:, None, 10:12] == blocks[0][None, :, 10:12]).all(dim=-1)
-            distance = torch.linalg.norm(block[:, None, :3] - blocks[0][None, :, :3], dim=-1)
-            blocks.append(block[torch.where(is_same_pair, distance, torch.inf).argmin(dim=0)])
-        paired = torch.stack(blocks)
-        assert_equal(paired[:, :, 10:], paired[0, :, 10:], err_msg=f"geom pairs differ at step {i_step}")
-        for key, columns, atol in (
-            ("position", slice(0, 3), LENGTH_TOL),
-            ("normal", slice(3, 6), DIRECTION_TOL),
-            ("penetration", slice(9, 10), LENGTH_TOL),
-            ("force", slice(6, 9), FORCE_TOL),
-        ):
-            values = paired[:, :, columns]
-            assert_allclose(values, values[0], atol=atol, err_msg=f"contact {key} differs at step {i_step}")
-        # Net wrench per geom pair about the world origin. Coplanar contacts of one pair share the load with a null
-        # space the solve may resolve anywhere inside, so the individual forces are not determined while their
-        # resultant is: comparing both says which of the two any difference lives in.
-        for pair in ((0, 1), (0, 2), (1, 2)):
-            rows = (paired[0, :, 10] == pair[0]) & (paired[0, :, 11] == pair[1])
-            if not rows.any():
-                continue
-            net_force = paired[:, rows, 6:9].sum(dim=1)
-            net_torque = torch.cross(paired[:, rows, 0:3], paired[:, rows, 6:9], dim=-1).sum(dim=1)
-            assert_allclose(net_force, net_force[0], atol=FORCE_TOL, err_msg=f"net force differs at step {i_step}")
-            assert_allclose(net_torque, net_torque[0], atol=TORQUE_TOL, err_msg=f"net torque differs at step {i_step}")
+        # The box leaves the ground for a step at the smallest scale, which leaves the whole scene with nothing
+        # to compare while the pose and the velocities below still say the envs agree.
+        if counts[0]:
+            blocks = []
+            for i_env in range(N_ENVS):
+                quat = box_quat_inv[i_env].expand(counts[i_env], 4)
+                columns = (
+                    gu.transform_by_quat(contacts["position"][i_env], quat),
+                    gu.transform_by_quat(contacts["normal"][i_env], quat),
+                    gu.transform_by_quat(contacts["force"][i_env], quat),
+                    contacts["penetration"][i_env][:, None],
+                    contacts["geom_a"][i_env][:, None],
+                    contacts["geom_b"][i_env][:, None],
+                )
+                block = torch.cat([column.to(gs.tc_float) for column in columns], dim=1)
+                if i_env == 0:
+                    blocks.append(block)
+                    continue
+                # Matched to env 0 by nearest de-rotated position within the same geom pair, which is unambiguous because
+                # contacts sit millimetres apart while they agree to a fraction of that. Ordering by coordinate instead
+                # lets rounding swap two contacts that share one.
+                is_same_pair = (block[:, None, 10:12] == blocks[0][None, :, 10:12]).all(dim=-1)
+                distance = torch.linalg.norm(block[:, None, :3] - blocks[0][None, :, :3], dim=-1)
+                blocks.append(block[torch.where(is_same_pair, distance, torch.inf).argmin(dim=0)])
+            paired = torch.stack(blocks)
+            assert_equal(paired[:, :, 10:], paired[0, :, 10:], err_msg=f"geom pairs differ at step {i_step}")
+            for key, columns, atol in (
+                ("position", slice(0, 3), LENGTH_TOL),
+                ("normal", slice(3, 6), DIRECTION_TOL),
+                ("penetration", slice(9, 10), LENGTH_TOL),
+                ("force", slice(6, 9), FORCE_TOL),
+            ):
+                values = paired[:, :, columns]
+                assert_allclose(values, values[0], atol=atol, err_msg=f"contact {key} differs at step {i_step}")
+            # Net wrench per geom pair about the world origin. Coplanar contacts of one pair share the load with a null
+            # space the solve may resolve anywhere inside, so the individual forces are not determined while their
+            # resultant is: comparing both says which of the two any difference lives in.
+            for pair in ((0, 1), (0, 2), (1, 2)):
+                rows = (paired[0, :, 10] == pair[0]) & (paired[0, :, 11] == pair[1])
+                if not rows.any():
+                    continue
+                net_force = paired[:, rows, 6:9].sum(dim=1)
+                net_torque = torch.cross(paired[:, rows, 0:3], paired[:, rows, 6:9], dim=-1).sum(dim=1)
+                assert_allclose(net_force, net_force[0], atol=FORCE_TOL, err_msg=f"net force differs at step {i_step}")
+                assert_allclose(
+                    net_torque, net_torque[0], atol=TORQUE_TOL, err_msg=f"net torque differs at step {i_step}"
+                )
         # Dropping through the plane, or leaving it altogether, would leave eight envs identically wrong with every
         # comparison above still green.
         for entity in (box, pusher):

@@ -2980,6 +2980,11 @@ def func_cholesky_factor_direct_batch(
     """
     EPS = rigid_info.EPS[None]
 
+    # Every path below floors its pivot against the diagonal that pivot started from, which keeps the reciprocal taken
+    # of it finite the same way at any scene scale. What the floor guards is the elimination cancelling a pivot away,
+    # and how much of one is left is relative by nature, while the diagonal itself is an inertia and shrinks with the
+    # fifth power of the scale: floored absolutely, a body small enough for its inertia to reach 'EPS' has that inertia
+    # inflated to it instead, by an amount the constraint jacobian - hence the orientation - decides.
     if qd.static(rigid_config.enable_per_island_solve):
         n = constraint_state.island.dof_slices.n[i_island, i_b]
         dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
@@ -2990,11 +2995,12 @@ def func_cholesky_factor_direct_batch(
         for i_d in range(n):
             i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
             i_start = constraint_state.island.dof_env_start_local[dof_base + i_d, i_b]
-            tmp = constraint_state.nt_H[i_b, i_dg, i_dg]
+            hess_diag = constraint_state.nt_H[i_b, i_dg, i_dg]
+            tmp = hess_diag
             for j_d in range(i_start, i_d):
                 j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
                 tmp = tmp - constraint_state.nt_H[i_b, i_dg, j_dg] ** 2
-            constraint_state.nt_H[i_b, i_dg, i_dg] = qd.sqrt(qd.max(tmp, EPS))
+            constraint_state.nt_H[i_b, i_dg, i_dg] = qd.sqrt(qd.max(tmp, EPS * hess_diag))
             inv = 1.0 / constraint_state.nt_H[i_b, i_dg, i_dg]
             # Only rows whose envelope reaches column i_d can be nonzero there. The CPU per-island path always
             # computes dof_env_col_end in its solve init, so it can bound the row sweep by the column height; other
@@ -3020,10 +3026,11 @@ def func_cholesky_factor_direct_batch(
     if qd.static(rigid_config.sparse_envelope):
         for i_d in range(n_dofs):
             i_start = constraint_state.nt_H_env_start[i_b, i_d]
-            tmp = constraint_state.nt_H[i_b, i_d, i_d]
+            hess_diag = constraint_state.nt_H[i_b, i_d, i_d]
+            tmp = hess_diag
             for k_d in range(i_start, i_d):
                 tmp = tmp - constraint_state.nt_H[i_b, i_d, k_d] ** 2
-            constraint_state.nt_H[i_b, i_d, i_d] = qd.sqrt(qd.max(tmp, EPS))
+            constraint_state.nt_H[i_b, i_d, i_d] = qd.sqrt(qd.max(tmp, EPS * hess_diag))
 
             tmp = 1.0 / constraint_state.nt_H[i_b, i_d, i_d]
             for j_d in range(i_d + 1, n_dofs):
@@ -3035,10 +3042,11 @@ def func_cholesky_factor_direct_batch(
                     constraint_state.nt_H[i_b, j_d, i_d] = (constraint_state.nt_H[i_b, j_d, i_d] - dot) * tmp
     else:
         for i_d in range(n_dofs):
-            tmp = constraint_state.nt_H[i_b, i_d, i_d]
+            hess_diag = constraint_state.nt_H[i_b, i_d, i_d]
+            tmp = hess_diag
             for j_d in range(i_d):
                 tmp = tmp - constraint_state.nt_H[i_b, i_d, j_d] ** 2
-            constraint_state.nt_H[i_b, i_d, i_d] = qd.sqrt(qd.max(tmp, EPS))
+            constraint_state.nt_H[i_b, i_d, i_d] = qd.sqrt(qd.max(tmp, EPS * hess_diag))
 
             tmp = 1.0 / constraint_state.nt_H[i_b, i_d, i_d]
             for j_d in range(i_d + 1, n_dofs):
