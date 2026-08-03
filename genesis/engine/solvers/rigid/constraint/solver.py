@@ -3460,10 +3460,13 @@ def func_apply_rank1_dense_whole_env(
     n_dofs = constraint_state.nt_H.shape[1]
     is_degenerated = False
     for k in range(n_dofs):
-        if qd.abs(constraint_state.nt_vec[k, i_b]) > EPS:
-            Lkk = constraint_state.nt_H[i_b, k, k]
+        # Both thresholds are relative to the pivot they act on, which carries the inertia of the DOF: the working
+        # vector shares its units, and the updated pivot square is compared against the one it came from, so an update
+        # counts as reaching a pivot, and a downdate as cancelling it, by the same fraction at any scene scale.
+        Lkk = constraint_state.nt_H[i_b, k, k]
+        if qd.abs(constraint_state.nt_vec[k, i_b]) > EPS * Lkk:
             tmp = Lkk**2 + sign * constraint_state.nt_vec[k, i_b] ** 2
-            if tmp < EPS:
+            if tmp < EPS * Lkk**2:
                 is_degenerated = True
                 break
             r = qd.sqrt(tmp)
@@ -3501,10 +3504,10 @@ def func_apply_rank1_sparse_whole_env(
     is_degenerated = False
     for k in range(p_min, n_dofs):
         vk = constraint_state.nt_vec[k, i_b]
-        if qd.abs(vk) > EPS:
-            Lkk = constraint_state.nt_H[i_b, k, k]
+        Lkk = constraint_state.nt_H[i_b, k, k]
+        if qd.abs(vk) > EPS * Lkk:
             tmp = Lkk * Lkk + sign * vk * vk
-            if tmp < EPS:
+            if tmp < EPS * Lkk * Lkk:
                 is_degenerated = True
                 break
             r = qd.sqrt(tmp)
@@ -3627,9 +3630,9 @@ def func_apply_staged_rank_updates_island(
         for i_u in qd.static(range(rigid_config.hessian_rank_update_batch)):
             if i_u < n_u and not is_degenerated:
                 vk = constraint_state.nt_vec[slot_base + i_u, i_b]
-                if qd.abs(vk) > EPS:
+                if qd.abs(vk) > EPS * Lkk:
                     tmp = Lkk * Lkk + signs[i_u] * vk * vk
-                    if tmp < EPS:
+                    if tmp < EPS * Lkk * Lkk:
                         is_degenerated = True
                     else:
                         r = qd.sqrt(tmp)
@@ -5990,7 +5993,11 @@ def func_update_gradient(
 
 @qd.func
 def func_terminate_or_update_descent_batch(
-    i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+    i_b,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
     n_dofs = constraint_state.jac.shape[1]
 
@@ -5999,14 +6006,30 @@ def func_terminate_or_update_descent_batch(
     # in float32 where subtracting successive absolute costs rounds to zero. A negative improvement is float32 noise
     # around the optimum, so it must not be mistaken for convergence: keep iterating so the solver can recover
     # instead of locking in a destabilizing step.
-    tol_scaled = (rigid_info.meaninertia[i_b] * qd.max(1, n_dofs)) * rigid_info.tolerance[None]
+    # A gradient is a generalized force and an improvement is a cost, so each is compared against the scene's own force
+    # and cost rather than against a bare mass: 'meaninertia' times the DOF count is a mass, and the free acceleration
+    # the cost is quoted against supplies what turns it into the two. The reference reads that acceleration through the
+    # mass matrix, which is what makes one scalar cover degrees of freedom of different kinds - a linear acceleration
+    # and an angular one are not comparable, while the cost each does is. Compared against a mass alone the thresholds
+    # hold one scene scale and drift by a power of the acceleration for every other. Reproducing the reference
+    # behaviour keeps the mass alone, so the tolerance means the same there as it always did.
+    mass_ref = rigid_info.meaninertia[i_b] * qd.max(1, n_dofs)
+    cost_tol = mass_ref * rigid_info.tolerance[None]
+    tol_scaled = cost_tol
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        cost_ref = gs.qd_float(0.0)
+        for i_d in range(n_dofs):
+            acc = dyn_state.dofs.acc_smooth[i_d, i_b]
+            cost_ref = cost_ref + rigid_info.mass_mat[i_d, i_d, i_b] * acc * acc
+        cost_tol = cost_ref * rigid_info.tolerance[None]
+        tol_scaled = qd.sqrt(cost_ref * mass_ref) * rigid_info.tolerance[None]
     improvement = constraint_state.ls_improvement[i_b]
     grad_norm = gs.qd_float(0.0)
     for i_d in range(n_dofs):
         grad_norm = grad_norm + constraint_state.grad[i_d, i_b] * constraint_state.grad[i_d, i_b]
     grad_norm = qd.sqrt(grad_norm)
     is_flat = grad_norm <= tol_scaled
-    is_stalled = improvement > 0.0 and improvement < tol_scaled
+    is_stalled = improvement > 0.0 and improvement < cost_tol
     # Pre-declared: a local first bound inside a qd.static branch does not propagate out of it.
     improved = not (is_flat or is_stalled)
 
@@ -6026,7 +6049,7 @@ def func_terminate_or_update_descent_batch(
         descent = gs.qd_float(0.0)
         for i_d in range(n_dofs):
             descent = descent + constraint_state.grad[i_d, i_b] * constraint_state.Mgrad[i_d, i_b]
-        improved = not (is_flat and 0.5 * descent <= tol_scaled)
+        improved = not (is_flat and 0.5 * descent <= cost_tol)
     constraint_state.improved[i_b] = improved
 
     # Update search direction if necessary
@@ -6518,7 +6541,7 @@ def func_solve_iter(
 
         func_update_gradient_batch(i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
-        func_terminate_or_update_descent_batch(i_b, constraint_state, rigid_info, rigid_config)
+        func_terminate_or_update_descent_batch(i_b, dyn_state, constraint_state, rigid_info, rigid_config)
 
 
 def _get_static_config(*args, **kwargs):

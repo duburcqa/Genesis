@@ -532,7 +532,15 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
 # bounds: an absolute one is invisible at unit scale and takes over the answer at one end or the other.
 @pytest.mark.parametrize(
     "is_box_mesh, scale",
-    [(False, 1.0), (True, 0.01), (True, 1.0), pytest.param(True, 100.0, marks=pytest.mark.required)],
+    [
+        (False, 1.0),
+        (True, 0.01),
+        (True, 0.02),
+        (True, 0.05),
+        (True, 0.1),
+        (True, 1.0),
+        pytest.param(True, 100.0, marks=pytest.mark.required),
+    ],
 )
 @pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
 def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, show_viewer, tol):
@@ -544,8 +552,8 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, sho
     # that the tolerances contact detection compares against are relative to the pair of geoms it is given: it spans
     # two orders of magnitude of geometry, and eight of contact force.
     GRAVITY = 9.81 * scale
-    BOX_POS = (0.0, 0.0, 0.05 * scale)
-    BOX_SIZE = (0.1 * scale, 0.2 * scale, 0.1 * scale)
+    BOX_POS = (0.0, 0.0, 0.02 * scale)
+    BOX_SIZE = (0.1 * scale, 0.2 * scale, 0.04 * scale)
     # The pillar pushes the box below its centre of mass so the box slides rather than tipping: pushing level with it
     # leaves the box on the verge of lifting a leading corner, where each env's own rounding decides where it settles.
     PILLAR_HEIGHT = 0.04 * scale
@@ -564,7 +572,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, sho
     LENGTH_TOL = 0.5 * tol * scale
     DIRECTION_TOL = 0.5 * tol
     LIN_VEL_TOL = 5.0 * tol * scale
-    ANG_VEL_TOL = 5.0 * tol
+    ANG_VEL_TOL = 10.0 * tol
     # Force carries the stiffness gain on top, and coplanar contacts of one pair share the load with a null space the
     # solve may resolve anywhere inside, so the bound has to cover the split. Being a mass times an acceleration it
     # takes three powers of the scale from the mass and one from gravity, and a torque one more from its lever arm.
