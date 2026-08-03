@@ -335,6 +335,16 @@ def func_add_contact(
         friction_rolling_a = dyn_info.geoms.friction_rolling[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
         friction_rolling_b = dyn_info.geoms.friction_rolling[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
 
+        # Every contact enters here, so this is where an invalid one is caught: the narrowphase divides by quantities
+        # a degenerate configuration can vanish, and a position or normal that comes out 'nan' reaches the solver as a
+        # constraint row, poisons the whole acceleration through the factor, and would otherwise be reported as a
+        # force gone wrong several stages later. Flagged rather than dropped, since a missing contact lets bodies pass
+        # through each other just as silently.
+        if qd.math.isnan(
+            contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
+        ):
+            qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_CONTACT_NAN)
+
         # b to a
         collider_state.contact_data.geom_a[i_c, i_b] = i_ga
         collider_state.contact_data.geom_b[i_c, i_b] = i_gb

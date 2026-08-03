@@ -313,6 +313,16 @@ def mpr_find_pos(
             b[i] = vec.dot(direction)
         sum_ = b.sum()
 
+    # A portal spanning no volume along its own direction either leaves every weight at zero, and the position is a
+    # ratio of them: weighting the portal's three vertices equally puts the contact at their centroid, which lies on
+    # the portal and keeps the ratio finite. Nothing finer is available - the weights are what carries where on the
+    # portal the contact sits.
+    if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
+        b[0] = 0.0
+        for i in range(1, 4):
+            b[i] = 1.0
+        sum_ = 3.0
+
     p1 = gs.qd_vec3([0.0, 0.0, 0.0])
     p2 = gs.qd_vec3([0.0, 0.0, 0.0])
     for i in range(4):
