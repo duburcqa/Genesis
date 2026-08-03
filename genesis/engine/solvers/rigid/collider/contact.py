@@ -328,38 +328,21 @@ def func_add_contact(
     else:
         i_c = collider_state.n_contacts[i_b]
     if i_c < collider_info.max_candidate_contacts[None]:
-        friction_a = dyn_info.geoms.friction[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-        friction_b = dyn_info.geoms.friction[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
-        friction_torsional_a = dyn_info.geoms.friction_torsional[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-        friction_torsional_b = dyn_info.geoms.friction_torsional[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
-        friction_rolling_a = dyn_info.geoms.friction_rolling[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-        friction_rolling_b = dyn_info.geoms.friction_rolling[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
-
-        # Every contact enters here, so this is where an invalid one is caught: the narrowphase divides by quantities
-        # a degenerate configuration can vanish, and a position or normal that comes out 'nan' reaches the solver as a
-        # constraint row, poisons the whole acceleration through the factor, and would otherwise be reported as a
-        # force gone wrong several stages later. Flagged rather than dropped, since a missing contact lets bodies pass
-        # through each other just as silently.
-        if qd.math.isnan(
-            contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
-        ):
-            errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_CONTACT_NAN
-
-        # b to a
-        collider_state.contact_data.geom_a[i_c, i_b] = i_ga
-        collider_state.contact_data.geom_b[i_c, i_b] = i_gb
-        collider_state.contact_data.normal[i_c, i_b] = normal
-        collider_state.contact_data.pos[i_c, i_b] = contact_pos
-        collider_state.contact_data.penetration[i_c, i_b] = penetration
-        collider_state.contact_data.friction[i_c, i_b] = qd.max(qd.max(friction_a, friction_b), 1e-2)
-        collider_state.contact_data.friction_torsional[i_c, i_b] = qd.max(friction_torsional_a, friction_torsional_b)
-        collider_state.contact_data.friction_rolling[i_c, i_b] = qd.max(friction_rolling_a, friction_rolling_b)
-        collider_state.contact_data.sol_params[i_c, i_b] = 0.5 * (
-            dyn_info.geoms.sol_params[i_ga] + dyn_info.geoms.sol_params[i_gb]
+        func_set_contact(
+            i_ga,
+            i_gb,
+            i_b,
+            i_c,
+            i_pair,
+            normal,
+            contact_pos,
+            penetration,
+            dyn_state,
+            collider_state,
+            dyn_info,
+            collider_info,
+            errno,
         )
-        collider_state.contact_data.link_a[i_c, i_b] = dyn_info.geoms.link_idx[i_ga]
-        collider_state.contact_data.link_b[i_c, i_b] = dyn_info.geoms.link_idx[i_gb]
-        collider_state.contact_data.pair_idx[i_c, i_b] = i_pair
 
         if not qd.static(use_atomic):
             collider_state.n_contacts[i_b] = i_c + 1
@@ -381,6 +364,7 @@ def func_set_contact(
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
+    errno: qd.Tensor,
 ):
     """
     Set the contact data for the contact [i_c]. This is used for the backward pass, which parallelizes over the entire
@@ -392,6 +376,16 @@ def func_set_contact(
     friction_torsional_b = dyn_info.geoms.friction_torsional[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
     friction_rolling_a = dyn_info.geoms.friction_rolling[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
     friction_rolling_b = dyn_info.geoms.friction_rolling[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
+
+    # Every contact the solver ever sees is written here, so this is where an invalid one is caught: the narrowphase
+    # divides by quantities a degenerate configuration can vanish, and a position or normal that comes out non-finite
+    # reaches the solver as a constraint row, poisons the whole acceleration through the factor, and would otherwise be
+    # reported as a force gone wrong several stages later. Flagged rather than dropped, since a missing contact lets
+    # bodies pass through each other just as silently. Both 'inf' and 'nan' have to be caught: a division by an
+    # exactly-zero denominator gives the former, and it only turns into the latter once two of them cancel.
+    residual = contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
+    if qd.math.isnan(residual) or qd.math.isinf(residual):
+        errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_CONTACT_NAN
 
     # b to a
     collider_state.contact_data.geom_a[i_c, i_b] = i_ga

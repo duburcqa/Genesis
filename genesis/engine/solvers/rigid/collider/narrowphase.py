@@ -602,6 +602,7 @@ def func_add_polytope_vertex_contacts_sdf(
                                 collider_state,
                                 dyn_info,
                                 collider_info,
+                                errno,
                             )
 
 
@@ -2615,6 +2616,7 @@ def _func_multicontact_mpr(
                     collider_state,
                     dyn_info,
                     collider_info,
+                    errno,
                 )
 
 
@@ -3011,6 +3013,7 @@ def func_narrow_phase_diff_convex_vs_convex(
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
+    errno: qd.Tensor,
 ):
     # Compute reference contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
@@ -3050,6 +3053,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                     collider_state,
                     dyn_info,
                     collider_info,
+                    errno,
                 )
 
     # Compute other contacts
@@ -3079,6 +3083,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                     collider_state,
                     dyn_info,
                     collider_info,
+                    errno,
                 )
 
 

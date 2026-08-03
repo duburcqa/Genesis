@@ -1343,7 +1343,7 @@ class RigidSolver(KinematicSolver):
             )
         if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
             gs.raise_exception(
-                "Collision detection reported a contact whose position, normal or penetration is 'nan'. This is a "
+                "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "
                 "solver-internal error, please report it."
             )
         if errno & array_class.ErrorCode.INVALID_FORCE_NAN:

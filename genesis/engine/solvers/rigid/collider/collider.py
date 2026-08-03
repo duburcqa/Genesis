@@ -1115,6 +1115,7 @@ class Collider:
             self._solver.dyn_info,
             self._collider_info,
             self._solver.rigid_config,
+            self._solver._errno,
         )
 
 
