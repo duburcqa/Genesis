@@ -12,11 +12,10 @@ class MPR:
         self._solver = rigid_solver
 
         # CCD_EPS is dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
-        # ignore the scene scale: sin^2 of an angle against a Gram determinant, slack in parameter space against a
-        # barycentric coordinate, a relative magnitude in the support tie-break. That last use sets the single-precision
-        # value, which has to match the rounding a dot product accumulates - flop count times unit roundoff, near 1e-6:
-        # above it distinct vertices merge, below it a genuine tie goes unseen, and only the upper bound is exercised by
-        # a test. Reproducing the reference behaviour keeps the value tuned against it.
+        # ignore the scene scale. The support tie-break sets the single-precision value: it has to match the rounding a
+        # dot product accumulates, flop count times unit roundoff, near 1e-6 - above it distinct vertices merge, below it
+        # a genuine tie goes unseen, and only the upper bound is exercised by a test. Reproducing the reference behaviour
+        # keeps the value tuned against it.
         ccd_eps = 1e-10
         if gs.qd_float == qd.f32:
             ccd_eps = 1e-5 if rigid_solver._enable_mujoco_compatibility else 1e-6

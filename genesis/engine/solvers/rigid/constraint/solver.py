@@ -3506,8 +3506,8 @@ def func_apply_rank1_sparse_whole_env(
         vk = constraint_state.nt_vec[k, i_b]
         Lkk = constraint_state.nt_H[i_b, k, k]
         if qd.abs(vk) > EPS * Lkk:
-            tmp = Lkk * Lkk + sign * vk * vk
-            if tmp < EPS * Lkk * Lkk:
+            tmp = Lkk**2 + sign * vk**2
+            if tmp < EPS * Lkk**2:
                 is_degenerated = True
                 break
             r = qd.sqrt(tmp)
@@ -3631,8 +3631,8 @@ def func_apply_staged_rank_updates_island(
             if i_u < n_u and not is_degenerated:
                 vk = constraint_state.nt_vec[slot_base + i_u, i_b]
                 if qd.abs(vk) > EPS * Lkk:
-                    tmp = Lkk * Lkk + signs[i_u] * vk * vk
-                    if tmp < EPS * Lkk * Lkk:
+                    tmp = Lkk**2 + signs[i_u] * vk**2
+                    if tmp < EPS * Lkk**2:
                         is_degenerated = True
                     else:
                         r = qd.sqrt(tmp)
@@ -3944,7 +3944,7 @@ def func_factor_island_incremental_or_direct(
         for ld in range(n_isl_dofs):
             row_span = gs.qd_float(ld - constraint_state.island.dof_env_start_local[dof_base + ld, i_b])
             sum_span = sum_span + row_span
-            sum_span_sq = sum_span_sq + row_span * row_span
+            sum_span_sq = sum_span_sq + row_span**2
         n_passes = (n_changed + rigid_config.hessian_rank_update_batch - 1) // rigid_config.hessian_rank_update_batch
         need_rebuild = (
             gs.qd_float(n_changed + n_passes + qd.static(2 * rigid_config.rows_per_contact + 1) * cone_passes)
@@ -6001,18 +6001,15 @@ def func_terminate_or_update_descent_batch(
 ):
     n_dofs = constraint_state.jac.shape[1]
 
-    # Check convergence, i.e. whether the cost function is no longer decreasing or the gradient is flat. The
-    # improvement is the linesearch's shifted cost delta (see quad_gauss in array_class.py), which stays resolvable
-    # in float32 where subtracting successive absolute costs rounds to zero. A negative improvement is float32 noise
-    # around the optimum, so it must not be mistaken for convergence: keep iterating so the solver can recover
-    # instead of locking in a destabilizing step.
-    # A gradient is a generalized force and an improvement is a cost, so each is compared against the scene's own force
-    # and cost rather than against a bare mass: 'meaninertia' times the DOF count is a mass, and the free acceleration
-    # the cost is quoted against supplies what turns it into the two. The reference reads that acceleration through the
-    # mass matrix, which is what makes one scalar cover degrees of freedom of different kinds - a linear acceleration
-    # and an angular one are not comparable, while the cost each does is. Compared against a mass alone the thresholds
-    # hold one scene scale and drift by a power of the acceleration for every other. Reproducing the reference
-    # behaviour keeps the mass alone, so the tolerance means the same there as it always did.
+    # Convergence is the cost no longer decreasing or the gradient going flat. The improvement is the linesearch's
+    # shifted cost delta (see quad_gauss in array_class.py), resolvable in float32 where successive absolute costs
+    # subtract to zero; a negative one is noise around the optimum and must not pass for convergence, or the solver
+    # locks in a destabilizing step instead of recovering. A gradient is a generalized force and an improvement a cost,
+    # so each is compared against the scene's own rather than against the bare mass 'meaninertia' times the DOF count
+    # is: the free acceleration read through the mass matrix turns that mass into both, and that metric is what lets one
+    # scalar span degrees of freedom of different kinds - a linear acceleration and an angular one are not comparable,
+    # the cost each does is. Against the mass alone the thresholds hold one scene scale only. Reproducing the reference
+    # behaviour keeps the mass, and the tolerance quoted against it.
     mass_ref = rigid_info.meaninertia[i_b] * qd.max(1, n_dofs)
     cost_tol = mass_ref * rigid_info.tolerance[None]
     tol_scaled = cost_tol
@@ -6020,13 +6017,13 @@ def func_terminate_or_update_descent_batch(
         cost_ref = gs.qd_float(0.0)
         for i_d in range(n_dofs):
             acc = dyn_state.dofs.acc_smooth[i_d, i_b]
-            cost_ref = cost_ref + rigid_info.mass_mat[i_d, i_d, i_b] * acc * acc
+            cost_ref = cost_ref + rigid_info.mass_mat[i_d, i_d, i_b] * acc**2
         cost_tol = cost_ref * rigid_info.tolerance[None]
         tol_scaled = qd.sqrt(cost_ref * mass_ref) * rigid_info.tolerance[None]
     improvement = constraint_state.ls_improvement[i_b]
     grad_norm = gs.qd_float(0.0)
     for i_d in range(n_dofs):
-        grad_norm = grad_norm + constraint_state.grad[i_d, i_b] * constraint_state.grad[i_d, i_b]
+        grad_norm = grad_norm + constraint_state.grad[i_d, i_b] ** 2
     grad_norm = qd.sqrt(grad_norm)
     is_flat = grad_norm <= tol_scaled
     is_stalled = improvement > 0.0 and improvement < cost_tol
@@ -6078,8 +6075,8 @@ def func_terminate_or_update_descent_batch(
                 y_dot_My = y_dot_My + y * My
                 y_dot_Mgrad = y_dot_Mgrad + y * Mgrad
                 d_dot_grad = d_dot_grad + search * grad
-                d_sqnorm = d_sqnorm + search * search
-                grad_sqnorm = grad_sqnorm + grad * grad
+                d_sqnorm = d_sqnorm + search**2
+                grad_sqnorm = grad_sqnorm + grad**2
 
             # Restart to steepest descent if conjugacy is lost
             cg_beta = gs.qd_float(0.0)
@@ -6498,7 +6495,7 @@ def func_solve_iter(
                     for p in range(n_dofs):
                         row_span = gs.qd_float(p - constraint_state.nt_H_env_start[i_b, p])
                         sum_span = sum_span + row_span
-                        sum_span_sq = sum_span_sq + row_span * row_span
+                        sum_span_sq = sum_span_sq + row_span**2
                     if (
                         gs.qd_float(n_changed + qd.static(2 * rigid_config.rows_per_contact) * cone_passes) * sum_span
                         <= sum_span_sq
