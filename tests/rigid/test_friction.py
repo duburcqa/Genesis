@@ -162,10 +162,12 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
     # chain). Residual creep shrinks monotonically with the tangential impedance ratio impratio: 20 still creeps past
     # tolerance over this horizon, ~50 holds marginally, and the default 100 holds with margin.
     SAFETY_FACTOR = 1.1 if mode == "elliptic" else 2.5
-    # The noslip iteration count is tuned per chain length to match the elliptic cone's static hold: 5 iterations
-    # converge the two-box chain at every scale, while the three-box chain at small scale starves at 5 (steady
-    # residual creep, solver-independent) and converges from ~15.
-    NOSLIP_ITERATIONS = 5 if n_boxes == 2 else 15
+    # The noslip sweep needs enough passes to propagate the brace along the chain to match the elliptic cone's static
+    # hold: short of that it leaves a residual creep that responds to the count without shrinking with it (the longest
+    # chain creeps by a millimetre anywhere between 5 and 15 passes), and from 20 the creep collapses below the lateral
+    # bound on every backend and chain. The count is the one where it converges rather than the fewest that holds the
+    # bound, since it doubles as the recommendation to anyone reading it here.
+    NOSLIP_ITERATIONS = 20
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -241,8 +243,16 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
     for _ in range(2000):
         scene.step()
 
-    # The floating boxes stay static
-    assert_allclose([box.get_pos() for box in floating_boxes], boxes_pos_init, atol=5e-3)
+    # The floating boxes stay static. Creep and settle are bounded per mode because they trade places across it: the
+    # converged noslip passes leave both within a fraction of a millimetre, while the elliptic hold barely creeps but
+    # settles an order deeper into its contacts, on the heaviest stack and largest under CUDA, which sets its bound.
+    drift = torch.stack([box.get_pos() - box_pos_init for box, box_pos_init in zip(floating_boxes, boxes_pos_init)])
+    if mode == "noslip":
+        assert_allclose(drift[..., :2], 0.0, atol=5e-4)
+        assert_allclose(drift[..., 2], 0.0, atol=5e-4)
+    else:
+        assert_allclose(drift[..., :2], 0.0, atol=1e-4)
+        assert_allclose(drift[..., 2], 0.0, atol=5e-3)
 
     # Drop the force below the theoretical threshold; the stack loses its brace and falls
     floating_boxes[-1].control_dofs_force(0.95 * force_x, dofs_idx_local=0)
