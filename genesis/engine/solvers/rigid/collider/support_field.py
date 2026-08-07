@@ -49,6 +49,34 @@ class SupportField:
         band = slice(band_start, band_start + band_rows)
         return np.stack((v[:, band], np.stack((x, z, -y), axis=-1)[:, band]))
 
+    def _canonicalize_ties(self, directions, verts, vids, center):
+        """
+        Rewrite each cell's support vertex as the lowest-index one among those tied at the cell's own sample direction.
+
+        A direction along a geometric feature - a face normal, an axis, the equator between two vertices tied along
+        it - falls exactly on a sample, where the support is set-valued and the vertex the lookup returns follows the
+        rounding of the queried direction. Tied vertices score the same dot at the sample, so giving every cell of the
+        tie the same representative - the lowest vertex index, a property of the mesh alone - makes the lookup return
+        it whichever cell the rounding lands on, and a geom and any rotated copy of it pick the same vertex. The
+        window is a multiple of 'CCD_EPS' sized for a direction that comes off several cross products and a
+        normalisation - hundreds of units in the last place rather than a dot product's handful - so a vertex the
+        rounding could have picked is folded in, while a wider window would merge vertices that genuinely lose and
+        move contacts that were well determined.
+        """
+        band_rows = self._polar_band()[1]
+        # Mirrors the MPR value (see CCD_EPS in mpr.py) and the tie ratio of the portal side tests.
+        ccd_eps = 1e-5 if gs.np_float == np.float32 else 1e-10
+        dots = np.einsum("cd,vd->cv", directions, verts)
+        dot_sample = np.take_along_axis(dots, vids[:, None], axis=1)[:, 0]
+        pos_scale = np.abs(verts[vids] - center).max(axis=1)
+        tie_tol = 10.0 * ccd_eps * np.maximum(np.abs(dot_sample), 0.1 * pos_scale)
+        # A geom whose vertices are not finite (an analytic plane's bounding quad) yields no finite dot; such rows
+        # and any row whose window comes up empty keep their own vertex.
+        is_tied = (dots >= (dot_sample - tie_tol)[:, None]) & np.isfinite(dots)
+        canonical_vids = np.where(is_tied, np.arange(verts.shape[0]), verts.shape[0]).min(axis=1)
+        canonical_vids = np.where(canonical_vids < verts.shape[0], canonical_vids, vids)
+        return verts[canonical_vids], canonical_vids
+
     def _polar_band(self):
         """First stored polar row of a chart, and how many rows it stores."""
         return self._support_res // 4 - 1, self._support_res // 2 + 3
@@ -69,6 +97,7 @@ class SupportField:
             init_pos = self.solver.dyn_info.verts.init_pos.to_numpy()
             geoms_vert_start = self.solver.dyn_info.geoms.vert_start.to_numpy()
             geoms_vert_end = self.solver.dyn_info.geoms.vert_end.to_numpy()
+            geoms_center = self.solver.dyn_info.geoms.center.to_numpy()
             for i_g in range(self.solver.n_geoms):
                 this_pos = init_pos[geoms_vert_start[i_g] : geoms_vert_end[i_g]]
 
@@ -80,7 +109,7 @@ class SupportField:
                     dot_chunk = v1[i:end] @ this_pos.T
                     max_indices[i:end] = np.argmax(dot_chunk, axis=1)
 
-                support = this_pos[max_indices]
+                support, max_indices = self._canonicalize_ties(v1, this_pos, max_indices, geoms_center[i_g])
 
                 support_cell_start.append(n_support_cells)
                 support_v.append(support)
@@ -100,7 +129,11 @@ class SupportField:
         )
 
         _kernel_init_support(
-            support_cell_start, support_v, support_vid, self._support_field_info, self.solver.rigid_config
+            support_cell_start,
+            support_v,
+            support_vid,
+            self._support_field_info,
+            self.solver.rigid_config,
         )
 
         self._is_active = True
@@ -182,30 +215,50 @@ def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
     vid = 0
 
     band_start, band_rows = support_res // 4 - 1, support_res // 2 + 3
-    i_chart, ii, jj = _func_direction_grid_coords(d_mesh, support_res)
+    i_chart, azimuth_idx, polar_idx = _func_direction_grid_coords(d_mesh, support_res)
     chart_start = gs.qd_int(collider_info.support_field.support_cell_start[i_g] + i_chart * support_res * band_rows)
 
-    for i4 in range(4):
+    # The tables carry the lowest-index vertex of every sample-direction tie (see _canonicalize_ties), so the
+    # bracket cannot fork on how a feature direction rounds. Between samples two candidates' dots can still cross,
+    # and near that crossing the larger is decided by rounding while both are supports to within the window; the
+    # same window and lowest-index tie-break as the tables resolve it per query, over the four candidates already
+    # in hand. The window multiple mirrors the tables' (see CCD_TIE_RATIO there and in mpr_expand_portal), against
+    # the candidates' own coordinate scale.
+    dots4 = qd.Vector.zero(gs.qd_float, 4)
+    vids4 = qd.Vector([0, 0, 0, 0], dt=gs.qd_int)
+    idx4 = qd.Vector([0, 0, 0, 0], dt=gs.qd_int)
+    # Any one candidate's magnitude carries the coordinate scale the vanishing-dot fallback of the window needs.
+    pos_scale = gs.qd_float(0.0)
+    for i4 in qd.static(range(4)):
         i, j = gs.qd_int(0), gs.qd_int(0)
         if i4 % 2:
-            i = gs.qd_int(qd.math.ceil(ii)) % support_res
+            i = gs.qd_int(qd.math.ceil(azimuth_idx)) % support_res
         else:
-            i = gs.qd_int(qd.math.floor(ii)) % support_res
+            i = gs.qd_int(qd.math.floor(azimuth_idx)) % support_res
 
         if i4 // 2 > 0:
-            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj) - band_start, 0, band_rows - 1))
+            j = gs.qd_int(qd.math.clamp(qd.math.ceil(polar_idx) - band_start, 0, band_rows - 1))
         else:
-            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj) - band_start, 0, band_rows - 1))
+            j = gs.qd_int(qd.math.clamp(qd.math.floor(polar_idx) - band_start, 0, band_rows - 1))
 
-        support_idx = gs.qd_int(chart_start + i * band_rows + j)
-        _vid = collider_info.support_field.support_vid[support_idx]
-        pos = collider_info.support_field.support_v[support_idx]
-        dot = pos.dot(d_mesh)
+        idx4[i4] = gs.qd_int(chart_start + i * band_rows + j)
+        vids4[i4] = collider_info.support_field.support_vid[idx4[i4]]
+        pos = collider_info.support_field.support_v[idx4[i4]]
+        if qd.static(i4 == 0):
+            pos_scale = qd.max(qd.abs(pos[0]), qd.abs(pos[1]), qd.abs(pos[2]))
+        dots4[i4] = pos.dot(d_mesh)
+        dot_max = qd.max(dot_max, dots4[i4])
 
-        if dot > dot_max:
-            v = pos
-            dot_max = dot
-            vid = _vid
+    CCD_TIE_RATIO = qd.static(10.0)
+    tie_tol = CCD_TIE_RATIO * collider_info.mpr.CCD_EPS[None] * qd.max(qd.abs(dot_max), 0.1 * pos_scale)
+    i4_best = gs.qd_int(0)
+    is_found = False
+    for i4 in qd.static(range(4)):
+        if dots4[i4] >= dot_max - tie_tol and (not is_found or vids4[i4] < vid):
+            vid = vids4[i4]
+            i4_best = i4
+            is_found = True
+    v = collider_info.support_field.support_v[idx4[i4_best]]
 
     return v, vid
 
@@ -240,7 +293,7 @@ def _func_support_ellipsoid(i_g, d, pos: qd.types.vector(3), quat: qd.types.vect
     # Transform direction to ellipsoid local frame
     d_local = gu.qd_inv_transform_by_quat(d, quat)
 
-    # Support point in local frame: diag(a², b², c²) · d_local / ‖diag(a, b, c) · d_local‖
+    # Support point in local frame: diag(a^2, b^2, c^2) * d_local / |diag(a, b, c) * d_local|
     sx = a * a * d_local[0]
     sy = b * b * d_local[1]
     sz = c * c * d_local[2]

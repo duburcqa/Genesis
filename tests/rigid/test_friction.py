@@ -540,18 +540,13 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
 @pytest.mark.parametrize(
     "is_box_mesh, scale",
     [
-        # FIXME: A mesh geom reads its support from a table sampled on a spherical grid, and a direction along a
-        # geometric feature ties several vertices there, so which one anchors a contact follows the rounding of the
-        # direction and the reported manifold differs between a scene and a rotated copy of it. Restore these cases
-        # with the support-table canonicalization follow-up, which resolves every such tie to a representative that
-        # is a property of the mesh alone.
-        # (True, 0.01),
-        # (True, 0.02),
-        # (True, 0.05),
-        # (True, 0.1),
-        # (True, 1.0),
-        # pytest.param(True, 100.0, marks=pytest.mark.required),
-        pytest.param(False, 1.0, marks=pytest.mark.required),
+        (False, 1.0),
+        (True, 0.01),
+        (True, 0.02),
+        (True, 0.05),
+        (True, 0.1),
+        (True, 1.0),
+        pytest.param(True, 100.0, marks=pytest.mark.required),
     ],
 )
 @pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])

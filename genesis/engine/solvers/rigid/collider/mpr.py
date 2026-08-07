@@ -12,10 +12,14 @@ class MPR:
         self._solver = rigid_solver
 
         self._mpr_info = array_class.get_mpr_info(
-            # Relative tolerance of the geometric degeneracy tests: every comparison scales it by the magnitudes of
-            # its operands, making the tests dimensionless and scene-scale-invariant.
+            # Dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
+            # ignore the scene scale; it bounds when a triangle, a segment or a portal counts as degenerate, and the
+            # support lookup scales it by its own factor for tie width.
             CCD_EPS=1e-5 if gs.qd_float == qd.f32 else 1e-10,
+            # A length: how close the portal must come to the surface to count as having reached it, and the magnitude
+            # the ray is re-seeded with when the two geoms' centres coincide.
             CCD_TOLERANCE=1e-6,
+            # Bounds that refinement, which is not otherwise guaranteed to terminate.
             CCD_ITERATIONS=50,
         )
         self._mpr_state = array_class.get_mpr_state(self._solver._B)
@@ -236,6 +240,7 @@ def mpr_refine_portal(
     mpr_state: array_class.MPRState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
     ret = 1
@@ -267,7 +272,7 @@ def mpr_refine_portal(
             ret = -1
             break
 
-        mpr_expand_portal(i_ga, i_gb, i_b, v, v1, v2, mpr_state)
+        mpr_expand_portal(i_ga, i_gb, i_b, v, v1, v2, mpr_state, collider_info, rigid_config)
     return ret
 
 
@@ -458,25 +463,67 @@ def mpr_find_penetration(
             pos = mpr_find_pos(i_ga, i_gb, i_b, mpr_state, collider_info, rigid_config)
             break
 
-        mpr_expand_portal(i_ga, i_gb, i_b, v, v1, v2, mpr_state)
+        mpr_expand_portal(i_ga, i_gb, i_b, v, v1, v2, mpr_state, collider_info, rigid_config)
         iterations += 1
 
     return is_col, normal, penetration, pos
 
 
 @qd.func
-def mpr_expand_portal(i_ga, i_gb, i_b, v, v1, v2, mpr_state: array_class.MPRState):
+def mpr_expand_portal(
+    i_ga,
+    i_gb,
+    i_b,
+    v,
+    v1,
+    v2,
+    mpr_state: array_class.MPRState,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+):
     v4v0 = v.cross(mpr_state.simplex_support.v[0, i_b])
     dot = mpr_state.simplex_support.v[1, i_b].dot(v4v0)
 
+    # Which vertex the new support replaces is decided by the side of the plane through the origin, the new support
+    # and the portal's apex that a portal vertex falls on. A vertex lying in that plane leaves the side to rounding
+    # while both replacements are valid portals, so a scene and a rotated copy of it converge on different portals.
+    # The tie is broken on the norms of the two candidates instead, which a global rotation leaves alone; the window
+    # is the support tie-break's multiple of 'CCD_EPS' (see CCD_TIE_RATIO in support_field.py). The compatible mode
+    # keeps the bare sign test.
+    # Every window comparison and the norm tie-break hold under squaring since both sides are non-negative, which
+    # trades every square root for a square.
+    n40_sq = qd.max(v4v0.norm_sqr(), collider_info.gjk.FLOAT_MIN[None])
+    tie_tol_sq = gs.qd_float(0.0)
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        tie_tol_sq = qd.static(100.0) * collider_info.mpr.CCD_EPS[None] ** 2
+
+    # The first side test forks the same way when vertex 1 lies in the plane, before either inner tie-break can run.
+    # On a tie the half is chosen by which of the two inner vertices carries the larger norm, so the vertex a rotation
+    # of the scene cannot reorder decides which inner test runs.
+    is_positive_side = dot > 0
+    if dot**2 < tie_tol_sq * mpr_state.simplex_support.v[1, i_b].norm_sqr() * n40_sq:
+        is_positive_side = (
+            mpr_state.simplex_support.v[3, i_b].norm_sqr() > mpr_state.simplex_support.v[2, i_b].norm_sqr()
+        )
+
     i_s = gs.qd_int(0)
-    if dot > 0:
+    if is_positive_side:
         dot = mpr_state.simplex_support.v[2, i_b].dot(v4v0)
-        i_s = 1 if dot > 0 else 3
+        if dot**2 < tie_tol_sq * mpr_state.simplex_support.v[2, i_b].norm_sqr() * n40_sq:
+            na_sq = mpr_state.simplex_support.v[1, i_b].norm_sqr()
+            nb_sq = mpr_state.simplex_support.v[3, i_b].norm_sqr()
+            i_s = 1 if na_sq > nb_sq else 3
+        else:
+            i_s = 1 if dot > 0 else 3
 
     else:
         dot = mpr_state.simplex_support.v[3, i_b].dot(v4v0)
-        i_s = 2 if dot > 0 else 1
+        if dot**2 < tie_tol_sq * mpr_state.simplex_support.v[3, i_b].norm_sqr() * n40_sq:
+            na_sq = mpr_state.simplex_support.v[2, i_b].norm_sqr()
+            nb_sq = mpr_state.simplex_support.v[1, i_b].norm_sqr()
+            i_s = 2 if na_sq > nb_sq else 1
+        else:
+            i_s = 2 if dot > 0 else 1
 
     mpr_state.simplex_support.v1[i_s, i_b] = v1
     mpr_state.simplex_support.v2[i_s, i_b] = v2
@@ -822,6 +869,7 @@ def func_mpr_contact_from_centers(
             mpr_state,
             dyn_info,
             collider_info,
+            rigid_config,
             collider_static_config,
         )
         if res >= 0:
