@@ -26,21 +26,28 @@ class GJK_RETURN_CODE(IntEnum):
 
 class PORTAL_STATUS(IntEnum):
     """
-    Reliability of the MPR portal left in simplex_support after a contact, driving whether GJK must refine the result
-    and whether the portal may be reused (perturbation reconstruction, EPA seeding).
+    What the penetration depth of a contact is worth, and whether the portal behind it may be reused (perturbation
+    reconstruction, EPA seeding). Each value names the depth rather than the portal's health, since that is what every
+    consumer decides on.
 
-    INVALID: unconverged (hit the iteration cap), or a degenerate sliver triangle whose origin projects outside. The
-    penetration/normal are unreliable, so the contact must be refined by GJK.
-    DEGENERATED: the portal is not a trustworthy exact contact face - either the origin projects outside an otherwise
-    well-formed portal (the depth is only a lower-bound estimate, Theorem 4.3) or the contact came from a degenerate
-    touch/segment path with no refined portal. Not reusable, but trusted enough not to force a GJK refine.
-    VALID: converged and the origin projects inside the portal triangle, so the depth is exact (Theorem 4.2). Reliable
-    and reusable.
+    NONE: no portal exists. The contact came from a routine that computes it in closed form (plane, capsule, sphere) or
+    from the MPR centres fallback, so the depth stands on its own and there is nothing for a refinement to improve. This
+    is the value a slot carries when no detection wrote it, so an unwritten slot reads as "no portal" and never as a
+    verdict about one.
+    UNCONVERGED: MPR reached its iteration cap without a portal converging, so the depth means nothing.
+    EXTRAPOLATED: the portal converged, but the origin's projection falls so far beyond the triangle that the depth is
+    read off an extrapolation of its plane, or the triangle is degenerate. Untrustworthy.
+    LOWER_BOUND: the origin's projection falls just outside the triangle, so the depth is a valid lower bound of the
+    true one (Theorem 4.3). Trustworthy as a bound, but the portal is not the exact contact face.
+    EXACT: the portal converged and the origin projects inside it, so the depth is exact (Theorem 4.2). The only status
+    whose portal may be reused.
     """
 
-    INVALID = 0
-    DEGENERATED = 1
-    VALID = 2
+    NONE = 0
+    UNCONVERGED = 1
+    EXTRAPOLATED = 2
+    LOWER_BOUND = 3
+    EXACT = 4
 
 
 class EPA_POLY_INIT_RETURN_CODE(IntEnum):
