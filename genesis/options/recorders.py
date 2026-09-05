@@ -148,6 +148,49 @@ class NPZFile(BaseFileWriterOptions):
     filename: PathType = Field(pattern=r"(?i).*\.npz$")
 
 
+class TrajectoryFile(BaseFileWriterOptions):
+    """
+    Record the scene state at every sampled step into a '.gstraj' file, which 'Scene.load_trajectory' opens to seek and
+    replay. Recording starts with the build and stops with 'Scene.stop_recording'.
+
+    The file contains the scene as 'Scene.export' writes it, then one frame per sampled step, then the complete final
+    state. The writer flushes frames by chunks, so a crash keeps every completed chunk.
+
+    Exact mode records everything a step reads or writes: replay is bit-for-bit and the simulation resumes from any
+    frame. Compressed mode records the model parameters, configuration, velocities, accelerations, control inputs,
+    contacts and constraint forces. Its file is several times smaller, which matters for batched scenes, and a load
+    recomputes the poses of links and geoms, which may differ at the last bits.
+
+    Parameters
+    ----------
+    filename : str
+        The '.gstraj' file to write.
+    exact : bool, optional
+        Whether to record in exact mode. If None, resolved based on the number of environments: exact for a single
+        environment, compressed for a batched scene, with a warning. Defaults to None.
+    chunk_size : int, optional
+        Frames per chunk. Larger chunks compress better and seek slower, and a crash loses at most one. Defaults to 64.
+    max_size : int, optional
+        Bytes the file may grow to. A record that would pass it is dropped, the file is closed as a valid log, and the
+        next step raises, so a run left recording fills the disk by at most this much. Raise it for a long run whose
+        size is planned. If None, the file grows with the run. Defaults to 2 GiB.
+    buffer_size : int, optional
+        Frames the writing thread may lag behind the simulation by. Defaults to 64.
+    block_when_full : bool, optional
+        Whether the simulation waits for the writer past that lag, so every frame is kept. Defaults to True.
+    save_on_reset : bool, optional
+        Whether a reset of the whole scene starts a new file, numbered after this one. A reset of some environments is
+        recorded by their clocks in the same file. Defaults to False.
+    """
+
+    filename: PathType = Field(pattern=r"(?i).*\.gstraj$")
+    exact: StrictBool | None = None
+    chunk_size: PositiveInt = 64
+    max_size: PositiveInt | None = 2**31
+    buffer_size: NonNegativeInt = 64
+    block_when_full: bool = True
+
+
 class BasePlotterOptions(RecorderOptions):
     """
     Base class for plot visualization.
