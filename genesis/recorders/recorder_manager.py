@@ -33,7 +33,9 @@ class RecorderManager:
         Parameters
         ----------
         data_func: Callable[[], Any]
-            A function with no arguments that returns the data to be recorded.
+            A callable with no arguments that returns the data a step records. A recorder that overrides
+            'Recorder._get_frame' receives from it the object it reads the frame from (the trajectory recorder receives
+            a TrajectorySource).
         rec_options: RecorderOptions
             The options for the recorder which determines how the data is recorded and processed.
 

@@ -33,11 +33,16 @@ class RecorderOptions(Options):
     buffer_full_wait_time: float, optional
         Applicable when run_in_thread is True. The time to wait for buffer space to become available when the
         buffer is full. Defaults to 0.1 seconds.
+    block_when_full: bool, optional
+        Applicable when run_in_thread is True. Whether the simulation waits for buffer space when the buffer is full,
+        which keeps every sample at the cost of running at the pace of the recorder. If False, the oldest sample is
+        dropped after buffer_full_wait_time. Defaults to False.
     """
 
     hz: PositiveFloat | None = None
     buffer_size: NonNegativeInt = 0
     buffer_full_wait_time: PositiveFloat = 0.1
+    block_when_full: bool = False
 
 
 class BaseFileWriterOptions(RecorderOptions):

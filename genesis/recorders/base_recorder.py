@@ -27,6 +27,7 @@ class Recorder(Generic[T]):
         self._manager = manager
         self._data_func = data_func
         self._steps_per_sample = 1
+        self._error: Exception | None = None
         self._is_built = False
         self._is_recording = False
 
@@ -91,6 +92,12 @@ class Recorder(Generic[T]):
             # sync the thread to ensure all data is processed
             self.sync()
 
+    def _get_frame(self):
+        """Return the frame of one recorded step from 'data_func' as host numpy arrays, so 'process' handles host data
+        only. A subclass overrides this when its 'data_func' returns the source it reads the frame from.
+        """
+        return data_to_array(self._data_func())
+
     @property
     def run_in_thread(self) -> bool:
         """
@@ -112,10 +119,16 @@ class Recorder(Generic[T]):
         while self._is_recording or not self._data_queue.empty():
             try:
                 data, timestamp = self._data_queue.get(timeout=1.0)
-                self.process(data, timestamp)
-                self._data_queue.task_done()
             except queue.Empty:
                 continue
+            try:
+                self.process(data, timestamp)
+            except Exception as error:
+                # Forwarded to the stepping thread, which raises it at its next step (see 'step')
+                self._error = error
+                self._data_queue.task_done()
+                return
+            self._data_queue.task_done()
 
     @gs.assert_built
     def start(self):
@@ -172,7 +185,8 @@ class Recorder(Generic[T]):
             if timeout is not None:
                 start_time = time.time()
 
-            while not self._data_queue.empty():
+            # A frame taken off the queue is still being processed until the worker marks its task done
+            while self._data_queue.unfinished_tasks:
                 if timeout is not None and time.time() - start_time > timeout:
                     gs.raise_exception(f"[{type(self).__name__}] sync(): Timeout waiting for data queue to be empty.")
 
@@ -185,6 +199,8 @@ class Recorder(Generic[T]):
         """Process a simulation step, potentially recording data."""
         if not self._is_recording:
             return
+        if self._error is not None:
+            gs.raise_exception_from(f"[{type(self).__name__}] Processing failed in the background.", self._error)
 
         if global_step % self._steps_per_sample != 0:
             return
@@ -192,7 +208,7 @@ class Recorder(Generic[T]):
         global_time = global_step * self._manager._step_dt
         # Sanitize to CPU numpy once at the boundary: process() code never has to branch on torch vs numpy, and no
         # GPU tensor is ever queued for cross-thread access in threaded mode.
-        data = data_to_array(self._data_func())
+        data = self._get_frame()
 
         if not self.run_in_thread:
             # non-threaded mode: process data synchronously
@@ -200,6 +216,17 @@ class Recorder(Generic[T]):
             return
 
         # threaded mode: put data in queue
+        if self._options.block_when_full:
+            # The wait runs in slices, so a worker that died meanwhile cannot block the step forever
+            while True:
+                try:
+                    self._data_queue.put((data, global_time), timeout=self._options.buffer_full_wait_time)
+                    return
+                except queue.Full:
+                    if self._error is not None:
+                        gs.raise_exception_from(
+                            f"[{type(self).__name__}] Processing failed in the background.", self._error
+                        )
         try:
             self._data_queue.put((data, global_time), block=False)
             return
