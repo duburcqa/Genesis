@@ -25,10 +25,11 @@ class RecorderManager:
         self._is_recording = False
         self._is_built = False
 
-    @gs.assert_unbuilt
     def add_recorder(self, data_func: Callable[[], Any], rec_options: "RecorderOptions") -> "Recorder":
         """
         Automatically read and process data. See RecorderOptions for more details.
+
+        A recorder added after the build starts recording at once, from the next step on.
 
         Parameters
         ----------
@@ -47,6 +48,10 @@ class RecorderManager:
         recorder_cls = RecorderManager.RECORDER_TYPES_MAP[type(rec_options)]
         recorder = recorder_cls(self, rec_options, data_func)
         self._recorders.append(recorder)
+        if self._is_built:
+            recorder.build()
+            recorder.start()
+            self._is_recording = True
         return recorder
 
     @gs.assert_unbuilt

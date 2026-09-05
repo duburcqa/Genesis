@@ -566,13 +566,13 @@ class Scene(RBC):
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 
-    @gs.assert_unbuilt
-    def start_recording(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
+    def add_recorder(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
         """
         Automatically read and process data. See RecorderOptions for more details.
 
-        Data from `data_func` is automatically read and processed using the recorder at the
-        frequency `rec_options.hz` (or every step if not specified) as the scene is stepped.
+        Data from `data_func` is automatically read and processed using the recorder at the frequency `rec_options.hz`
+        (or every step if not specified) as the scene is stepped. A recorder may be added at any time, before or after
+        the build, and records from the next step on. Every recorder stops with 'stop_recording'.
 
         Parameters
         ----------
