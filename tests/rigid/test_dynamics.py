@@ -571,6 +571,58 @@ def test_energy_analytical_and_conservation(
         assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_contact_never_injects_energy(damped_pendulum_and_light_box, integrator, show_viewer, tol):
+    G = 9.81
+    N_STEPS = 100
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+            gravity=(0, 0, -G),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+            # A single Newton iteration leaves every impact solve short of its fixed point, so the constraint forces
+            # disagree with the solver's acceleration by a residual the box's inertia would magnify.
+            iterations=1,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -1.0, 0.5),
+            camera_lookat=(0.5, 0.0, 0.15),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_pendulum_and_light_box,
+            align=False,
+        ),
+    )
+    scene.build()
+    box = entity.get_link("light_box")
+    box_dofs_idx = list(range(box.dof_start, box.dof_end))
+
+    entity.set_dofs_velocity(2.0, entity.get_joint("shoulder").dofs_idx_local)
+
+    # Dropping from rest, the box can never move faster than its free-fall speed at the ground.
+    speed_bound = torch.sqrt(2 * G * box.get_AABB()[..., 0, 2])
+    for _ in range(N_STEPS):
+        scene.step()
+        box_vel = entity.get_dofs_velocity(box_dofs_idx)
+        assert (torch.linalg.norm(box_vel[..., :3], dim=-1) <= speed_bound * (1 + tol)).all()
+
+    # The box has landed and rests on the plane, and the pendulum has been damped.
+    assert (torch.linalg.norm(box_vel[..., :3], dim=-1) <= 5e-3 * speed_bound).all()
+    assert (torch.linalg.norm(box_vel[..., 3:], dim=-1) <= 5e-2).all()
+    assert_allclose(box.get_AABB()[..., 0, 2], 0.0, atol=2e-4)
+    assert (entity.get_dofs_velocity(entity.get_joint("shoulder").dofs_idx_local).abs() < 2.0).all()
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
