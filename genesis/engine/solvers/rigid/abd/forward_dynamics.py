@@ -2364,20 +2364,7 @@ def func_implicit_damping(
     # residual as M^-1 r, which the inertia of a light body amplifies into a spurious impulse. hD is the diagonal
     # func_factor_mass_entity adds to the factor, and the block solve runs in place on its own right-hand side. The
     # three passes visit the entities the factor visited (see mass_mat_mask), so a scene without damping does nothing.
-    n_dofs = dyn_state.dofs.acc.shape[0]
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-        i_e = dyn_info.dofs.entity_idx[I_d]
-        if rigid_info.mass_mat_mask[i_e, i_b]:
-            damping = dyn_info.dofs.damping[I_d]
-            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
-                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
-                    damping = damping - dyn_info.dofs.act_bias[I_d][2]
-            dyn_state.dofs.qf_damping_implicit[i_d, i_b] = (
-                damping * rigid_info.substep_dt[None] * dyn_state.dofs.acc[i_d, i_b]
-            )
-
+    # A/B VARIANT: sweeps removed, measures their cost alone
     func_solve_mass(
         dyn_state.dofs.qf_damping_implicit,
         dyn_state.dofs.qf_damping_implicit,
@@ -2386,13 +2373,6 @@ def func_implicit_damping(
         rigid_info,
         rigid_config,
     )
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-        i_e = dyn_info.dofs.entity_idx[I_d]
-        if rigid_info.mass_mat_mask[i_e, i_b]:
-            dyn_state.dofs.acc[i_d, i_b] = dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qf_damping_implicit[i_d, i_b]
 
     # Disable pre-computed factorization mask right away
     if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
