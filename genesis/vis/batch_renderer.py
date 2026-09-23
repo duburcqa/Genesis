@@ -4,8 +4,9 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.repr_base import RBC
 from genesis.constants import IMAGE_TYPE
+from genesis.engine.solvers.base_solver import StateChange, Subscriber
+from genesis.repr_base import RBC
 from genesis.utils.misc import qd_to_torch
 
 from .camera import Camera
@@ -278,6 +279,9 @@ class BatchRenderer(RBC):
         self._geom_retriever = GenesisGeomRetriever(self._visualizer.scene.rigid_solver, vis_options.segmentation_level)
         self._data_cache = {}
         self._t = -1
+        # The GEOMETRY subscription build registers on every solver, released by destroy
+        self._geometry_subscriber: Subscriber | None = None
+        self._geometry_solvers: tuple = ()
 
     def add_light(self, pos, dir, color, intensity, directional, castshadow, cutoff, attenuation):
         self._lights.append(Light(pos, dir, color, intensity, directional, castshadow, cutoff, attenuation))
@@ -286,6 +290,13 @@ class BatchRenderer(RBC):
         """
         Build all cameras in the batch and initialize Moderona renderer
         """
+        # The frames go stale when a solver moves geometry between two steps as well as when the scene steps, so the
+        # GEOMETRY changes the solvers broadcast are watched (see RasterizerContext.build)
+        self._geometry_subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
+        self._geometry_solvers = tuple(self._visualizer.scene.sim.active_solvers)
+        for solver in self._geometry_solvers:
+            solver.subscribe(self._geometry_subscriber)
+
         if not _MADRONA_AVAILABLE:
             gs.raise_exception("Madrona batch renderer is only supported on Linux x86-64.")
 
@@ -375,8 +386,9 @@ class BatchRenderer(RBC):
         """
 
         # Clear cache if requested or necessary
-        if force_render or self._t < self._visualizer.scene.sim.cur_step_global:
+        if force_render or self._t < self._visualizer.scene.sim.cur_step_global or self._geometry_subscriber.pending:
             self._data_cache.clear()
+            self._geometry_subscriber.clear()
 
         # Fetch available cached data
         request = (rgb, depth, segmentation, normal)
@@ -447,6 +459,9 @@ class BatchRenderer(RBC):
         return self._geom_retriever.seg_color_map.colorize_seg_idxc_arr(seg_idxc_arr)
 
     def destroy(self):
+        for solver in self._geometry_solvers:
+            solver.unsubscribe(self._geometry_subscriber)
+        self._geometry_solvers = ()
         self._lights.clear()
         self._data_cache.clear()
         if self._renderer is not None:

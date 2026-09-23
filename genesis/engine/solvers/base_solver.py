@@ -356,6 +356,10 @@ class Solver(RBC):
             )
         self._subscribers.add(subscriber)
 
+    def unsubscribe(self, subscriber: Subscriber):
+        """Remove a Subscriber from this solver, ignoring one that was never registered."""
+        self._subscribers.discard(subscriber)
+
     def build(self):
         self._B = self._sim._B
 

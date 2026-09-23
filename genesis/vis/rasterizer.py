@@ -66,9 +66,15 @@ class Rasterizer(RBC):
             self._viewer.close_offscreen(self._camera_targets[camera.uid])
         del self._camera_targets[camera.uid]
 
-    def render_camera(self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs):
-        """Render a camera. With 'split_envs', the environments are rendered one by one from the pose the camera
-        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side."""
+    def render_camera(
+        self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs, envs_idx=None
+    ):
+        """Render the scene from a camera.
+
+        With 'split_envs', the environments are rendered one by one from the pose the camera holds in each and stacked,
+        'envs_idx' restricting them to a subset (every environment by default). Otherwise one image is rendered of the
+        environments laid out side by side.
+        """
         # Update camera
         self.update_camera(camera)
 
@@ -92,6 +98,7 @@ class Rasterizer(RBC):
                         plane_reflection=rgb and self._context.plane_reflection,
                         shadow=rgb and self._context.shadow,
                         skip_markers=skip_markers,
+                        envs_idx=envs_idx,
                     )
 
                 if segmentation:
@@ -107,6 +114,7 @@ class Rasterizer(RBC):
                         plane_reflection=False,
                         shadow=False,
                         skip_markers=skip_markers,
+                        envs_idx=envs_idx,
                     )
             finally:
                 # Unset the context
@@ -123,6 +131,7 @@ class Rasterizer(RBC):
                     seg=False,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    envs_idx=envs_idx,
                 )
 
             if segmentation:
@@ -135,6 +144,7 @@ class Rasterizer(RBC):
                     seg=True,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    envs_idx=envs_idx,
                 )
 
         if segmentation:

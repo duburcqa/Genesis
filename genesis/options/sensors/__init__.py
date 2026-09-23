@@ -1,3 +1,5 @@
+import sys
+
 from .camera import *
 from .options import *
 from .options import Raycaster as Lidar
@@ -14,20 +16,24 @@ class _SensorTypesNamespace:
     def __init__(self):
         self._ids: dict[str, int] = {}
 
-    def __getattr__(self, name: str) -> int:
-        if name.startswith("_"):
-            raise AttributeError(name)
+    def __getitem__(self, name: str) -> int:
         cached = self._ids.get(name)
         if cached is not None:
             return cached
-        import sys
-
         obj = vars(sys.modules[__name__]).get(name)
         if not isinstance(obj, type) or not issubclass(obj, SensorOptions):
-            raise AttributeError(name)
+            raise KeyError(name)
         tid = len(self._ids)
         self._ids[name] = tid
         return tid
+
+    def __getattr__(self, name: str) -> int:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
 
 types = _SensorTypesNamespace()

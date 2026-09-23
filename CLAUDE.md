@@ -86,6 +86,7 @@
 - **Name a local after what it is, not after the property under test.** A scene is `scene_from_substeps`, never `shorthand`, `inheriting` or `idle`.
 - **A known upstream bug is a `# FIXME:` naming the issue.** Two lines at most, with the tracker reference (`# FIXME: quadrants#887 - ...`) and what the workaround costs.
 - **Never document a contract the code does not offer.** No array shape and no memory layout in a docstring unless the API guarantees it.
+- **A docstring opens with one short summary sentence of at most 200 characters; anything more follows a blank line, in paragraphs.** A docstring says what the function does, what each argument means and what the caller gets back, and carries no rationale: "since", "because", "so that", "which is why", "otherwise" mark a justification, which moves to a comment at the code it justifies.
 - **Compare floats with a tolerance.** `==` and `!=` on floating-point values are prohibited, host-side values included: use `np.allclose(a, b, atol=gs.EPS)` or an explicit bound.
 - **Never write to a third-party object's private state.** Keep our own record beside the object and expose it through a property.
 - **State what IS, never what is NOT.** In comments, docstrings, and reports, drop "not X", "unlike Y", "does not ...", "it is X, not Y" unless the negation was explicitly asked for or is the literal spec. If a property is not mentioned, it does not exist - defending against an unraised concern is noise. Say the positive fact and stop. The one exception is an expectation the reader would naively hold: where the naive reading is the wrong one, saying so is the fact, and the negation earns its place.
@@ -217,6 +218,6 @@ cocoapy.NSOpenGLPFAMaximumPolicy = 0x00020400  # kCGLRendererGenericFloatID
 ## Tooling & Contributing
 
 - Lint/format: ruff (check + format, line length 120) via pre-commit; install hooks with `pre-commit install` - they run on every commit.
-- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (the simulated physics change by default: a different model, or different default parameters; solver-internal restructuring is `[MISC]`), `[BREAKING]` (API break). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
+- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (the simulated physics change by default: a different model, or different default parameters; solver-internal restructuring is `[MISC]`), `[BREAKING]` (API break). `[CHANGING]` and `[BREAKING]` never stand alone: they precede the tag stating the purpose (`[CHANGING][MISC] Speed up ...`). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
 - PR titles state the benefit for end users, not the implementation. Implementation details go in the PR description.
 - Contributors must follow `CODING_GUIDELINES.md` and the reference docs in `.github/contributing/`: ARCHITECTURE, TESTING, CODING_CONVENTIONS, EXAMPLES, PULL_REQUESTS, USD_PARSER. On conflict, ask.

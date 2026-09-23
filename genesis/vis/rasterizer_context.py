@@ -8,9 +8,10 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
@@ -96,6 +97,9 @@ class SegmentationColorMap:
 
 class RasterizerContext:
     def __init__(self, options):
+        # The GEOMETRY subscription build registers on every solver, released by destroy
+        self._geometry_subscriber: Subscriber | None = None
+        self._geometry_solvers: tuple = ()
         self.show_world_frame = options.show_world_frame
         self.world_frame_size = options.world_frame_size
         self.show_link_frame = options.show_link_frame
@@ -159,6 +163,14 @@ class RasterizerContext:
         self.sim = scene.sim
         self.visualizer = scene.visualizer
 
+        # The sync keys on the step count, which a setter moving geometry between two steps leaves unchanged, so the
+        # GEOMETRY changes the solvers broadcast are watched as well (see Solver.subscribe, and the FIXME in
+        # CameraSensorArray.build for the solvers that broadcast none yet)
+        self._geometry_subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
+        self._geometry_solvers = tuple(self.sim.active_solvers)
+        for solver in self._geometry_solvers:
+            solver.subscribe(self._geometry_subscriber)
+
         # Update visuals at this point avoids nasty visual artifacts during Scene build
         self.visualizer.update_visual_states()
 
@@ -193,6 +205,9 @@ class RasterizerContext:
         self.seg_color_map.generate_seg_colors()
 
     def destroy(self):
+        for solver in self._geometry_solvers:
+            solver.unsubscribe(self._geometry_subscriber)
+        self._geometry_solvers = ()
         self.clear_dynamic_nodes(only_outdated=False)
 
         for node_registry in (
@@ -1190,6 +1205,9 @@ class RasterizerContext:
         self.clear_external_nodes()
 
     def update(self, force_render: bool = False):
+        # A pending GEOMETRY change forces the sync like the caller can (see build)
+        force_render = force_render or bool(self._geometry_subscriber.pending)
+
         # Early return if already updated previously
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             return
@@ -1198,6 +1216,7 @@ class RasterizerContext:
         with self.scene._visualizer.viewer_lock:
             # Update current time right away
             self._t = self.scene.sim.cur_step_global
+            self._geometry_subscriber.clear()
 
             # Remove up old dynamic nodes
             self.clear_dynamic_nodes(only_outdated=True)

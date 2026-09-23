@@ -217,6 +217,7 @@ class Viewer(pyglet.window.Window):
             "face_normals": False,
             "cull_faces": True,
             "offscreen": False,
+            "envs_idx": None,
             "point_size": 1.0,
             "rgb": True,
             "seg": False,
@@ -733,6 +734,7 @@ class Viewer(pyglet.window.Window):
         normal=False,
         skip_markers=False,
         split_envs=False,
+        envs_idx=None,
     ):
         if not self.is_active:
             # A viewer in its own thread stores what ended it rather than raising it where nobody waits, so the call
@@ -744,7 +746,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = rgb
         self.render_flags["seg"] = seg
         self.render_flags["depth"] = depth
-        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs)
+        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs, envs_idx)
         if self._run_in_thread:
             # Send offscreen request
             self._offscreen_event.set()
@@ -783,7 +785,7 @@ class Viewer(pyglet.window.Window):
 
             if self._offscreen_pending_render is not None:
                 # Extract request right away
-                camera, target, normal, skip_markers, split_envs = self._offscreen_pending_render
+                camera, target, normal, skip_markers, split_envs, envs_idx = self._offscreen_pending_render
                 self._offscreen_pending_render = None
 
                 # Update context, just in case is not already done before
@@ -793,6 +795,7 @@ class Viewer(pyglet.window.Window):
                 self.render_flags["offscreen"] = True
                 self.render_flags["skip_markers"] = skip_markers
                 self.render_flags["split_envs"] = split_envs
+                self.render_flags["envs_idx"] = envs_idx
                 if target is self._renderer:
                     # The interactive window's own renderer tracks the OS window content area, which the OS may clamp
                     # below the requested resolution (e.g. a viewport larger than a macOS runner can allocate). Force
@@ -814,6 +817,7 @@ class Viewer(pyglet.window.Window):
                 self.render_flags["offscreen"] = False
                 self.render_flags["skip_markers"] = False
                 self.render_flags["split_envs"] = False
+                self.render_flags["envs_idx"] = None
 
             if self._run_in_thread:
                 self._offscreen_semaphore.release()
@@ -1124,7 +1128,9 @@ class Viewer(pyglet.window.Window):
 
         first_pass_done = False
         if self.render_flags["rgb"] or self.render_flags["depth"] or self.render_flags["seg"]:
-            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map)
+            retval = renderer.render(
+                self.scene, flags, seg_node_map=seg_node_map, envs_idx=self.render_flags["envs_idx"]
+            )
             first_pass_done = True
         else:
             retval = ()
@@ -1139,7 +1145,9 @@ class Viewer(pyglet.window.Window):
             if self.render_flags.get("skip_markers", False):
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done)
+            normal_arr, *_ = renderer.render(
+                scene, flags, envs_idx=self.render_flags["envs_idx"], is_first_pass=not first_pass_done
+            )
             retval = (*retval, normal_arr)
 
             renderer._program_cache = old_cache
