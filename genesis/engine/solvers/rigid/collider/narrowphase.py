@@ -3086,7 +3086,11 @@ def func_narrow_phase_diff_convex_vs_convex(
 ):
     # Compute reference contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
+    for i_c, i_b in qd.ndrange(
+        collider_state.contact_data.pos.shape[0],
+        collider_state.active_buffer.shape[1],
+        axes=qd.static(array_class.env_outer_axes(collider_state.active_buffer)),
+    ):
         if i_c < collider_state.n_contacts[i_b]:
             ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
             is_ref = i_c == ref_id
@@ -3134,7 +3138,11 @@ def func_narrow_phase_diff_convex_vs_convex(
                 )
 
     # Compute other contacts
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
+    for i_c, i_b in qd.ndrange(
+        collider_state.contact_data.pos.shape[0],
+        collider_state.active_buffer.shape[1],
+        axes=qd.static(array_class.env_outer_axes(collider_state.active_buffer)),
+    ):
         if i_c < collider_state.n_contacts[i_b]:
             ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
             is_ref = i_c == ref_id
@@ -3186,7 +3194,11 @@ def kernel_fill_diff_contact_input_analytic(
     """
     _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], _B):
+    for i_c, i_b in qd.ndrange(
+        collider_state.contact_data.pos.shape[0],
+        _B,
+        axes=qd.static(array_class.env_outer_axes(collider_state.contact_data.pos)),
+    ):
         if i_c < collider_state.n_contacts[i_b]:
             i_ga = collider_state.contact_data.geom_a[i_c, i_b]
             i_gb = collider_state.contact_data.geom_b[i_c, i_b]

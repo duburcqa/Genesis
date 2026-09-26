@@ -359,7 +359,7 @@ def _func_broad_phase_all_vs_all(
 
     n_valid_pairs = collider_info.n_valid_pairs[None]
     qd.loop_config(name="traverse_valid")
-    for i_vp, i_b in qd.ndrange(n_valid_pairs, _B):
+    for i_vp, i_b in qd.ndrange(n_valid_pairs, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.geoms.pos))):
         pair = collider_info.valid_collision_pairs[i_vp]
         i_ga = pair[0]
         i_gb = pair[1]

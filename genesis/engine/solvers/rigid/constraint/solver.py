@@ -1373,7 +1373,7 @@ def add_equality_constraints(
     # Reset the per-link constraint involvement (see is_constrained in array_class.py); the equality funcs below and
     # the collision assembly mark it back.
     qd.loop_config(name="clear_links_constrained", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.links.is_constrained))):
         dyn_state.links.is_constrained[i_l, i_b] = False
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -5313,7 +5313,9 @@ def func_solve_init(
         # The first row update of the solve seeds every latch, see func_relatch_cone.
         n_cones = constraint_state.cone_latch.shape[0]
         qd.loop_config(name="reset_cone_latches", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_cone, i_b in qd.ndrange(n_cones, _B):
+        for i_cone, i_b in qd.ndrange(
+            n_cones, _B, axes=qd.static(array_class.env_outer_axes(constraint_state.cone_latch))
+        ):
             constraint_state.cone_latch[i_cone, i_b] = -1.0
 
     if qd.static(rigid_config.enable_mujoco_compatibility):
@@ -5348,7 +5350,7 @@ def func_solve_init(
 
         # Pick the best starting point between current state and warmstart
         qd.loop_config(name="solve_init_pick_warmstart", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_d, i_b in qd.ndrange(n_dofs, _B):
+        for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(array_class.env_outer_axes(constraint_state.qacc))):
             if constraint_state.cost_ws[i_b] < constraint_state.cost[i_b]:
                 constraint_state.qacc[i_d, i_b] = constraint_state.qacc_ws[i_d, i_b]
                 constraint_state.Ma[i_d, i_b] = constraint_state.Ma_ws[i_d, i_b]
@@ -5658,7 +5660,7 @@ def func_update_contact_force(
     _B = dyn_state.links.contact_force.shape[1]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.links.contact_force))):
         dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
@@ -5735,7 +5737,7 @@ def func_update_qacc(
     _B = dyn_state.dofs.acc.shape[1]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.dofs.acc))):
         # A hibernated dof is left out of the solve, so its zero acceleration and last awake forces stand.
         if qd.static(rigid_config.use_hibernation):
             if dyn_state.dofs.is_hibernated[i_d, i_b]:

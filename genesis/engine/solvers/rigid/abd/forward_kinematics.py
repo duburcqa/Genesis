@@ -34,7 +34,11 @@ def kernel_forward_kinematics_links_geoms(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
         i_l_root = rigid_info.roots_link_idx[i_r]
         func_update_cartesian_space_root(
@@ -59,7 +63,11 @@ def kernel_masked_forward_kinematics_links_geoms(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_mask.shape[0]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_mask.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         if envs_mask[i_b]:
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_update_cartesian_space_root(
@@ -84,7 +92,11 @@ def kernel_forward_kinematics(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
         i_l_root = rigid_info.roots_link_idx[i_r]
         func_update_kinematics_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
@@ -98,7 +110,11 @@ def kernel_masked_forward_kinematics(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_mask.shape[0]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_mask.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         if envs_mask[i_b]:
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_update_kinematics_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
@@ -113,7 +129,11 @@ def kernel_forward_velocity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
         i_l_root = rigid_info.roots_link_idx[i_r]
         func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
@@ -128,7 +148,11 @@ def kernel_masked_forward_velocity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_mask.shape[0]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_mask.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         if envs_mask[i_b]:
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
@@ -527,14 +551,22 @@ def func_update_geoms(
     """
     if qd.static(force_update_all_geoms):
         qd.loop_config(name="update_geoms_roots", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_r, i_b in qd.ndrange(
+            rigid_info.roots_link_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_update_geoms_root(
                 i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward
             )
     else:
         qd.loop_config(name="update_geoms", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_t, i_b in qd.ndrange(
+            rigid_info.trees_root_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
                 i_l_start = rigid_info.trees_root_idx[i_t]
                 i_l_end = rigid_info.trees_link_end[i_t]
@@ -554,7 +586,11 @@ def kernel_update_geoms(
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
 ):
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
         func_update_geoms_root(
             i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward=False
@@ -703,12 +739,20 @@ def func_forward_velocity(
         qd.loop_config(
             name="forward_velocity_roots", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         )
-        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_r, i_b in qd.ndrange(
+            rigid_info.roots_link_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     else:
         qd.loop_config(name="forward_velocity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_t, i_b in qd.ndrange(
+            rigid_info.trees_root_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             # A hibernated tree keeps the zero velocities it was put to sleep with (see func_hibernate_link in misc.py)
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
                 i_l_start = rigid_info.trees_root_idx[i_t]
@@ -729,7 +773,7 @@ def kernel_update_verts_for_geoms(
     _B = dyn_state.geoms.verts_updated.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_g_, i_b in qd.ndrange(n_geoms, _B):
+    for i_g_, i_b in qd.ndrange(n_geoms, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.geoms.pos))):
         i_g = geoms_idx[i_g_]
         func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info)
 
@@ -764,7 +808,7 @@ def func_update_all_verts(dyn_state: array_class.DynState, dyn_info: array_class
     n_geoms, _B = dyn_state.geoms.pos.shape
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
+    for i_g, i_b in qd.ndrange(n_geoms, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.geoms.pos))):
         func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info)
 
 
@@ -783,7 +827,7 @@ def kernel_update_geom_aabbs(
     _B = dyn_state.geoms.pos.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
+    for i_g, i_b in qd.ndrange(n_geoms, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.geoms.pos))):
         g_pos = dyn_state.geoms.pos[i_g, i_b]
         g_quat = dyn_state.geoms.quat[i_g, i_b]
 
@@ -807,7 +851,7 @@ def kernel_update_vgeoms(dyn_state: array_class.DynState, dyn_info: array_class.
     _B = dyn_state.links.pos.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_g, i_b in qd.ndrange(n_vgeoms, _B):
+    for i_g, i_b in qd.ndrange(n_vgeoms, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.vgeoms.pos))):
         i_l = dyn_info.vgeoms.link_idx[i_g]
         dyn_state.vgeoms.pos[i_g, i_b], dyn_state.vgeoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
             dyn_info.vgeoms.pos[i_g],
@@ -833,7 +877,7 @@ def kernel_update_vverts_for_vgeoms(
     _B = dyn_state.vgeoms.pos.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_vg_, i_b in qd.ndrange(n_vgeoms_in, _B):
+    for i_vg_, i_b in qd.ndrange(n_vgeoms_in, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.vgeoms.pos))):
         i_vg = vgeoms_idx[i_vg_]
         v_start = dyn_info.vgeoms.vvert_start[i_vg]
         v_end = dyn_info.vgeoms.vvert_end[i_vg]
@@ -895,7 +939,11 @@ def func_update_cartesian_space(
         qd.loop_config(
             name="update_cartesian_space_roots", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         )
-        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_r, i_b in qd.ndrange(
+            rigid_info.roots_link_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             i_l_root = rigid_info.roots_link_idx[i_r]
             i_l_end = rigid_info.links_root_end[i_l_root]
             for i_l in range(i_l_root, i_l_end):
@@ -911,7 +959,11 @@ def func_update_cartesian_space(
         qd.loop_config(
             name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         )
-        for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        for i_t, i_b in qd.ndrange(
+            rigid_info.trees_root_idx.shape[0],
+            dyn_state.links.pos.shape[1],
+            axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+        ):
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
                 i_l_start = rigid_info.trees_root_idx[i_t]
                 i_l_end = rigid_info.trees_link_end[i_t]
@@ -929,7 +981,11 @@ def func_update_cartesian_space(
     qd.loop_config(
         name="update_cartesian_space_com_inertial", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
-    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
+    for i_l, i_b in qd.ndrange(
+        dyn_state.links.pos.shape[0],
+        dyn_state.links.pos.shape[1],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         i_l_root = dyn_info.links.root_idx[I_l]
         if func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
@@ -944,14 +1000,22 @@ def func_update_cartesian_space(
     qd.loop_config(
         name="update_cartesian_space_com_sum", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        dyn_state.links.pos.shape[1],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         if func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
             func_COM_root_sum(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
     qd.loop_config(
         name="update_cartesian_space_com", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
-    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
+    for i_l, i_b in qd.ndrange(
+        dyn_state.links.pos.shape[0],
+        dyn_state.links.pos.shape[1],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         i_l_root = dyn_info.links.root_idx[I_l]
         if func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
@@ -987,7 +1051,11 @@ def kernel_forward_kinematics_replay(
     is_backward: qd.template(),
 ):
     # No link sleeps under gradients, so the walk of every root covers every link
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
         i_l_root = rigid_info.roots_link_idx[i_r]
         func_forward_kinematics_root(
@@ -1015,6 +1083,10 @@ def kernel_COM_links_replay(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0],
+        dyn_state.links.pos.shape[1],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos)),
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)

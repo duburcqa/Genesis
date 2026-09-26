@@ -252,13 +252,13 @@ def kernel_init_dof_fields(
         dyn_info.dofs.entity_idx[I_d] = entity_idx[i_d]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.dofs.vel))):
         dyn_state.dofs.ctrl_mode[i_d, i_b] = gs.CTRL_MODE.FORCE
         dyn_state.dofs.ctrl_force[i_d, i_b] = gs.qd_float(0.0)
 
     if qd.static(rigid_config.use_hibernation):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_d, i_b in qd.ndrange(n_dofs, _B):
+        for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.dofs.vel))):
             dyn_state.dofs.is_hibernated[i_d, i_b] = False
 
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -356,7 +356,7 @@ def kernel_init_link_fields(
         for j in qd.static(range(3)):
             dyn_info.links.pos[I_l][j] = links_pos[i_l, j]
 
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos))):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
         # Update state for root fixed link. Their state will not be updated in forward kinematics later but can be manually changed by user.
@@ -369,7 +369,7 @@ def kernel_init_link_fields(
 
     if qd.static(rigid_config.use_hibernation):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_l, i_b in qd.ndrange(n_links, _B):
+        for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos))):
             dyn_state.links.is_hibernated[i_l, i_b] = False
 
 
@@ -682,7 +682,7 @@ def kernel_init_geom_fields(
         geoms_init_AABB[i_g, 7] = qd.Vector([upper[0], upper[1], upper[2]], dt=gs.qd_float)
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
+    for i_g, i_b in qd.ndrange(n_geoms, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.geoms.pos))):
         dyn_state.geoms.friction_ratio[i_g, i_b] = 1.0
 
 
@@ -760,7 +760,9 @@ def kernel_init_entity_fields(
         _B = dyn_state.entities.is_hibernated.shape[1]
 
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_e, i_b in qd.ndrange(n_entities, _B):
+        for i_e, i_b in qd.ndrange(
+            n_entities, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.entities.is_hibernated))
+        ):
             dyn_state.entities.is_hibernated[i_e, i_b] = False
 
 
@@ -780,7 +782,9 @@ def kernel_init_equality_fields(
     _B = dyn_info.equalities.eq_obj1id.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_eq, i_b in qd.ndrange(n_equalities, _B):
+    for i_eq, i_b in qd.ndrange(
+        n_equalities, _B, axes=qd.static(array_class.env_outer_axes(dyn_info.equalities.eq_type))
+    ):
         dyn_info.equalities.eq_obj1id[i_eq, i_b] = equalities_eq_obj1id[i_eq]
         dyn_info.equalities.eq_obj2id[i_eq, i_b] = equalities_eq_obj2id[i_eq]
         dyn_info.equalities.eq_type[i_eq, i_b] = equalities_eq_type[i_eq]
@@ -871,7 +875,11 @@ def kernel_wakeup_coupled_links(
     the momentum exchange whose opposite half has already been applied on the coupled side.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_state.links.is_hibernated.shape[0], dyn_state.links.is_hibernated.shape[1]):
+    for i_l, i_b in qd.ndrange(
+        dyn_state.links.is_hibernated.shape[0],
+        dyn_state.links.is_hibernated.shape[1],
+        axes=qd.static(array_class.env_outer_axes(dyn_state.links.is_hibernated)),
+    ):
         if dyn_state.links.is_hibernated[i_l, i_b] and (
             dyn_state.links.cfrc_coupling_vel[i_l, i_b].norm_sqr() > 0
             or dyn_state.links.cfrc_coupling_ang[i_l, i_b].norm_sqr() > 0
@@ -939,7 +947,7 @@ def func_clear_external_force(
 
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(array_class.env_outer_axes(dyn_state.links.pos))):
         dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
