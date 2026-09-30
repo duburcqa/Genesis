@@ -16,6 +16,8 @@ import torch
 
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
@@ -917,19 +919,12 @@ class Scene(RBC):
             center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
             self.envs_offset -= center
 
-        """
-        Notes:
-        - When using gpu
-            - for non-batched env, we only parallelize certain loops that have big loop size
-            - for batched env, we parallelize all loops
-        - When using cpu, we serialize everything.
-            - Parallelization only provides a boost for n_envs >= num_threads.
-              It is always disabled by default but can be enforced by setting the env var `GS_PARA_LEVEL=2`.
-            - In order to exploit full cpu power, users are encouraged to launch multiple processes manually, so that
-              each process uses a single cpu thread.
-        """
+        # On GPU, a non-batched scene parallelizes the large loops alone and a batched scene every loop. On CPU, every
+        # parallel loop pays a dispatch to the thread pool, which only pays off once each thread holds several
+        # environments, so the loops stay serial below that. GS_PARA_LEVEL overrides the choice.
         if gs.backend == gs.cpu:
-            para_level = gs.PARA_LEVEL.NEVER
+            n_threads = qd.lang.impl.current_cfg().cpu_max_num_threads
+            para_level = gs.PARA_LEVEL.ALL if self.n_envs >= 4 * n_threads else gs.PARA_LEVEL.NEVER
         elif self.n_envs <= 1:
             para_level = gs.PARA_LEVEL.PARTIAL
         else:

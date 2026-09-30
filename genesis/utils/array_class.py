@@ -19,9 +19,9 @@ def _tensor_backend():
 
 def is_env_first_default():
     """Whether a tensor holding one value per environment is laid out env-first when its allocation leaves it unset."""
-    # FIXME: quadrants#931 - CPU should default to env-first once quadrants lays out vector / matrix tensors and permutes
-    # the list indices of laid-out tensors. Until then its threads share the cache lines of neighbouring environments.
-    return False
+    # A CPU thread runs a contiguous range of environments, which an env-first layout keeps apart in memory. This needs
+    # quadrants#935 and quadrants#936 (laid-out vector / matrix tensors, permuted list indices).
+    return gs.backend == gs.cpu
 
 
 def env_outer_axes(tensor):

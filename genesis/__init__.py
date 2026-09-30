@@ -242,18 +242,17 @@ def init(
         torch.backends.cudnn.benchmark = False
         logger.info("Beware running Genesis in debug mode dramatically reduces runtime speed.")
 
-    # FIXME: Enforcing Quadrants num threads to 1 by default when running on CPU
-    # because it significantly improve performance.
+    # A parallel loop iterates over environments, and one iteration is costly enough to be worth a thread of its own,
+    # so the blocks a loop is split into across the threads hold a single iteration. The threads default to the ones
+    # torch sizes its own pool to, the performance cores: a thread running on an efficiency core, or sharing a core
+    # with another, stalls every loop it takes part in.
     qd_num_cpu_threads = os.environ.get("QD_NUM_THREADS")
     if qd_num_cpu_threads is not None:
-        qd_init_kwargs.update(
-            cpu_max_num_threads=int(qd_num_cpu_threads),
-            num_compile_threads=int(qd_num_cpu_threads),
-        )
-    else:
-        qd_init_kwargs.update(
-            cpu_max_num_threads=1,
-        )
+        qd_init_kwargs.update(num_compile_threads=int(qd_num_cpu_threads))
+    qd_init_kwargs.update(
+        cpu_max_num_threads=int(qd_num_cpu_threads) if qd_num_cpu_threads is not None else torch.get_num_threads(),
+        cpu_min_range_for_block=1,
+    )
 
     if seed is not None:
         global SEED
