@@ -1565,18 +1565,19 @@ def func_recompute_perturbed_contact(
     used_gjk_0: bool,
 ):
     """
-    Project a contact found on the perturbed geoms onto the contact patch of contact 0.
+    Bring a contact found on the perturbed geoms back to the unperturbed geoms, on the patch of contact 0 or its own.
 
-    Every contact of the convex pair takes the normal 'normal_0' of contact 0. The witnesses of the perturbed
-    detection, un-rotated by the perturbation 'qrot' of their own geom (geom A by 'qrot', geom B by its inverse), are
-    exact material points of the unperturbed geoms. The depth is measured along 'normal_0' at the witness standing on
-    the feature of the contact: exact where two edges cross, at the end that the tilt deepens for an edge lying on a
-    face, bounded from below by the support triangle of the other geom (or the plane) where it covers the witness, and
-    otherwise read off the tangent plane of the other geom.
+    The witnesses of the perturbed detection, un-rotated by the perturbation 'qrot' of their own geom (geom A by 'qrot',
+    geom B by its inverse), are exact material points of the unperturbed geoms. A contact of the patch of contact 0
+    takes its normal 'normal_0', the depth being measured along it at the witness standing on the feature of the
+    contact: exact where two edges cross, at the end that the tilt deepens for an edge lying on a face, bounded from
+    below by the support triangle of the other geom (or the plane) where it covers the witness, and otherwise read off
+    the tangent plane of the other geom. A contact of negative depth, past the edge of the patch, moves towards contact
+    0 'contact_pos_0' of depth 'penetration_0' to where the depth interpolated between both vanishes, and is returned
+    at zero depth. The depth across the contact plane being concave, this point lies on the patch.
 
-    A contact of negative depth, past the edge of the patch, moves towards contact 0 'contact_pos_0' of depth
-    'penetration_0' to where the depth interpolated between both vanishes, and is returned at zero depth. The depth
-    across the contact plane being concave, this point lies on the patch. 'used_gjk_0' says whether
+    Where none of these estimates applies, the detection resolved another patch, and the contact keeps the normal of the
+    face it found and the separation of its witnesses along it, at their midpoint. 'used_gjk_0' says whether
     Gilbert-Johnson-Keerthi (GJK) rather than Minkowski portal refinement (MPR) detected contact 0, which sets the
     accuracy of its depth.
 
@@ -1596,14 +1597,18 @@ def func_recompute_perturbed_contact(
     # The point steps back from the witness of geom B by half the depth: averaging both witnesses would slide it off the
     # feature by an amount quadratic in the perturbation angle
     contact_pos = witness_b - 0.5 * depth * normal_0
-    is_depth_lower_bound = False
+    has_depth_estimate = False
     # Whether the witness of geom B rather than geom A stands on the feature of the contact, where the depth is measured
     is_witness_b_anchor = False
+    # Support points of the detection on the unperturbed geoms, one per row, of geom A and of geom B
+    supports_a = qd.Matrix.zero(gs.qd_float, 3, 3)
+    supports_b = qd.Matrix.zero(gs.qd_float, 3, 3)
+    has_supports = False
     if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
         # The plane of geom A passes through its witness of contact 0, with the normal of contact 0
         depth = normal_0.dot(witness_b - contact_pos_0) + 0.5 * penetration_0
         contact_pos = witness_b - 0.5 * depth * normal_0
-        is_depth_lower_bound = True
+        has_depth_estimate = True
     elif not (
         (dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE)
         or (used_gjk and gjk_state.nearest_face[i_scratch] < 0)
@@ -1613,7 +1618,7 @@ def func_recompute_perturbed_contact(
         # the expanding polytope algorithm (EPA) of Gilbert-Johnson-Keerthi (GJK) nearest to the origin. The analytic
         # capsule-capsule detection runs neither, a shallow GJK contact builds no polytope, and the degenerate paths of
         # MPR leave the portal unwritten.
-        supports = qd.Matrix.zero(gs.qd_float, 6, 3)
+        has_supports = True
         for i_v in qd.static(range(3)):
             support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
             support_b = mpr_state.simplex_support.v2[i_v + 1, i_scratch]
@@ -1622,25 +1627,17 @@ def func_recompute_perturbed_contact(
                 i_pv = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][i_v]
                 support_a = gjk_state.polytope_verts.obj1[i_scratch, i_pv]
                 support_b = gjk_state.polytope_verts.obj2[i_scratch, i_pv]
-            support_a = R_inv @ (support_a - contact_pos_0) + contact_pos_0
-            support_b = R @ (support_b - contact_pos_0) + contact_pos_0
-            for i_3 in qd.static(range(3)):
-                supports[i_v, i_3] = support_a[i_3]
-                supports[3 + i_v, i_3] = support_b[i_3]
+            supports_a[i_v, :] = R_inv @ (support_a - contact_pos_0) + contact_pos_0
+            supports_b[i_v, :] = R @ (support_b - contact_pos_0) + contact_pos_0
 
-        # The support points of a geom that line up along the normal of contact 0 span a vertex or an edge of it, rows
-        # 3 * i_g of the triangle of support points of geom i_g, whose two farthest points are the ends of the edge
+        # The support points of a geom that line up along the normal of contact 0 span a vertex or an edge of it, whose
+        # two farthest points are the ends of the edge, rows 2 * i_g of 'ends' for geom i_g
         is_supports_degenerate = qd.Vector([0, 0], dt=gs.qd_int)
         is_supports_edge = qd.Vector([0, 0], dt=gs.qd_int)
         ends = qd.Matrix.zero(gs.qd_float, 4, 3)
         for i_g in qd.static(range(2)):
-            v_1 = qd.Vector([supports[3 * i_g, 0], supports[3 * i_g, 1], supports[3 * i_g, 2]], dt=gs.qd_float)
-            v_2 = qd.Vector(
-                [supports[3 * i_g + 1, 0], supports[3 * i_g + 1, 1], supports[3 * i_g + 1, 2]], dt=gs.qd_float
-            )
-            v_3 = qd.Vector(
-                [supports[3 * i_g + 2, 0], supports[3 * i_g + 2, 1], supports[3 * i_g + 2, 2]], dt=gs.qd_float
-            )
+            supports_g = supports_a if qd.static(i_g == 0) else supports_b
+            v_1, v_2, v_3 = supports_g[0, :], supports_g[1, :], supports_g[2, :]
             edge_1, edge_2 = v_2 - v_1, v_3 - v_1
             # The triangle spans no area when its height is within the rounding of the coordinates of its points, which
             # the un-rotation about contact 0 makes relative to their distance from the origin. Rounding alone can also
@@ -1661,18 +1658,14 @@ def func_recompute_perturbed_contact(
                     end_0, end_1, span = v_2, v_3, span_23
                 if span.norm_sqr() > EPS * geom_pair_scale**2:
                     is_supports_edge[i_g] = 1
-                    for i_3 in qd.static(range(3)):
-                        ends[2 * i_g, i_3] = end_0[i_3]
-                        ends[2 * i_g + 1, i_3] = end_1[i_3]
+                    ends[2 * i_g, :] = end_0
+                    ends[2 * i_g + 1, :] = end_1
         is_witness_b_anchor = is_supports_degenerate[1] == 1 and is_supports_degenerate[0] == 0
 
         if is_supports_edge[0] == 1 and is_supports_edge[1] == 1:
             # Two edges touch where they cross seen along the normal of contact 0, both closest points being material
             # points on one line along it, which makes the depth exact
-            edge_a_0 = qd.Vector([ends[0, 0], ends[0, 1], ends[0, 2]], dt=gs.qd_float)
-            edge_a_1 = qd.Vector([ends[1, 0], ends[1, 1], ends[1, 2]], dt=gs.qd_float)
-            edge_b_0 = qd.Vector([ends[2, 0], ends[2, 1], ends[2, 2]], dt=gs.qd_float)
-            edge_b_1 = qd.Vector([ends[3, 0], ends[3, 1], ends[3, 2]], dt=gs.qd_float)
+            edge_a_0, edge_a_1, edge_b_0, edge_b_1 = ends[0, :], ends[1, :], ends[2, :], ends[3, :]
             proj_a_0 = edge_a_0 - edge_a_0.dot(normal_0) * normal_0
             proj_a_1 = edge_a_1 - edge_a_1.dot(normal_0) * normal_0
             proj_b_0 = edge_b_0 - edge_b_0.dot(normal_0) * normal_0
@@ -1692,7 +1685,7 @@ def func_recompute_perturbed_contact(
                     witness_b = edge_b_0 + ratio_b * (edge_b_1 - edge_b_0)
                     depth = normal_0.dot(witness_b - witness_a)
                     contact_pos = 0.5 * (witness_a + witness_b)
-                    is_depth_lower_bound = True
+                    has_depth_estimate = True
         else:
             # Along an edge lying on the face of the other geom, the depth varies linearly, so that the point the
             # detection lands on along it is arbitrary up to rounding when the tilt hardly deepens one end more than
@@ -1703,10 +1696,7 @@ def func_recompute_perturbed_contact(
             has_end_deepened = qd.Vector.zero(gs.qd_int, 2)
             for i_g in qd.static(range(2)):
                 if is_supports_edge[i_g] == 1:
-                    end_0 = qd.Vector([ends[2 * i_g, 0], ends[2 * i_g, 1], ends[2 * i_g, 2]], dt=gs.qd_float)
-                    end_1 = qd.Vector(
-                        [ends[2 * i_g + 1, 0], ends[2 * i_g + 1, 1], ends[2 * i_g + 1, 2]], dt=gs.qd_float
-                    )
+                    end_0, end_1 = ends[2 * i_g, :], ends[2 * i_g + 1, :]
                     R_g = R if qd.static(i_g == 0) else R_inv
                     lift_0 = normal_0.dot(R_g @ (end_0 - contact_pos_0) - (end_0 - contact_pos_0))
                     lift_1 = normal_0.dot(R_g @ (end_1 - contact_pos_0) - (end_1 - contact_pos_0))
@@ -1715,17 +1705,14 @@ def func_recompute_perturbed_contact(
                     if qd.abs(lift_1 - lift_0) > EPS * (qd.abs(lift_0) + qd.abs(lift_1)):
                         end = end_1 if lift_1 > lift_0 else end_0
                         has_end_deepened[i_g] = 1
-                        for i_3 in qd.static(range(3)):
-                            ends_deepened[i_g, i_3] = end[i_3]
+                        ends_deepened[i_g, :] = end
 
             # The support triangle of each geom, where it covers the witness of the other geom along the normal of
             # contact 0, bounds its surface there, which gives a lower bound of the depth. The deepened end of an edge
             # replaces the witness of its geom only where covered, since the edge may run past the other geom.
             for i_g in qd.static(range(2)):
-                i_r = 3 * (1 - i_g)
-                v_1 = qd.Vector([supports[i_r, 0], supports[i_r, 1], supports[i_r, 2]], dt=gs.qd_float)
-                v_2 = qd.Vector([supports[i_r + 1, 0], supports[i_r + 1, 1], supports[i_r + 1, 2]], dt=gs.qd_float)
-                v_3 = qd.Vector([supports[i_r + 2, 0], supports[i_r + 2, 1], supports[i_r + 2, 2]], dt=gs.qd_float)
+                supports_other = supports_b if qd.static(i_g == 0) else supports_a
+                v_1, v_2, v_3 = supports_other[0, :], supports_other[1, :], supports_other[2, :]
                 edge_1, edge_2 = v_2 - v_1, v_3 - v_1
                 area = edge_1.cross(edge_2).dot(normal_0)
                 is_covered = False
@@ -1734,9 +1721,7 @@ def func_recompute_perturbed_contact(
                     witness = witness_a if qd.static(i_g == 0) else witness_b
                     is_candidate = not is_covered
                     if qd.static(i_w == 0):
-                        witness = qd.Vector(
-                            [ends_deepened[i_g, 0], ends_deepened[i_g, 1], ends_deepened[i_g, 2]], dt=gs.qd_float
-                        )
+                        witness = ends_deepened[i_g, :]
                         is_candidate = has_end_deepened[i_g] == 1
                     if is_candidate:
                         if is_supports_degenerate[1 - i_g] == 0:
@@ -1753,12 +1738,12 @@ def func_recompute_perturbed_contact(
                                 bound = height - normal_0.dot(witness_a)
                                 if qd.static(i_g == 1):
                                     bound = normal_0.dot(witness_b) - height
-                                if not is_depth_lower_bound or bound > depth:
+                                if not has_depth_estimate or bound > depth:
                                     depth = bound
                                     contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
-                                    is_depth_lower_bound = True
+                                    has_depth_estimate = True
 
-    if not is_depth_lower_bound:
+    if not has_depth_estimate:
         # The un-rotated perturbed normal is the normal of the tangent plane of the other geom at its witness, against
         # which the anchor witness measures its depth. A plane tilted beyond the relative rotation of both geoms belongs
         # to another face, along which this depth is ill-conditioned, so that the separation of both witnesses stays.
@@ -1771,6 +1756,28 @@ def func_recompute_perturbed_contact(
             contact_pos = witness_a + 0.5 * depth * normal_0
             if is_witness_b_anchor:
                 contact_pos = witness_b - 0.5 * depth * normal_0
+            has_depth_estimate = True
+
+    # Without any of the estimates above, the separation of both witnesses along the normal of contact 0 carries none
+    # of the depth: the detection resolved another face of the Minkowski difference, another patch. The contact keeps
+    # the normal of that face and the depth along it on the unperturbed geoms. The support points span the face, whose
+    # normal is exact up to rounding, and the normal of the detection stands in for a face too thin to be oriented.
+    contact_normal = normal_0
+    if not has_depth_estimate:
+        contact_normal = normal
+        if has_supports:
+            minkowski = supports_a - supports_b
+            mink_1, mink_2, mink_3 = minkowski[0, :], minkowski[1, :], minkowski[2, :]
+            edge_1, edge_2 = mink_2 - mink_1, mink_3 - mink_1
+            face_normal = edge_1.cross(edge_2)
+            # See the support triangles above for the degeneracy bound
+            edge_max_sqr = qd.max(edge_1.norm_sqr(), edge_2.norm_sqr(), (mink_3 - mink_2).norm_sqr())
+            if face_normal.norm_sqr() > 2.0 * EPS**2 * edge_max_sqr * (edge_max_sqr + 4.0 * contact_pos_0.norm_sqr()):
+                contact_normal = face_normal.normalized()
+                if contact_normal.dot(normal) < 0.0:
+                    contact_normal = -contact_normal
+        depth = contact_normal.dot(witness_b - witness_a)
+        contact_pos = 0.5 * (witness_a + witness_b)
 
     # A contact of negative depth lies past the edge of the patch, and moves towards contact 0 to where the depth
     # interpolated between both vanishes. The interpolation divides by their difference of depth, which must exceed its
@@ -1781,7 +1788,7 @@ def func_recompute_perturbed_contact(
             depth_noise = qd.max(depth_noise, collider_info.gjk.tolerance[None])
     else:
         depth_noise = qd.max(depth_noise, collider_info.mpr.CCD_TOLERANCE[None] * geom_pair_scale)
-    if depth < 0.0 and penetration_0 - depth > depth_noise:
+    if has_depth_estimate and depth < 0.0 and penetration_0 - depth > depth_noise:
         contact_pos += depth / (depth - penetration_0) * (contact_pos_0 - contact_pos)
     depth = qd.max(depth, 0.0)
 
@@ -1789,7 +1796,7 @@ def func_recompute_perturbed_contact(
     contact_pos = func_apply_smooth_refinement(
         i_ga,
         i_gb,
-        normal_0,
+        contact_normal,
         depth,
         contact_pos,
         ga_pos_original,
@@ -1799,7 +1806,7 @@ def func_recompute_perturbed_contact(
         dyn_info,
         rigid_config,
     )
-    return normal_0, depth, contact_pos
+    return contact_normal, depth, contact_pos
 
 
 @qd.func
