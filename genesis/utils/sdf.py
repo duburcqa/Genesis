@@ -5,6 +5,8 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
+from genesis.utils.data import is_tensor_addressable
 import genesis.utils.geom as gu
 from genesis.utils.array_class import (
     ColliderInfo,
@@ -48,7 +50,7 @@ class SDF:
         self._grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         self._grids_n_coarse_cells = self._grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
         n_cells = int(self._grids_n_cells.sum())
-        if not array_class.is_tensor_addressable((n_cells, 3), gs.np_float):
+        if not is_tensor_addressable((n_cells, 3), gs.np_float):
             gs.raise_exception(
                 f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', "
                 "or a smaller 'sdf_max_res', in 'gs.materials.Rigid' options."

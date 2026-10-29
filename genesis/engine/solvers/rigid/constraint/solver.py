@@ -7,6 +7,8 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
+from genesis.utils.data import DataItem, is_tensor_addressable, iter_data
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
@@ -155,7 +157,7 @@ class ConstraintSolver:
         self.n_cone_constraints_ = max(1, rows_per_contact * rigid_solver._options.max_contacts)
 
         solver, config = self._solver, rigid_solver.rigid_config
-        if not array_class.is_tensor_addressable((self.len_constraints_, solver.n_dofs_, solver._B), gs.np_float):
+        if not is_tensor_addressable((self.len_constraints_, solver.n_dofs_, solver._B), gs.np_float):
             gs.raise_exception(
                 f"Jacobian shape (n_constraints={self.len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) "
                 "is too large."

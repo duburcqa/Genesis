@@ -8,6 +8,8 @@ import igl
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
+from genesis.utils.data import ArrayItem, DataKind
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM

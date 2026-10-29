@@ -6,6 +6,8 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
+from genesis.utils.data import ArrayItem, DataKind
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
