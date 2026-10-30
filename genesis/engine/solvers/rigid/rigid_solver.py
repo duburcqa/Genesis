@@ -8,7 +8,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import ConfigItem, DataItem
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
@@ -19,19 +18,7 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
-from genesis.utils.array_class import (
-    ColliderState,
-    ConfigItem,
-    ConstraintState,
-    DataItem,
-    RigidData,
-    DynInfo,
-    DynState,
-    ErrorCode,
-    RigidInfo,
-    RigidSimStaticConfig,
-    cholesky_tile_size_for,
-)
+from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
