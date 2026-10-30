@@ -82,8 +82,10 @@ def test_build_tree(bvh):
 def test_query(bvh):
     bvh_state, bvh_config = bvh
     n_trees, n_leaves = bvh_state.leaves.aabbs_min.shape
-    query_state = BVHQueryState(
-        leaves=bvh_state.leaves, tree=bvh_state.tree, results=get_bvh_query_results(n_trees * n_leaves * n_leaves)
+    query_state = array_class.BVHQueryState(
+        leaves=bvh_state.leaves,
+        tree=bvh_state.tree,
+        results=array_class.BVHQueryResults(sizes=dict(query_results=n_trees * n_leaves * n_leaves)),
     )
 
     @qd.kernel
@@ -106,6 +108,8 @@ def test_query(bvh):
     assert_equal(is_found, is_hit)
 
     # A result list holding one pair reports the overflow exactly when there are more, and the pair it holds is genuine
-    short_query_state = BVHQueryState(leaves=bvh_state.leaves, tree=bvh_state.tree, results=get_bvh_query_results(1))
+    short_query_state = array_class.BVHQueryState(
+        leaves=bvh_state.leaves, tree=bvh_state.tree, results=array_class.BVHQueryResults(sizes=dict(query_results=1))
+    )
     assert query_leaves(short_query_state) == (is_hit.sum() > 1)
     assert is_hit[tuple(qd_to_numpy(short_query_state.results.triplets)[0])]
