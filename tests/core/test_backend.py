@@ -1,4 +1,4 @@
-import gc
+import argparse
 import os
 import pathlib
 import signal
@@ -8,11 +8,13 @@ import time
 import weakref
 
 import numpy as np
+
 import pytest
 
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import V
 
 RET_SUCCESS = 42
 RET_SKIP = 43
@@ -41,8 +43,6 @@ def test_switching(backend, order):
             gs.init(backend=gs.cpu, seed=0)
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
-
-            from genesis.utils.data import V
 
             t = V(qd.i32, (4,))
             t.fill(cycle_idx + 1)
@@ -90,8 +90,6 @@ def test_switching(backend, order):
 
 def _basic_sim_child(args: list[str]):
     """Child process: init genesis, build a scene, step, destroy."""
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", type=str, choices=["cpu", "gpu"], default="cpu")
     args = parser.parse_args(args)
