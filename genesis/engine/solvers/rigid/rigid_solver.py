@@ -1256,9 +1256,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
     def _init_collider(self):
-        # The collider builds its parts in the namespace of the simulation, for every aggregate to find them
-        with self.sim.namespace:
-            self.collider = Collider(self)
+        self.collider = Collider(self)
 
     def _init_constraint_solver(self):
         self.constraint_solver = ConstraintSolver(self)
