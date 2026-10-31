@@ -16,7 +16,7 @@ from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, SAPCoupler
-from .pipeline import Coupler, Engine, System
+from .pipeline import Coupler, System, call_with_dependencies, compose_systems, create_systems
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -128,6 +128,11 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
+        # The Systems of the scene, those it calls for and their parts included, set at build
+        self._systems: list[System] = []
+        # The active solvers holding their state in frames, which roll over at the end of each window of substeps
+        self._framed_solvers: list["Solver"] = []
+        self._step_system: Step | None = None
 
         # The coupler solving the couplings of the scene at once, if any. LegacyCouplerOptions enable
         # couplings between pairs of solvers instead, which are Systems of their own (see genesis/engine/couplers/pairwise).
@@ -236,35 +241,36 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
-        # The Systems of the scene: the solvers holding entities, the coupler and the couplings between pairs of
-        # solvers, built before the solvers allocate their Data so that each one opts in what it uses of the others
-        self._engine = Engine(
-            [
-                *[solver for solver in self._solvers if solver.is_active],
-                *([self._coupler] if self._coupler else []),
-                *([self._sensor_manager] if self._sensor_manager.sensors else []),
-            ],
-            context=(self._coupler_options,),
-        )
+        # The Systems of the scene: the solvers holding entities, the coupler, the sensors and the Systems they call
+        # for, created and set up before the solvers allocate their Data so that each one opts in what it uses of the
+        # others (see 'create_systems')
+        systems = [
+            *[solver for solver in self._solvers if solver.is_active],
+            *([self._coupler] if self._coupler else []),
+            *([self._sensor_manager] if self._sensor_manager.sensors else []),
+        ]
+        systems_created = create_systems(systems, (self._coupler_options,))
+        self._systems = [*systems, *systems_created]
+        call_with_dependencies([system.setup for system in self._systems], self._systems, (self._coupler_options,))
 
         # solvers
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
+        self._framed_solvers = [solver for solver in self._active_solvers if solver.has_frames]
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
         if self._coupler is not None:
             self._coupler.build()
-        # The Systems compose the substep from their stages
-        self._engine.compose()
-        self._step_system = self._engine.find(Step)
+        call_with_dependencies([system.build for system in systems_created], self._systems, (self._coupler_options,))
+        # The Systems compose the step from their stages
+        self._systems = compose_systems(self._systems, (self._coupler_options,))
+        self._step_system = self.get_system(Step)
 
         # Every System of a differentiable scene supports gradients, which it declares
         if self._requires_grad:
-            unsupported_names = [
-                type(system).__name__ for system in self._engine.systems if not system.is_differentiable
-            ]
+            unsupported_names = [type(system).__name__ for system in self._systems if not system.is_differentiable]
             if unsupported_names:
                 gs.raise_exception(
                     f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
@@ -441,9 +447,8 @@ class Simulator(RBC):
             self.substep(self.cur_substep_local)
             self._cur_substep_global += 1
             if self.cur_substep_local == 0:
-                for solver in self._active_solvers:
-                    if solver.has_frames:
-                        solver.copy_frame(solver.n_frames - 1, 0)
+                for solver in self._framed_solvers:
+                    solver.copy_frame(solver.n_frames - 1, 0)
         self._step_system.completions()
 
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SystemCheckpoint]) -> None:
@@ -486,9 +491,8 @@ class Simulator(RBC):
                 self.substep(self.cur_substep_local)
                 if is_last_substep:
                     with recorder.entry(restore=restore_frames, autodiff=True):
-                        for solver in self._active_solvers:
-                            if solver.has_frames:
-                                solver.copy_frame(solver.n_frames - 1, 0)
+                        for solver in self._framed_solvers:
+                            solver.copy_frame(solver.n_frames - 1, 0)
                     self._step_system.completions()
             recorder.reverse()
         self._cur_substep_global = substep_start
@@ -619,12 +623,12 @@ class Simulator(RBC):
 
         The data of a part belongs to the data of the System holding it (see 'System.get_parts').
         """
-        parts = [part for system in self._engine.systems for part in system.get_parts()]
+        parts = [part for system in self._systems for part in system.get_parts()]
         return [
             *self._active_solvers,
             *[
                 system
-                for system in self._engine.systems
+                for system in self._systems
                 if not isinstance(system, Solver)
                 and all([system is not part for part in parts])
                 and next(iter(system.data), None) is not None
@@ -633,7 +637,8 @@ class Simulator(RBC):
 
     def get_system(self, cls: type[System]) -> System | None:
         """Return the System of the scene of the given class, None when the scene has none."""
-        return self._engine.find(cls)
+        matches = [system for system in self._systems if isinstance(system, cls)]
+        return matches[0] if matches else None
 
     @property
     def coupler(self):
