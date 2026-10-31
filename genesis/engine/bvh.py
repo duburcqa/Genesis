@@ -32,7 +32,6 @@ class BVH_FIT_KIND(IntEnum):
     BLOCK_SWEEP = 2
 
 
-@qd.data_oriented
 class BVHStaticConfig(StaticConfig):
     """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
 

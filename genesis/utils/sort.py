@@ -34,7 +34,6 @@ class SEGMENT_SORT_KIND(IntEnum):
     SEGMENT_RADIX = 2
 
 
-@qd.data_oriented
 class SegmentSortStaticConfig(StaticConfig):
     """The compile-time shape of a sort of 64-bit keys per segment.
 

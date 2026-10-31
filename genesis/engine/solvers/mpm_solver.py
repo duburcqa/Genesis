@@ -332,7 +332,7 @@ def kernel_p2g(
                     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_g2p(f: int, mpm_state: MPMState, mpm_info: MPMInfo, mpm_static_config: qd.template()):
     """
     Gather the velocity of the grid back to the active particles of a frame and advect them into the next frame.

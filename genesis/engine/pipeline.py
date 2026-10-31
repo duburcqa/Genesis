@@ -692,7 +692,7 @@ class Inline:
                 return node
 
         tree = ast.fix_missing_locations(ReplaceHook().visit(tree))
-        lines += ["", "", "@qd.kernel", ast.unparse(funcdef), ""]
+        lines += ["", "", "@qd.kernel(fastcache=True)", ast.unparse(funcdef), ""]
         kernel = load_generated("\n".join(lines), funcdef.name)
         return kernel, tuple(args_by_name.values())
 

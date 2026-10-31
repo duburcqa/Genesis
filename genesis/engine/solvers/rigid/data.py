@@ -617,7 +617,6 @@ class VertsSpatialGrid(Data, kind=DataKind.CONSTANT):
     geoms_inv_cell_size: qd.Tensor = field((float, 3), shape=(GEOMS,))
 
 
-@qd.data_oriented
 class ColliderStaticConfig(StaticConfig):
     has_terrain: bool
     # Whether a convex-convex pair reaches the general narrowphase past the box-box and plane-box specializations: the
@@ -804,7 +803,6 @@ class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
     diff_contact_min_penetration: qd.Tensor = field(float)
 
 
-@qd.data_oriented
 class GJKStaticConfig(StaticConfig):
     enable_contact_patch: bool
 
@@ -1191,7 +1189,6 @@ class DynState(Data):
     vgeoms: VGeomsState
 
 
-@qd.data_oriented
 class RigidSimStaticConfig(StaticConfig):
     backend: int
     para_level: int

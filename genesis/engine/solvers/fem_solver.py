@@ -1845,7 +1845,7 @@ def func_fem_surface_couplings(
 
 
 @FEMSolver.api
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_fem_surface(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Couple the vertices of the surface triangles of the finite element method entities with the other solvers."""
     for i_s, i_b in qd.ndrange(fem_info.surface.tri2el.shape[0], fem_state.vertices.pos.shape[2]):

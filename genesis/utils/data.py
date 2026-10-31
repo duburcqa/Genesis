@@ -34,6 +34,7 @@ def V(*args, **kwargs):
     return qd.tensor(*args, backend=qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD, **kwargs)
 
 
+@qd.data_oriented
 @dataclass_transform(eq_default=True, kw_only_default=True, frozen_default=True)
 class StaticConfig:
     """
