@@ -12,7 +12,15 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.entities.hybrid_entity import HybridEntity, HybridSoftPartInfo
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.mpm_solver import CellSeparation, CellVelocity, GridCoupling, MPMInfo, MPMSolver, MPMState
+from genesis.engine.solvers.mpm_solver import (
+    CellSeparation,
+    CellVelocity,
+    GridCoupling,
+    MPMInfo,
+    MPMSolver,
+    MPMState,
+    func_add_particle_vel,
+)
 from genesis.engine.solvers.particle_solver import PARTICLES
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, LinksState, RigidInfo
@@ -293,7 +301,7 @@ def kernel_update_soft_part_mpm(
             func_apply_coupling_force(i_l, i_b, x_pos, -mass_real * (vel_d / dt), links_state)
 
             # Rigid to soft, which may destabilize the loop
-            mpm_state.particles.vel[f + 1, i_p, i_b] += vel_d * soft_dv_coef
+            func_add_particle_vel(f + 1, i_p, i_b, vel_d * soft_dv_coef, mpm_state)
 
 
 @register_system
@@ -492,8 +500,8 @@ def kernel_apply_rigid_mpm_attachment(
             spring_force = -stiffness * pos_error
             damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * mpm_state.particles.vel[f + 1, i_p, i_b]
 
-            # The velocity is incremented in place, which autodiff reverses, since it cannot reverse an overwrite of a
-            # field the same kernel reads
-            mpm_state.particles.vel[f + 1, i_p, i_b] += (
-                mpm_info.substep_dt[None] * (spring_force + damping_force) / mass
+            # The velocity is incremented in place, since autodiff cannot reverse an overwrite of a field the same
+            # kernel reads
+            func_add_particle_vel(
+                f + 1, i_p, i_b, mpm_info.substep_dt[None] * (spring_force + damping_force) / mass, mpm_state
             )

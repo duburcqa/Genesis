@@ -1413,6 +1413,13 @@ def func_add_grid_vel(f: int, i_x: int, i_y: int, i_z: int, i_b: int, vel: qd.ty
     mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] += vel
 
 
+@MPMSolver.api
+@qd.func
+def func_add_particle_vel(f: int, i_p: int, i_b: int, vel: qd.types.vector(3), mpm_state: MPMState):
+    """Add a velocity to a particle at a frame, in place, which autodiff reverses."""
+    mpm_state.particles.vel[f, i_p, i_b] += vel
+
+
 class CellSeparation(System):
     """A System adding the separation of the particles of a cell to the transfer from the particles to the grid."""
 
