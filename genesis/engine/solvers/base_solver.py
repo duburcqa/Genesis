@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from enum import IntEnum
 from typing import TYPE_CHECKING, NamedTuple, overload
 
@@ -551,13 +551,6 @@ class Solver(RBC, Dynamics, Integration):
 
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        """Yield every array, scalar and static config the solver holds, under the dotted name a checkpoint and a
-        trajectory frame use for it (see 'iter_data').
-        """
-        gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
     def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SystemCheckpoint:
         """

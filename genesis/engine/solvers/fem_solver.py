@@ -1,5 +1,3 @@
-from collections.abc import Iterator
-
 import numpy as np
 import torch
 
@@ -20,7 +18,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.engine.step import Dynamics
 from genesis.grad.bridge import no_grad
-from genesis.utils.data import ENVS, ConfigItem, Data, DataItem, DataKind, Size, StaticConfig, field, iter_data
+from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums
 from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, qd_zero_grad, tensor_to_array
@@ -348,6 +346,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     material_cls = FEM.Base
     has_frames = True
 
+    fem_static_config: FEMStaticConfig | None
+    fem_state: FEMState | None
+    fem_info: FEMInfo | None
+    vertex_constraints: FEMVertexConstraintsInfo | None
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -379,10 +382,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # boundary
         self.boundary = FloorBoundary(height=self._floor_height)
 
-        self.fem_state: FEMState | None = None
-        self.fem_info: FEMInfo | None = None
-        self.fem_static_config: FEMStaticConfig | None = None
-        self.vertex_constraints: FEMVertexConstraintsInfo | None = None
+        self.fem_state = None
+        self.fem_info = None
+        self.fem_static_config = None
+        self.vertex_constraints = None
         # See 'newton_vertex_constraints'
         self._newton_vertex_constraints: FEMVertexConstraintsInfo | None = None
         self._material_dispatcher: FEMMaterialDispatcher | None = None
@@ -648,13 +651,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @property
     def is_differentiable(self) -> bool:
         return not self._use_implicit_solver
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        for name in ("fem_static_config", "fem_state", "fem_info"):
-            yield from iter_data(self, name)
-        if self.vertex_constraints is not None:
-            yield from iter_data(self, "vertex_constraints")
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

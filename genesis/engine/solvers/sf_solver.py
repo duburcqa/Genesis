@@ -39,6 +39,9 @@ class SFSolver(TimeBasedMixin, Solver):
     Stable Fluid solver for eulerian-based gaseous simulation.
     """
 
+    sf_state: SFState | None
+    sf_info: SFInfo | None
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -58,8 +61,8 @@ class SFSolver(TimeBasedMixin, Solver):
 
         self.jets = ()
 
-        self.sf_state: SFState | None = None
-        self.sf_info: SFInfo | None = None
+        self.sf_state = None
+        self.sf_info = None
 
     def build(self):
         super().build()

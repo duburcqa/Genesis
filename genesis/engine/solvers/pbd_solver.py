@@ -155,6 +155,9 @@ class PBDSolver(ParticleSolver):
     material_cls = PBD.Base
     MATERIAL = PBDMaterial
 
+    pbd_state: PBDState | None
+    pbd_info: PBDInfo | None
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -178,8 +181,8 @@ class PBDSolver(ParticleSolver):
 
         self.boundary = CubeBoundary(lower=self._lower_bound, upper=self._upper_bound)
 
-        self.pbd_state: PBDState | None = None
-        self.pbd_info: PBDInfo | None = None
+        self.pbd_state = None
+        self.pbd_info = None
 
     def build(self):
         super().build()

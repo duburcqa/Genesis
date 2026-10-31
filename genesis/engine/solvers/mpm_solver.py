@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -21,7 +20,7 @@ from genesis.engine.states.solvers import MPMSolverState
 from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.data import ENVS, ConfigItem, Data, DataItem, DataKind, Label, Size, StaticConfig, field, iter_data
+from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
 from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch, qd_zero_grad
 
 from .particle_solver import ParticleSolver, kernel_add_vverts
@@ -436,6 +435,10 @@ class MPMSolver(ParticleSolver, Coupling):
     grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
     g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
 
+    mpm_static_config: MPMStaticConfig | None
+    mpm_state: MPMState | None
+    mpm_info: MPMInfo | None
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -475,9 +478,9 @@ class MPMSolver(ParticleSolver, Coupling):
         # boundary
         self.setup_boundary()
 
-        self.mpm_state: MPMState | None = None
-        self.mpm_info: MPMInfo | None = None
-        self.mpm_static_config: MPMStaticConfig | None = None
+        self.mpm_state = None
+        self.mpm_info = None
+        self.mpm_static_config = None
         self.material_dispatcher: MPMMaterialDispatcher | None = None
 
     def setup_boundary(self):
@@ -686,12 +689,6 @@ class MPMSolver(ParticleSolver, Coupling):
     # ------------------------------------------------------------------------------------
 
     is_differentiable = True
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        yield from iter_data(self, "mpm_static_config")
-        for name in ("mpm_state", "mpm_info"):
-            yield from iter_data(self, name)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
