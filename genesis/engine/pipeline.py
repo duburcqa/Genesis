@@ -877,7 +877,19 @@ def assemble_systems(
     given, then those created in registration order, then the components.
     """
     systems = list(systems)
+    # A System the scene gives depends on the Systems its public attributes hold, which its stages bind
+    for system in systems:
+        system._dependencies = tuple(
+            [value for name, value in vars(system).items() if not name.startswith("_") and isinstance(value, System)]
+        )
     built_ids = {id(system) for system in systems_built}
+    # A dependency outside the scene, such as a solver holding no entity, is built by the scene itself
+    built_ids |= {
+        id(dependency)
+        for system in systems
+        for dependency in system._dependencies
+        if all([dependency is not other for other in systems])
+    }
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
     classes_pending += list(dict.fromkeys([cls for system in systems for cls in system.requires]))
     dependencies_by_cls: dict[type, list[_Dependency]] = {}

@@ -238,8 +238,6 @@ class Simulator(RBC):
         for solver in self._solvers:
             if not solver.is_active:
                 solver.build()
-        if self._coupler is not None:
-            self._coupler._dependencies = tuple(self._active_solvers)
         systems_built = [self._sensor_manager] if self._sensor_manager.sensors else []
         self._systems = assemble_systems(
             [*self._active_solvers, *([self._coupler] if self._coupler else []), *systems_built],
