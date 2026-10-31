@@ -559,87 +559,79 @@ class Solver(RBC, Dynamics, Integration):
         """
         Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
 
-        The arrays are what 'data' yields of those kinds. A full checkpoint copies them with their gradients where they
-        live: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
-        process off the host, and as numpy arrays otherwise. A boundary checkpoint holds the state at the boundary of
-        two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame 0 of the arrays
-        holding frames, on the device whatever the backend.
+        A full checkpoint is that of any System (see 'System.save_checkpoint'). A boundary checkpoint holds the state at
+        the boundary of two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame
+        0 of the arrays holding frames, on the device whatever the backend.
         """
+        if not boundary_only:
+            return super().save_checkpoint(kinds)
         arrays = {}
-        if boundary_only:
-            if self._boundary_items is None:
-                # The gradients ('iter_data' names each one after its array) and the placeholders of the features
-                # switched off (see 'ArrayItem') hold nothing a replay reads
-                self._boundary_items = BoundaryItems(
-                    items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
-                )
-                grad_names = set()
-                for item in self.data:
-                    if isinstance(item, ConfigItem) or item.kind not in kinds:
+        if self._boundary_items is None:
+            # The gradients ('iter_data' names each one after its array) and the placeholders of the features
+            # switched off (see 'ArrayItem') hold nothing a replay reads
+            self._boundary_items = BoundaryItems(
+                items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
+            )
+            grad_names = set()
+            for item in self.data:
+                if isinstance(item, ConfigItem) or item.kind not in kinds:
+                    continue
+                if isinstance(item, ArrayItem):
+                    is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
+                    if item.name in grad_names or is_placeholder:
                         continue
-                    if isinstance(item, ArrayItem):
-                        is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
-                        if item.name in grad_names or is_placeholder:
-                            continue
-                        if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
-                            grad_names.add(f"{item.name}.grad")
-                            grad = None
-                            if gs.use_zerocopy.is_supported:
-                                try:
-                                    grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
-                                except ValueError:
-                                    # See 'fill_data'
-                                    pass
-                            if grad is None:
-                                self._boundary_items.items_grad_copied.append(item)
-                            else:
-                                self._boundary_items.grads.append(grad[..., None])
-                    self._boundary_items.items.append(item)
-                    if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
+                    if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
+                        grad_names.add(f"{item.name}.grad")
+                        grad = None
+                        if gs.use_zerocopy.is_supported:
+                            try:
+                                grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
+                            except ValueError:
+                                # See 'fill_data'
+                                pass
+                        if grad is None:
+                            self._boundary_items.items_grad_copied.append(item)
+                        else:
+                            self._boundary_items.grads.append(grad[..., None])
+                self._boundary_items.items.append(item)
+                if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
+                    self._boundary_items.items_copied.append(item)
+                    continue
+                if isinstance(item.array, torch.Tensor):
+                    view = item.array
+                else:
+                    try:
+                        if self.has_frames:
+                            view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
+                        else:
+                            view = qd_to_torch(item.array, copy=False)
+                    except ValueError:
+                        # A member of a struct field may have no zero-copy view (see 'fill_data')
                         self._boundary_items.items_copied.append(item)
                         continue
-                    if isinstance(item.array, torch.Tensor):
-                        view = item.array
-                    else:
-                        try:
-                            if self.has_frames:
-                                view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
-                            else:
-                                view = qd_to_torch(item.array, copy=False)
-                        except ValueError:
-                            # A member of a struct field may have no zero-copy view (see 'fill_data')
-                            self._boundary_items.items_copied.append(item)
-                            continue
-                    self._boundary_items.names.append(item.name)
-                    self._boundary_items.views.append(view)
-            if self._boundary_items.views:
-                # One fused copy of every array with a view, rather than one launch each
-                copies = [torch.empty_like(view) for view in self._boundary_items.views]
-                # The views read the arrays as the last kernel left them once it is done (see qd_to_torch)
-                if gs.backend == gs.metal:
-                    qd.sync()
-                torch._foreach_copy_(copies, self._boundary_items.views)
-                # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
-                if gs.backend == gs.metal:
-                    torch.mps.synchronize()
-                arrays.update(zip(self._boundary_items.names, copies))
-            items = self._boundary_items.items_copied
-        else:
-            items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in kinds]
+                self._boundary_items.names.append(item.name)
+                self._boundary_items.views.append(view)
+        if self._boundary_items.views:
+            # One fused copy of every array with a view, rather than one launch each
+            copies = [torch.empty_like(view) for view in self._boundary_items.views]
+            # The views read the arrays as the last kernel left them once it is done (see qd_to_torch)
+            if gs.backend == gs.metal:
+                qd.sync()
+            torch._foreach_copy_(copies, self._boundary_items.views)
+            # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+            arrays.update(zip(self._boundary_items.names, copies))
+        items = self._boundary_items.items_copied
         for item in items:
             if isinstance(item, ScalarItem):
                 arrays[item.name] = np.array(getattr(item.owner, item.attr))
-            elif boundary_only and self.has_frames:
+            elif self.has_frames:
                 arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
             else:
-                arrays[item.name] = data_to_array(
-                    item.array, to_torch=boundary_only or gs.use_zerocopy.is_supported, copy=True
-                )
+                arrays[item.name] = data_to_array(item.array, to_torch=True, copy=True)
         # The static configs are provenance, which a boundary checkpoint never leaving the process does without
-        configs = {}
-        if not boundary_only:
-            configs = {item.name: item.config for item in self.data if isinstance(item, ConfigItem)}
-        return SystemCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
+        return SystemCheckpoint(arrays=arrays, configs={}, kinds=kinds)
 
     def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
@@ -650,29 +642,19 @@ class Solver(RBC, Dynamics, Integration):
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
         """
-        if boundary_only:
-            # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them
-            # in this process, which spares checking them against the scene
-            if self._boundary_items.views:
-                # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
-                if gs.backend == gs.metal:
-                    qd.sync()
-                values = [checkpoint.arrays[name] for name in self._boundary_items.names]
-                torch._foreach_copy_(self._boundary_items.views, values)
-            items = self._boundary_items.items_copied
-            arrays = {item.name: checkpoint.arrays[item.name] for item in items}
-        else:
-            items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
-            arrays = checkpoint.arrays
-        fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
-
-    def __getstate__(self) -> SystemCheckpoint:
-        """Return a SystemCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
-        return self.save_checkpoint(CHECKPOINT_KINDS)
-
-    def __setstate__(self, state: SystemCheckpoint) -> None:
-        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
-        self.load_checkpoint(state)
+        if not boundary_only:
+            super().load_checkpoint(checkpoint)
+            return
+        # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them in
+        # this process, which spares checking them against the scene
+        if self._boundary_items.views:
+            # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
+            if gs.backend == gs.metal:
+                qd.sync()
+            values = [checkpoint.arrays[name] for name in self._boundary_items.names]
+            torch._foreach_copy_(self._boundary_items.views, values)
+        items = self._boundary_items.items_copied
+        fill_data(items, {item.name: checkpoint.arrays[item.name] for item in items}, frame_only=self.has_frames)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

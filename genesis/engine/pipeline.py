@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from typing import Any, ClassVar, NamedTuple
 
+import numpy as np
 import pydantic
 
 import quadrants as qd
@@ -48,6 +49,7 @@ from genesis.utils.data import (
     Data,
     DataItem,
     DataKind,
+    ScalarItem,
     StaticConfig,
     fill_data,
     iter_data,
@@ -147,12 +149,22 @@ class System:
                 yield from iter_data(self, name)
 
     def save_checkpoint(self, kinds: frozenset[DataKind]) -> SystemCheckpoint:
-        """Return a checkpoint of the arrays of the given kinds the System holds, for 'load_checkpoint' to restore."""
-        items = [item for item in self.data if isinstance(item, DataItem) and item.kind in kinds]
+        """
+        Return a checkpoint of the arrays of the given kinds the System holds, for 'load_checkpoint' to restore.
+
+        The arrays are what 'data' yields of those kinds, copied with their gradients where they live: on the device as
+        torch tensors when zero-copy views exist, which keeps a save and a restore within one process off the host, and
+        as numpy arrays otherwise. The static configs come along as provenance.
+        """
         arrays = {
-            item.name: data_to_array(item.array, to_torch=gs.use_zerocopy.is_supported, copy=True) for item in items
+            item.name: np.array(getattr(item.owner, item.attr))
+            if isinstance(item, ScalarItem)
+            else data_to_array(item.array, to_torch=gs.use_zerocopy.is_supported, copy=True)
+            for item in self.data
+            if isinstance(item, DataItem) and item.kind in kinds
         }
-        return SystemCheckpoint(arrays, {}, kinds)
+        configs = {item.name: item.config for item in self.data if isinstance(item, ConfigItem)}
+        return SystemCheckpoint(arrays, configs, kinds)
 
     def __getstate__(self) -> SystemCheckpoint:
         """Return a SystemCheckpoint of the System, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
@@ -163,7 +175,11 @@ class System:
         self.load_checkpoint(state)
 
     def load_checkpoint(self, checkpoint: SystemCheckpoint) -> None:
-        """Write back the arrays of a checkpoint of 'save_checkpoint', rejecting a record read from another build."""
+        """
+        Write back the arrays of a checkpoint of 'save_checkpoint', rejecting a record read from another build.
+
+        On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+        """
         fill_data(
             [item for item in self.data if isinstance(item, DataItem) and item.kind in checkpoint.kinds],
             checkpoint.arrays,
