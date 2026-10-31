@@ -6,8 +6,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.engine.pipeline as pipeline
-from genesis.engine.pipeline import OnlyIf, System, create_systems
-from genesis.engine.step import Step
+from genesis.engine.pipeline import OnlyIf, System, assemble_systems
+from genesis.engine.step import Integration
 from genesis.utils.array_class import DynState
 from genesis.utils.data import V
 from genesis.utils.misc import qd_to_numpy
@@ -27,23 +27,23 @@ def test_data_dependency_is_read_only(monkeypatch, show_viewer):
         for i_b in range(dyn_state.links.pos.shape[1]):
             dyn_state.links.pos[0, i_b][2] += 1.0
 
-    class AltitudeRecorder(System):
-        def __init__(self) -> None:
+    class AltitudeRecorder(Integration):
+        def __init__(self, dyn_state: DynState) -> None:
+            self.dyn_state = dyn_state
             self.altitude = None
 
-        def build(self, dyn_state: DynState) -> None:
-            self.altitude = V(dtype=gs.qd_float, shape=(dyn_state.links.pos.shape[1],))
+        def build(self) -> None:
+            self.altitude = V(dtype=gs.qd_float, shape=(self.dyn_state.links.pos.shape[1],))
 
-        def compose(self, step: Step, dyn_state: DynState) -> None:
-            # A kernel stage is fused from the source of its module, so a kernel defined here runs from a Python stage
-            def record_altitude(dyn_state, altitude):
-                kernel_record_altitude(dyn_state, altitude)
+        # A kernel stage is fused from the source of its module, so a kernel defined here runs from a Python stage
+        def substep_post_coupling(self, f: int) -> None:
+            kernel_record_altitude(self.dyn_state, self.altitude)
 
-            step.integrations.add(record_altitude)
+    class Lifter(Integration):
+        substep_post_coupling = kernel_lift
 
-    class Lifter(System):
-        def compose(self, step: Step, dyn_state: DynState) -> None:
-            step.integrations.add(kernel_lift)
+        def __init__(self, dyn_state: DynState) -> None:
+            pass
 
     systems_registered = pipeline._SYSTEM_CLASSES
     for system_cls, is_refused in ((AltitudeRecorder, False), (Lifter, True)):
@@ -99,7 +99,7 @@ def test_template_instances_are_distinct_systems(monkeypatch):
         Scratch[Queued, PerEnv]
 
     monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Pass[PerEnv], Pass[Queued]])
-    systems = create_systems([])
+    systems = assemble_systems([], [])
     systems_by_cls = {type(system): system for system in systems}
     assert set(systems_by_cls) == {Scratch[PerEnv], Scratch[Queued], Pass[PerEnv], Pass[Queued]}
     assert systems_by_cls[Pass[PerEnv]].scratch is systems_by_cls[Scratch[PerEnv]]

@@ -5,7 +5,7 @@ Each one exists when both solvers hold entities and the coupler options (LegacyC
 imports is the order the couplings of a substep run in.
 """
 
-from .rigid_mpm import RigidMPM, RigidMPMAttachment
+from .rigid_mpm import RigidMPM, RigidMPMAttachment, RigidMPMCPIC
 from .mpm_sph import MPMSPH
 from .mpm_pbd import MPMPBD
 from .rigid_sph import RigidSPH

@@ -7,8 +7,7 @@ from typing import ForwardRef, get_args, get_origin
 import torch
 
 import genesis as gs
-from genesis.engine.pipeline import System
-from genesis.engine.step import Step
+from genesis.engine.step import Observation
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
 from genesis.utils.ring_buffer import TensorRingBuffer
@@ -16,7 +15,7 @@ from genesis.utils.ring_buffer import TensorRingBuffer
 from .base_sensor import Sensor, SharedSensorContext, SharedSensorMetadata
 
 
-class SensorManager(System):
+class SensorManager(Observation):
     """Hold the sensors of a scene, which observe the state each step leaves."""
 
     # Maps sensor options class -> sensor class for runtime dispatch.
@@ -325,11 +324,7 @@ class SensorManager(System):
                 self._sensors_metadata[sensor_cls], self._ground_truth_intermediate_cache[dtype][cache_slice], envs_idx
             )
 
-    def compose(self, step: Step) -> None:
-        """Add the update of the sensors to the observations of the step."""
-        step.observations.add(self.step)
-
-    def step(self):
+    def observe(self):
         # Timeline rings must rotate before `_update_shared_cache` because `_apply_transform` mutates `at(0)` of the
         # timeline ring and needs a fresh write slot. Return-space rings, by contrast, are read during `_post_process`
         # (past post-output values) and written afterward; their rotation is deferred to inside the per-class loop so

@@ -70,7 +70,7 @@ flowchart TB
 - `setup`: needed only for Systems created before the pipeline (the sensor manager), which the pipeline now creates.
 - `compose`: where stages go is static (D6), so nothing needs wiring at build.
 
-**Consequences.** The ordering rules live in the pipeline: creation as soon as decidable, build once every possible API user is created or ruled out (so every `reserve` is in), a Data dependency never delaying its owner. A contradiction is raised with its cycle named.
+**Consequences.** The ordering rules live in the pipeline: creation as soon as decidable, build once every possible API user is created or ruled out (so every `reserve` is in), a Data dependency never delaying its owner. A contradiction is raised with its cycle named. A System conditioned on a property of another one (`Enabled("has_any_rigid_coupling")`) is decided once that one is built, so it cannot make requests of it in its constructor. A solver holding no entity stays outside the pipeline, built for the arrays its getters read, its extension points left unbound.
 
 ---
 
@@ -82,7 +82,7 @@ flowchart TB
 
 **Rejected.** Namespaces and their nesting: a second scoping mechanism duplicating the dependency graph. `attach()` (adding a field to a struct owned elsewhere) and `opt_in(cond=...)` (deferring an opt-in until the owner builds) are made redundant by by-name binding, extension points (`Inline`) and late creation.
 
-**Consequences.** Depending on a component is what makes it exist (D3, on demand), which replaces the opt-in of whole structs.
+**Consequences.** Depending on a component is what makes it exist (D3, on demand), which replaces the opt-in of whole structs. A System declares the Data it owns as annotations of its class (`dyn_state: DynState`), which tells a reader of a struct that its owner is yet to build it. The scope is resolved when a stage is added, since an owner creates its parts in its build. Until the collider is split (D11), the scope also holds the Data of the parts of the dependencies, the collider and the constraint solver of the rigid solver.
 
 ---
 
@@ -97,7 +97,7 @@ flowchart TB
 - Free ordering constraints (`before=`/`after=` everywhere): flexible, but the dense contracts of a component like the collider (pairs in, contacts out) would no longer be stated anywhere.
 - Order by build timing: changing a dependency would silently reorder stages and change results.
 
-**Consequences.** A System with several stages plays several roles, each with a distinctly named entry point. Positions nobody foresaw go through D7.
+**Consequences.** A System with several stages plays several roles, each with a distinctly named entry point. Positions nobody foresaw go through D7. A role names its entry point (`entry = "couple"`) rather than each System naming its role per stage, so the entry points of the built-in solvers keep their names (`substep_pre_coupling`). The extension points inside a kernel (`Inline`) are slots like the phases: the owner declares them on its class (`InlineSpec`) with the roles filling them (`GridCoupling`), and binds them in its build.
 
 ---
 
@@ -166,7 +166,7 @@ flowchart TB
 
 | Point | Status |
 |---|---|
-| The rigid solver's roles under IPC and SAP | to implement through D7 |
+| The rigid solver's roles under SAP | to implement through D7; IPC is done (`IPCRigidCoupling`) |
 | `requires()` and field-level `opt_in` of the Data declarations | expected redundant after D11, to confirm on the code |
 | Python 3.12 floor | assumed; the repository bump lands separately |
 | Ordered slots | designed in D6, to implement with the collider |

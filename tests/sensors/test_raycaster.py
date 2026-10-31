@@ -176,7 +176,7 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         obstacle_pos = obstacle_1.get_pos()
         if sensor_pos is not None:
             grid_sensor.set_pos(np.tile(sensor_pos, (*batch_shape, 1)))
-        scene.sim._sensor_manager.step()
+        scene.sim._sensor_manager.observe()
         if show_viewer:
             scene.visualizer.update(force=True)
 
@@ -236,7 +236,7 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
 
     # Imperfections must land on the sensor they are set on, whatever the per-sensor cache sizes
     depth_camera_depth_only.set_bias(0.05)
-    scene.sim._sensor_manager.step()
+    scene.sim._sensor_manager.observe()
     assert_allclose(
         depth_camera_depth_only.read().distances,
         depth_camera_depth_only.read_ground_truth().distances + 0.05,
@@ -256,7 +256,7 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     for _ in range(60):
         scene.step()
     grid_sensor.set_pos(grid_sensor_pos)
-    scene.sim._sensor_manager.step()
+    scene.sim._sensor_manager.observe()
     if show_viewer:
         scene.visualizer.update(force=True)
 
@@ -896,7 +896,7 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
     pad.set_pos((*TACTILE_POS, PAD_POS_Z))
     tactile_box.set_pos((*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02))
     scene.rigid_solver.detect_collision()
-    scene.sim._sensor_manager.step()
+    scene.sim._sensor_manager.observe()
     probe_1_world_z = PAD_POS_Z + PROBE_1_LOCAL_Z
     assert_allclose(
         depth_probe.read_ground_truth(),

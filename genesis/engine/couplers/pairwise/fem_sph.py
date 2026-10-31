@@ -1,36 +1,17 @@
 """The coupling of the finite element method (FEM) surface with the smoothed particle hydrodynamics (SPH) particles."""
 
+from typing import Annotated
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.engine.pipeline import System, register_system
+from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.geom import func_hash_grid_to_slot, func_hash_pos_to_grid
 
-from .fem_surface import FEMSurface
-
-
-@register_system
-class FEMSPH(System):
-    """
-    Set the normal velocity of the surface vertices of the FEM entities to that of the SPH particles around them.
-
-    The particles take the opposite of the momentum the vertices gain, divided among them.
-    """
-
-    is_differentiable = False
-
-    def __init__(self, fem_surface: FEMSurface, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> None:
-        self._fem_surface = fem_surface
-
-    @classmethod
-    def create(cls, fem_surface: FEMSurface, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> "FEMSPH | None":
-        return cls(fem_surface, sph_solver, options) if options.fem_sph else None
-
-    def compose(self) -> None:
-        self._fem_surface.surface_couplings.add(func_fem_sph)
+from .fem_surface import FEMSurface, SurfaceCoupling
 
 
 @qd.func
@@ -79,3 +60,23 @@ def func_fem_sph(
                         - delta_mv / sph_state.particles_info_reordered.mass[k, i_b]
                     )
     return new_vel
+
+
+@register_system
+class FEMSPH(SurfaceCoupling):
+    """
+    Set the normal velocity of the surface vertices of the FEM entities to that of the SPH particles around them.
+
+    The particles take the opposite of the momentum the vertices gain, divided among them.
+    """
+
+    is_differentiable = False
+    surface_coupling = func_fem_sph
+
+    def __init__(
+        self,
+        fem_surface: FEMSurface,
+        sph_solver: SPHSolver,
+        options: Annotated[LegacyCouplerOptions, Enabled("fem_sph")],
+    ) -> None:
+        pass

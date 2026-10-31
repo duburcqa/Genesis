@@ -1,15 +1,16 @@
 """
 Composition of the simulation from Systems, which own Data and add stages to the phases of the Systems they depend on.
 
-A System declares the Systems it depends on as the typed parameters of its constructor, of its `setup` method and of its
-`compose` method, and nothing else of the others. The simulator creates the Systems a scene calls for, sets every System
-up, builds them, then lets each one compose with its dependencies (see 'create_systems'). A System that depends on a
-System the scene does not have is absent, and so are the stages it would add.
+A System declares what it depends on as the typed parameters of its constructor, and the roles it plays as the role
+classes it derives from. The simulator assembles the Systems a scene calls for (see 'assemble_systems'): it creates each
+one once its dependencies exist, builds it once they are built, then routes the stage of each of its roles into the slot
+the role fills. A System that depends on a System or a struct the scene never has is absent, and so are its stages. See
+.github/contributing/PIPELINE.md for the design.
 
-A Phase is an ordered sequence of stages that its System runs, and that the Systems depending on it add to. A stage is a
-kernel, a kernel method of a data-oriented object, a Python function or another Phase. Its arguments are bound by name to
-the Data of the System adding it and of the Systems it depends on, and an argument that none of them provides is a call
-argument, given by name when the Phase runs.
+A Phase is an ordered sequence of stages, split into slots. A stage is a kernel, a kernel method of a data-oriented
+object, a Python function, an extension point of a kernel (see Inline) or another Phase. Its arguments are bound by name to
+the Data of the System it belongs to and of the Systems it depends on, and an argument that none of them provides is a
+call argument, given by name when the Phase runs.
 
 A Phase fuses the kernels it runs between two Python functions into one kernel, generated from source, which calls the
 body of each of them as a top-level func. While the launches are recorded for a backward pass, it launches every kernel on
@@ -18,6 +19,7 @@ genesis/grad/bridge.py), whose tags (`no_grad`, `register_custom_backward`, `rev
 """
 
 import ast
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -29,6 +31,8 @@ import typing
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from typing import Any, ClassVar, NamedTuple
+
+import pydantic
 
 import quadrants as qd
 from quadrants.lang._quadrants_callable import BoundQuadrantsCallable, QuadrantsCallable
@@ -47,27 +51,31 @@ Template = type(qd.template())
 # The System classes the simulator creates when a scene calls for them, in registration order (see register_system)
 _SYSTEM_CLASSES: list[type["System"]] = []
 
-# The Data a stage may bind, by name, while a System composes (see compose_systems)
-_scope: dict[str, list[Any]] | None = None
-# The structs among them the System composing depends on as Data alone, which its kernels may read and never write
-_read_only_ids: set[int] = set()
+# The System whose stages are being added, which they bind the Data of (see '_get_scope')
+_scope_system: "System | None" = None
 
 
 class System:
     """
-    A unit of the simulation that owns Data and composes with the Systems it depends on.
+    A unit of the simulation that owns Data, depends on other Systems and Data, and plays roles in their phases.
 
-    Its Data are its public attributes. The Systems it depends on are the parameters of `setup` and `compose`, typed
-    with their class, `X | None` for an optional one. A System the simulator creates also takes them as the parameters
-    of its constructor, which decide whether it exists (see register_system).
+    Its Data are its public attributes. Its dependencies are the parameters of its constructor, typed with a System class
+    to use the API of that System, or with a Data struct to read it alone, `X | None` for an optional one (see
+    'assemble_systems'). It allocates the Data whose sizes the scene decides in `build`, once its dependencies are built.
+    The roles it plays are the role classes it derives from, each routing one of its stages (see 'get_roles').
     """
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
-    # Whether the System is created when another one depends on it, rather than registered (see 'create_systems')
+    # Whether the System is created when another one depends on it, rather than registered (see 'assemble_systems')
     is_created_on_demand: bool = False
-    # The Systems its constructor depends on, which its stages bind the Data of as those of its `compose` dependencies
+    # The slots the roles of other Systems move to while this System exists, by role (see 'RoleOf')
+    relocations: ClassVar[dict["RoleOf", "SlotRef"]] = {}
+    # The Systems, or roles of Systems, absent while this System exists
+    supersedes: ClassVar["tuple[type[System] | RoleOf, ...]"] = ()
+    # The Systems and the structs its constructor depends on, whose Data its stages bind, the structs read-only
     _dependencies: "tuple[System, ...]" = ()
+    _data_dependencies: ClassVar[dict[str, Data]] = {}
     # The instances of the template a System class is, by their arguments (see '__class_getitem__')
     _template_instances: ClassVar[dict[tuple[type, ...], type["System"]]] = {}
     # The arguments of the template instance a System class is, by the type parameters of its template
@@ -76,6 +84,11 @@ class System:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls._template_instances = {}
+        # A condition names a field of an options model or a property of a System, checked once the class exists
+        for hint in inspect.get_annotations(vars(cls)["__init__"]).values() if "__init__" in vars(cls) else ():
+            for condition in typing.get_args(hint)[1:] if typing.get_origin(hint) is typing.Annotated else ():
+                if isinstance(condition, Enabled):
+                    condition.check(typing.get_args(hint)[0])
 
     def __class_getitem__(cls, args: "type | tuple[type, ...]") -> "type[System]":
         """
@@ -84,8 +97,7 @@ class System:
         A template is a System class generic over type parameters, `class GJK[LayoutT: Layout, CapabilityT:
         Capability](System)`, whose instances read their arguments by parameter, `self.template_args[LayoutT]`. Its
         instances are distinct System classes, which a scene holds side by side, each owning the state its arguments
-        call for, and which a dependency names apart. They are created on demand when the template is (see
-        'create_systems').
+        call for, and which a dependency names apart. They are created on demand when the template is.
         """
         args = args if isinstance(args, tuple) else (args,)
         # An argument left to a type parameter of an enclosing template is substituted where it is resolved
@@ -100,26 +112,11 @@ class System:
             cls._template_instances[args] = type(name, (cls,), namespace)
         return cls._template_instances[args]
 
-    @classmethod
-    def create(cls, *args: Any, **kwargs: Any) -> "System | None":
-        """Build the System from its dependencies, or return None where the scene has no use of it."""
-        return cls(*args, **kwargs)
-
-    def setup(self) -> None:
-        """Opt in what the System uses of the Systems it depends on, its parameters, before any of them builds."""
-
     def build(self) -> None:
-        """
-        Allocate the Data of a System the simulator creates, once the solvers and the Systems it depends on built.
-
-        Its parameters are the Systems and Data structs it depends on (see 'get_dependencies').
-        """
-
-    def compose(self) -> None:
-        """Add the stages of the System to the phases of the Systems it depends on, its parameters."""
+        """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
 
     def get_parts(self) -> "tuple[System, ...]":
-        """Return the Systems this one builds and holds itself, which compose like any other once it exists."""
+        """Return the Systems this one builds and holds itself, which join the Systems of the scene once it is built."""
         return ()
 
     @property
@@ -163,16 +160,6 @@ class Coupler(System):
         return False
 
     @property
-    def is_simulating_rigid_first(self) -> bool:
-        """Whether the coupler simulates the rigid entities it couples before the rigid solver runs its substep."""
-        return False
-
-    @property
-    def is_simulating_fem(self) -> bool:
-        """Whether the coupler computes the dynamics of the FEM entities in place of the FEM solver."""
-        return False
-
-    @property
     def is_using_rigid_coup_type(self) -> bool:
         """Whether the coupler couples every rigid entity the way the `coup_type` of its material sets."""
         return False
@@ -192,6 +179,124 @@ def register_system(cls: type[System]) -> type[System]:
     """Declare a System the simulator creates whenever a scene provides every dependency of its constructor."""
     _SYSTEM_CLASSES.append(cls)
     return cls
+
+
+class SlotRef(NamedTuple):
+    """A slot of a phase, or an extension point, that a System class offers, by attribute and slot name (see PhaseSpec)."""
+
+    owner: type
+    attr: str
+    slot: str | None = None
+
+
+class RoleOf(NamedTuple):
+    """A role a System class plays, which another System relocates or supersedes (see 'System.relocations')."""
+
+    system: type
+    role: type
+
+
+class PhaseSpec:
+    """
+    The declaration of a phase a System offers, `detection = PhaseSpec("broadphase", "narrowphase", "pruning")`.
+
+    On the class it names the slots that roles fill, `Collider.detection.narrowphase`, and on a System it is the Phase of
+    that System, its slots running in declaration order. `is_graph` is a flag, or a function of the System.
+    """
+
+    def __init__(self, *slots: str, is_graph: "bool | Callable[[System], bool]" = False) -> None:
+        self.slots, self.is_graph = slots, is_graph
+        self.owner: type | None = None
+        self.name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        # A role naming the phase as its slot assigns it again, which leaves its owner
+        if self.owner is None:
+            self.owner, self.name = owner, name
+
+    def __getattr__(self, slot: str) -> SlotRef:
+        if slot not in vars(self).get("slots", ()):
+            raise AttributeError(f"The phase has no slot '{slot}'.")
+        return SlotRef(self.owner, self.name, slot)
+
+    def __get__(self, system: "System | None", owner: type) -> "PhaseSpec | Phase":
+        if system is None:
+            return self
+        is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
+        vars(system)[self.name] = phase = Phase(slots=self.slots, is_graph=is_graph)
+        return phase
+
+
+class InlineSpec:
+    """
+    The declaration of an extension point a System offers in one of its kernels (see Inline), which roles fill.
+
+    On the class it is the slot a role names, `MPMSolver.grid_couplings`. The System creates the Inline under the same
+    name in its constructor, which shadows the declaration.
+    """
+
+    def __init__(self) -> None:
+        self.owner: type | None = None
+        self.name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        # A role naming the extension point as its slot assigns it again, which leaves its owner
+        if self.owner is None:
+            self.owner, self.name = owner, name
+
+    def __get__(self, system: "System | None", owner: type) -> "InlineSpec":
+        assert system is None, f"{owner.__name__} creates its extension point '{self.name}' in its constructor."
+        return self
+
+
+def get_roles(cls: type) -> list[type]:
+    """
+    Return the roles a System class plays: the classes it derives from that declare a slot.
+
+    A role is a System class declaring the slot it fills, `slot = Collider.detection.narrowphase`, and the name of the
+    entry point of a System playing it, `entry = "detect"`: a method, a property, a kernel, or a tuple of them run in
+    order. The stage of every System playing the role is routed into the slot (see 'assemble_systems').
+    """
+    return [base for base in cls.__mro__ if "slot" in vars(base)]
+
+
+def _get_stages(system: System, entry: str) -> tuple[Any, ...]:
+    """Return the stages an entry point of a System names, its methods bound and its properties evaluated."""
+    value = inspect.getattr_static(system, entry)
+    if isinstance(value, property):
+        value = value.fget(system)
+    elif isinstance(value, types.FunctionType):
+        value = value.__get__(system)
+    return value if isinstance(value, tuple) else (value,)
+
+
+class Enabled:
+    """
+    Make a System exist only while flags of one of its dependencies hold, the metadata of its annotation.
+
+    `options: Annotated[RigidOptions, Enabled("enable_collision")]` reads a field of an options model, and
+    `ipc: Annotated[IPCCoupler, Enabled("has_any_rigid_coupling")]` a property of a System, read once that System is
+    built. A name given a value compares with it, `Enabled(contact_depth_query="sdf")`.
+    """
+
+    def __init__(self, *flags: str, **values: Any) -> None:
+        self.conditions = {**dict.fromkeys(flags, True), **values}
+
+    def check(self, owner: type) -> None:
+        """Refuse a name that is neither a field of the options model nor a property of the System class."""
+        for name in self.conditions:
+            is_field = issubclass(owner, pydantic.BaseModel) and name in owner.model_fields
+            if not (is_field or isinstance(inspect.getattr_static(owner, name, None), property)):
+                raise TypeError(f"Enabled('{name}') names no field or property of {owner.__name__}.")
+
+    def holds(self, dependency: object) -> bool:
+        """Return whether every condition holds for the given dependency."""
+        for name, value in self.conditions.items():
+            attr = inspect.getattr_static(dependency, name)
+            actual = attr.fget(dependency) if isinstance(attr, property) else attr
+            if (bool(actual) if value is True else actual) != value:
+                return False
+        return True
 
 
 class CallArg(NamedTuple):
@@ -300,7 +405,7 @@ def load_generated(source: str, name: str) -> Any:
 
 class Phase:
     """
-    An ordered sequence of stages, which its System runs and the Systems depending on it add to while they compose.
+    An ordered sequence of stages, which its System runs, split into the `slots` that roles fill (see PhaseSpec).
 
     The kernels of a run are fused into one kernel between two Python stages, a nested Phase running inline, and captured
     as a graph with `is_graph`, which a kernel holding a device loop (`qd.graph.do_while`) requires. While the launches
@@ -308,16 +413,20 @@ class Phase:
     given (see custom_backward).
     """
 
-    def __init__(self, *, is_graph: bool = False, backward: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self, *, slots: Sequence[str] = (), is_graph: bool = False, backward: Callable[[], None] | None = None
+    ) -> None:
         self.is_graph = is_graph
         self.backward = backward
+        # The phases of the slots, which run in declaration order
+        self.slots = {name: Phase() for name in slots}
         # The stages, in order, with their arguments
-        self.items: list[tuple[Callable, tuple[Any, ...]]] = []
+        self.items: list[tuple[Callable, tuple[Any, ...]]] = [(phase, ()) for phase in self.slots.values()]
         self._launches: tuple[Launch, ...] | None = None
 
     def add(self, *stages: Callable) -> None:
-        """Append stages, binding their arguments to the Data of the System composing and of its dependencies."""
-        assert _scope is not None, "A stage is added while its System composes."
+        """Append stages, binding their arguments to the Data of the System they belong to and of its dependencies."""
+        scope, read_only_ids = _get_scope()
         for stage in stages:
             if isinstance(stage, (Phase, Inline)):
                 self.items.append((stage, ()))
@@ -330,18 +439,15 @@ class Phase:
                 names = list(inspect.signature(stage).parameters)
             args = []
             for name in names:
-                values = _scope.get(name, ())
-                assert len(values) < 2, f"Data '{name}' is ambiguous among the dependencies of the System composing."
-                args.append(values[0] if values else CallArg(name))
+                args.append(_bind(scope, name))
             if isinstance(stage, (QuadrantsCallable, BoundQuadrantsCallable)):
-                _check_read_only(
-                    stage.fn, stage.instance if isinstance(stage, BoundQuadrantsCallable) else None, names, args
-                )
+                owner = stage.instance if isinstance(stage, BoundQuadrantsCallable) else None
+                _check_read_only(stage.fn, owner, names, args, read_only_ids)
             self.items.append((stage, tuple(args)))
         self._launches = None
 
     def get_items(self) -> list[tuple[Callable, tuple[Any, ...]]]:
-        """Return the stages the Phase runs, its nested Phases unrolled."""
+        """Return the stages the Phase runs, its nested Phases and slots unrolled."""
         return [
             item
             for stage, args in self.items
@@ -387,7 +493,7 @@ class Phase:
 
     def __call__(self, **values: Any) -> None:
         """Run the stages, in order, with the given values of their call arguments."""
-        if not self.items:
+        if not self.get_launches():
             return
         if not is_recording_launches():
             for launch in self.get_launches():
@@ -439,22 +545,22 @@ class Inline:
 
     def bind(self, **values: Any) -> None:
         """
-        Bind the parameters of the kernel to the Data of the System declaring the extension point, as it composes.
+        Bind the parameters of the kernel to the Data of the System declaring the extension point, as it builds.
 
         `values` binds parameters by name to values of its own, such as objects the System reaches through a property.
         """
-        assert _scope is not None, "An extension point is bound while its System composes."
+        scope, _ = _get_scope()
         parameters = inspect.signature(self.kernel.fn).parameters
-        self._args = tuple([values[name] if name in values else _bind(name) for name in parameters])
+        self._args = tuple([values[name] if name in values else _bind(scope, name) for name in parameters])
 
     def add(self, *funcs: Callable) -> None:
         """Append funcs, binding their Data parameters to the Data of the System composing and of its dependencies."""
-        assert _scope is not None, "A func is added while its System composes."
+        scope, read_only_ids = _get_scope()
         n_handed = len(inspect.signature(self.hook).parameters)
         for func in funcs:
             names = list(inspect.signature(func.fn).parameters)[n_handed:]
-            args = tuple([_bind(name) for name in names])
-            _check_read_only(func.fn, None, names, args)
+            args = tuple([_bind(scope, name) for name in names])
+            _check_read_only(func.fn, None, names, args, read_only_ids)
             self.items.append((func, args))
         self._launch = None
 
@@ -533,18 +639,20 @@ class Inline:
         kernel(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
 
 
-def _check_read_only(fn: Callable, owner: object | None, names: Sequence[str], args: Sequence[Any]) -> None:
+def _check_read_only(
+    fn: Callable, owner: object | None, names: Sequence[str], args: Sequence[Any], read_only_ids: set[int]
+) -> None:
     """Refuse a kernel or a func writing a struct that its System depends on as Data alone (see 'get_dependencies')."""
     written_names = {path[0] for path in get_written_paths(fn, owner)}
     for name, arg in zip(names, args):
-        if id(arg) in _read_only_ids and name in written_names:
+        if id(arg) in read_only_ids and name in written_names:
             raise TypeError(f"'{fn.__qualname__}' writes '{name}', which its System depends on as Data, read-only.")
 
 
-def _bind(name: str) -> Any:
-    """Return the Data of the given name in the scope of the System composing, the CallArg naming it if none."""
-    values = _scope.get(name, ())
-    assert len(values) < 2, f"Data '{name}' is ambiguous among the dependencies of the System composing."
+def _bind(scope: dict[str, list[Any]], name: str) -> Any:
+    """Return the Data of the given name in a scope, the CallArg naming it if none (see '_get_scope')."""
+    values = scope.get(name, ())
+    assert len(values) < 2, f"Data '{name}' is ambiguous among the dependencies of the System."
     return values[0] if values else CallArg(name)
 
 
@@ -560,23 +668,33 @@ class OnlyIf(NamedTuple):
     arg: type
 
 
-def _get_dependency_hints(fn: Callable) -> dict[str, tuple[tuple[type, ...], bool]]:
-    """Return the classes each parameter of a System class or bound method takes, and whether it is optional."""
-    owner = fn if isinstance(fn, type) else type(fn.__self__)
-    hints = typing.get_type_hints(fn.__init__ if isinstance(fn, type) else fn, include_extras=True)
-    dependency_hints = {}
-    for name in inspect.signature(fn).parameters:
-        hint, is_conditional = hints[name], False
+class _Dependency(NamedTuple):
+    """A parameter of the constructor of a System: the classes it takes, whether it is optional, its conditions."""
+
+    name: str
+    classes: tuple[type, ...]
+    is_optional: bool
+    conditions: tuple[Enabled, ...]
+
+
+def _get_dependencies(cls: type[System]) -> list[_Dependency]:
+    """Return the dependencies a System class declares, those its template arguments rule out taking no class."""
+    hints = typing.get_type_hints(cls.__init__, include_extras=True)
+    dependencies = []
+    for name in inspect.signature(cls).parameters:
+        hint, conditions, is_conditional = hints[name], (), False
         # A type alias stands for its value, its type parameters taking the arguments it is given
         while isinstance(typing.get_origin(hint) or hint, typing.TypeAliasType):
             alias = typing.get_origin(hint) or hint
             hint = alias.__value__[typing.get_args(hint)] if typing.get_args(hint) else alias.__value__
         if typing.get_origin(hint) is typing.Annotated:
-            conditions = [meta for meta in hint.__metadata__ if isinstance(meta, OnlyIf)]
+            metadata = hint.__metadata__
             hint = hint.__origin__
-            if conditions:
-                if not all([condition.arg in owner.template_args.values() for condition in conditions]):
-                    dependency_hints[name] = ((), True)
+            conditions = tuple([meta for meta in metadata if isinstance(meta, Enabled)])
+            only_ifs = [meta for meta in metadata if isinstance(meta, OnlyIf)]
+            if only_ifs:
+                if not all([only_if.arg in cls.template_args.values() for only_if in only_ifs]):
+                    dependencies.append(_Dependency(name, (), True, ()))
                     continue
                 is_conditional = True
         hint_args = typing.get_args(hint)
@@ -585,132 +703,248 @@ def _get_dependency_hints(fn: Callable) -> dict[str, tuple[tuple[type, ...], boo
         # A template instance named with the type parameters of the owner takes the arguments the owner was given
         classes = tuple(
             [
-                typing.get_origin(cls)[tuple([owner.template_args.get(arg, arg) for arg in typing.get_args(cls)])]
-                if typing.get_origin(cls) is not None
-                else cls
-                for cls in classes
+                typing.get_origin(c)[tuple([cls.template_args.get(arg, arg) for arg in typing.get_args(c)])]
+                if typing.get_origin(c) is not None
+                else c
+                for c in classes
             ]
         )
-        dependency_hints[name] = (classes, is_optional and not is_conditional)
-    return dependency_hints
+        dependencies.append(_Dependency(name, classes, is_optional and not is_conditional, conditions))
+    return dependencies
 
 
-def get_dependencies(fn: Callable, systems: Sequence[object]) -> dict[str, Any] | None:
+def _get_owned_data(cls: type) -> list[type]:
+    """Return the Data structs a System class declares it owns, as the annotations of its class attributes."""
+    owned = []
+    for base in cls.__mro__:
+        for hint in inspect.get_annotations(base).values():
+            for arg in typing.get_args(hint) or (hint,):
+                if isinstance(arg, type) and issubclass(arg, Data):
+                    owned.append(arg)
+    return owned
+
+
+@contextlib.contextmanager
+def _scoped(system: System) -> Iterator[None]:
+    """Bind the stages added within the block to the Data of the System and of what it depends on (see '_get_scope')."""
+    global _scope_system
+
+    _scope_system = system
+    try:
+        yield
+    finally:
+        _scope_system = None
+
+
+def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
     """
-    Return the arguments of a System class or of a bound method of a System, None when a mandatory one is missing.
+    Return the Data the stages being added bind by name, and the identities of those they may read alone.
 
-    A parameter typed with a class takes the one object of `systems` of that class, None for an optional one missing. A
-    parameter typed with a Data struct takes the one struct of that type a System holds as a public attribute: a System
-    depends on another System to use its API, which may change its state, and on a struct to read it alone. The Data of
-    a System exists once it is built, so a struct is a dependency of `build` and `compose` alone.
+    The scope holds the public attributes of the System, of the Systems it depends on, and of their parts, as they are
+    when a stage is added, and the structs it depends on as Data under the name of their parameter, read-only unless it
+    reaches them otherwise.
     """
-    structs = [
-        value
-        for system in systems
-        if isinstance(system, System)
-        for name, value in vars(system).items()
-        if not name.startswith("_") and isinstance(value, Data)
-    ]
-    args = {}
-    for name, (classes, is_optional) in _get_dependency_hints(fn).items():
-        if not classes:
-            args[name] = None
-            continue
-        candidates = structs if all([issubclass(cls, Data) for cls in classes]) else systems
-        matches = []
-        for candidate in candidates:
-            if isinstance(candidate, classes) and all([candidate is not match for match in matches]):
-                matches.append(candidate)
-        assert len(matches) < 2, f"Dependency '{name}' of '{fn.__qualname__}' is ambiguous."
-        if not matches and not is_optional:
-            return None
-        args[name] = matches[0] if matches else None
-    return args
+    system = _scope_system
+    assert system is not None, "A stage is added within the scope of its System (see 'assemble_systems')."
+    scope: dict[str, list[Any]] = {}
+    for dependency in (system, *system._dependencies):
+        for owner in (dependency, *dependency.get_parts()):
+            for name, value in vars(owner).items():
+                if not name.startswith("_") and all([value is not other for other in scope.get(name, ())]):
+                    scope.setdefault(name, []).append(value)
+    writable_ids = {id(value) for values in scope.values() for value in values}
+    read_only_ids = set()
+    for name, struct in system._data_dependencies.items():
+        if id(struct) not in writable_ids:
+            scope.setdefault(name, []).append(struct)
+            read_only_ids.add(id(struct))
+    return scope, read_only_ids
 
 
-def create_systems(systems: Sequence[System], context: Sequence[object] = ()) -> list[System]:
+def assemble_systems(
+    systems: Sequence[System], systems_built: Sequence[System], context: Sequence[object] = ()
+) -> list[System]:
     """
-    Create the registered Systems that the given Systems and context call for, and return them in creation order.
+    Create and build the Systems a scene calls for, then route their roles and return them.
 
-    `context` holds the other objects a dependency may name, such as the options of the scene. A registered System class
-    is created once every System class its constructor depends on is settled, in registration order otherwise, and only
-    when every mandatory dependency exists (see register_system). A System class created on demand, such as the instances
-    of a component template, is created when a System being created depends on it. They are created before the solvers
-    allocate their Data, so that a System opts in what it uses of another one.
+    `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, and `context`
+    the other objects a dependency may name, such as the options of the scene. A registered System is created as soon as
+    every System it depends on exists, every struct it depends on is built, and every condition on them holds. A System
+    created on demand, such as an instance of a component template, exists once an existing System depends on it. A
+    System is built once the Systems it depends on are built and every System that could still use its API is decided,
+    so that every request they make of it in their constructor is in, except those conditioned on it, which are decided
+    once it is built. A dependency on a struct never delays the build of its owner. The stage of each role is then routed into its slot, in the order of the Systems: those given, then those
+    created in registration order. A System that a mandatory dependency or a condition rules out is absent, and so is a
+    System another one supersedes, the reason being logged.
     """
-    systems_created: list[System] = []
+    systems = list(systems)
+    built_ids = {id(system) for system in systems_built}
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
-    while classes_pending:
-        for cls in classes_pending:
-            dependency_hints = _get_dependency_hints(cls)
-            classes_needed = [needed for classes, _ in dependency_hints.values() for needed in classes]
-            # A mandatory dependency that nothing registers is created on demand
-            for classes, is_optional in dependency_hints.values():
-                for needed in () if is_optional else classes:
-                    is_demanded = issubclass(needed, System) and needed.is_created_on_demand
-                    is_present = any([isinstance(other, needed) for other in (*systems, *systems_created)])
-                    if is_demanded and needed not in classes_pending and not is_present:
-                        classes_pending.append(needed)
-            if any([issubclass(other, needed) for other in classes_pending for needed in classes_needed]):
+
+    def decide(cls: type[System]) -> tuple[str, Any]:
+        """Return whether a pending class is created (with its arguments), absent (with why), or waits."""
+        for system in systems:
+            for superseded in type(system).supersedes:
+                if isinstance(superseded, type) and issubclass(cls, superseded):
+                    return "absent", f"superseded by {type(system).__name__}"
+        args, is_waiting = {}, False
+        for dependency in _get_dependencies(cls):
+            if not dependency.classes:
+                args[dependency.name] = None
+                continue
+            classes = dependency.classes
+            if all([isinstance(c, type) and issubclass(c, Data) for c in classes]):
+                candidates = [
+                    value
+                    for system in systems
+                    if id(system) in built_ids
+                    for name, value in vars(system).items()
+                    if not name.startswith("_") and isinstance(value, classes)
+                ]
+                may_come = any(
+                    [
+                        issubclass(owned, classes)
+                        for owner in (*[type(s) for s in systems if id(s) not in built_ids], *classes_pending)
+                        for owned in _get_owned_data(owner)
+                    ]
+                )
+            elif all([isinstance(c, type) and issubclass(c, System) for c in classes]):
+                candidates = [system for system in systems if isinstance(system, classes)]
+                may_come = any([issubclass(other, classes) for other in classes_pending])
+                if not candidates and not dependency.is_optional:
+                    for needed in classes:
+                        if needed.is_created_on_demand and needed not in classes_pending:
+                            classes_pending.append(needed)
+                            may_come = True
+            else:
+                candidates = [value for value in context if isinstance(value, classes)]
+                may_come = False
+            unique = []
+            for candidate in candidates:
+                if all([candidate is not other for other in unique]):
+                    unique.append(candidate)
+            if len(unique) > 1:
+                raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {unique}.")
+            if not unique:
+                if may_come:
+                    is_waiting = True
+                    continue
+                if dependency.is_optional:
+                    args[dependency.name] = None
+                    continue
+                return "absent", f"no {' or '.join([c.__name__ for c in classes])} for '{dependency.name}'"
+            value = unique[0]
+            if dependency.conditions:
+                # A condition on a System is read once that System is built
+                if isinstance(value, System) and id(value) not in built_ids:
+                    is_waiting = True
+                    continue
+                if not all([condition.holds(value) for condition in dependency.conditions]):
+                    if dependency.is_optional:
+                        args[dependency.name] = None
+                        continue
+                    return "absent", f"a condition on '{dependency.name}' does not hold"
+            args[dependency.name] = value
+        return ("wait", None) if is_waiting else ("create", args)
+
+    while True:
+        classes_decided = list(classes_pending)
+        is_progressing = False
+        for cls in classes_decided:
+            status, value = decide(cls)
+            if status == "wait":
                 continue
             classes_pending.remove(cls)
-            args = get_dependencies(cls, [*systems, *systems_created, *context])
-            system = None if args is None else cls.create(**args)
-            if system is not None:
-                system._dependencies = tuple([arg for arg in args.values() if isinstance(arg, System)])
-                systems_created.append(system)
+            is_progressing = True
+            if status == "absent":
+                gs.logger.debug(f"{cls.__name__} is absent: {value}.")
+                continue
+            system = cls(**value)
+            system._dependencies = tuple([arg for arg in value.values() if isinstance(arg, System)])
+            system._data_dependencies = {name: arg for name, arg in value.items() if isinstance(arg, Data)}
+            systems.append(system)
+        for system in list(systems):
+            if id(system) in built_ids:
+                continue
+            is_ready = all([id(dependency) in built_ids for dependency in system._dependencies]) and not any(
+                [
+                    issubclass(type(system), c)
+                    for cls in classes_pending
+                    for dependency in _get_dependencies(cls)
+                    if not dependency.conditions
+                    for c in dependency.classes
+                    if issubclass(c, System)
+                ]
+            )
+            if not is_ready:
+                continue
+            with _scoped(system):
+                system.build()
+            built_ids.add(id(system))
+            is_progressing = True
+            # The parts of a System join the Systems of the scene, built with it
+            for part in system.get_parts():
+                if all([part is not other for other in systems]):
+                    systems.append(part)
+                    built_ids.add(id(part))
+        # A class created on demand joins the pending ones while they are decided
+        if not is_progressing and all([cls in classes_decided for cls in classes_pending]):
             break
-        else:
-            assert False, f"The dependencies of {classes_pending} form a cycle."
-    return systems_created
+    unbuilt = [type(system).__name__ for system in systems if id(system) not in built_ids]
+    if classes_pending or unbuilt:
+        raise TypeError(
+            f"The declarations of {[cls.__name__ for cls in classes_pending]} and {unbuilt} contradict one another: "
+            "each waits for another one."
+        )
+
+    # The Systems in an order that does not depend on when they were created: those the scene held and their parts, then
+    # the registered ones in registration order, then those created on demand in creation order (the sort is stable)
+    registration = {cls: i for i, cls in enumerate(_SYSTEM_CLASSES)}
+
+    def get_rank(system: System) -> tuple[int, int]:
+        if type(system) in registration:
+            return 1, registration[type(system)]
+        return (2 if type(system).is_created_on_demand else 0), 0
+
+    systems = sorted(systems, key=get_rank)
+    _route_roles(systems)
+    return systems
 
 
-def call_with_dependencies(
-    methods: Sequence[Callable], systems: Sequence[System], context: Sequence[object] = ()
-) -> None:
-    """Call bound lifecycle methods of Systems in turn, each with the Systems and Data it depends on."""
-    for method in methods:
-        args = get_dependencies(method, [*systems, *context])
-        assert args is not None, f"A dependency of '{method.__qualname__}' is missing."
-        method(**args)
-
-
-def compose_systems(systems: Sequence[System], context: Sequence[object] = ()) -> list[System]:
-    """
-    Let every System add its stages to the phases of its dependencies, and return the Systems with their parts.
-
-    The parts of a System, which exist once it is built (see 'System.get_parts'), join the Systems first. The stages of a
-    System bind the Data of the System and of the Systems its constructor and `compose` depend on.
-    """
-    global _scope, _read_only_ids
-
-    systems_composed: list[System] = []
-    systems_pending = list(systems)
-    while systems_pending:
-        system = systems_pending.pop(0)
-        if all([system is not other for other in systems_composed]):
-            systems_composed.append(system)
-        systems_pending[:0] = [part for part in system.get_parts() if all([part is not s for s in systems_composed])]
-
-    for system in systems_composed:
-        args = get_dependencies(system.compose, [*systems_composed, *context])
-        assert args is not None, f"A dependency of '{type(system).__qualname__}.compose' is missing."
-        dependencies = [*system._dependencies, *[arg for arg in args.values() if isinstance(arg, System)]]
-        _scope = {}
-        for owner in (system, *dependencies):
-            for name, value in vars(owner).items():
-                if not name.startswith("_") and all([value is not other for other in _scope.get(name, ())]):
-                    _scope.setdefault(name, []).append(value)
-        # A struct depended on as Data joins the scope under its parameter, read-only unless the System reaches it as
-        # its own or through a System it depends on
-        writable_ids = {id(value) for values in _scope.values() for value in values}
-        for name, arg in args.items():
-            if isinstance(arg, Data) and id(arg) not in writable_ids:
-                _scope.setdefault(name, []).append(arg)
-                _read_only_ids.add(id(arg))
-        try:
-            system.compose(**args)
-        finally:
-            _scope = None
-            _read_only_ids = set()
-    return systems_composed
+def _route_roles(systems: Sequence[System]) -> None:
+    """Add the stage of every role of every System to its slot, or to the slot another System relocates it to."""
+    relocations: dict[RoleOf, tuple[SlotRef, System]] = {}
+    superseded_roles: list[RoleOf] = []
+    for system in systems:
+        for role_of, slot in type(system).relocations.items():
+            if role_of in relocations:
+                raise TypeError(
+                    f"{type(system).__name__} and {type(relocations[role_of][1]).__name__} both relocate {role_of}."
+                )
+            relocations[role_of] = (slot, system)
+        superseded_roles += [item for item in type(system).supersedes if isinstance(item, RoleOf)]
+    for system in systems:
+        for role in get_roles(type(system)):
+            role_ofs = [
+                role_of
+                for role_of in (*relocations, *superseded_roles)
+                if role_of.role is role and isinstance(system, role_of.system)
+            ]
+            if any([role_of in superseded_roles for role_of in role_ofs]):
+                continue
+            slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
+            slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (PhaseSpec, InlineSpec)) else slot
+            owners = [dep for dep in system._dependencies if isinstance(dep, slot.owner)] or [
+                other for other in systems if isinstance(other, slot.owner)
+            ]
+            if len(owners) != 1:
+                raise TypeError(
+                    f"{type(system).__name__} plays {role.__name__}, which {len(owners)} {slot.owner.__name__} offer."
+                )
+            target = inspect.getattr_static(owners[0], slot.attr)
+            if isinstance(target, PhaseSpec):
+                target = target.__get__(owners[0], type(owners[0]))
+            if slot.slot is not None:
+                target = target.slots[slot.slot]
+            with _scoped(system):
+                target.add(*_get_stages(system, role.entry))

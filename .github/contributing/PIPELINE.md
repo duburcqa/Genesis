@@ -169,13 +169,15 @@ The System offering a phase defines its slots and the roles that fill them. A pa
 
 ```python
 class Collider(System):
-    detection = Phase(slots=("broadphase", "narrowphase", "pruning"), is_graph=True)
+    detection = PhaseSpec("broadphase", "narrowphase", "pruning", is_graph=True)
 
 class Narrowphase(System):
     """Detect the contacts of one pair family, after the broadphase, before the pruning."""
     slot = Collider.detection.narrowphase
-    detect: Kernel                                      # the entry point every narrowphase provides
+    entry = "detect"                                    # the entry point every narrowphase provides
 ```
+
+An entry point is a kernel, a func of an extension point, a method, a property, or a tuple of them run in order.
 
 ```mermaid
 flowchart LR
@@ -199,7 +201,7 @@ flowchart LR
 ```
 
 - **Order** within a slot is the registration order of the participants, fixed by import order in one place. Build timing never decides order, so results never depend on which System happened to be created first.
-- **Several stages** means several roles, each with a distinctly named entry point: `MPMSolver` plays `Dynamics` (`particles_to_grid`) and `Integration` (`grid_to_particles`).
+- **Several stages** means several roles, each with a distinctly named entry point: `MPMSolver` plays `Dynamics` (`substep_pre_coupling`), `Coupling` (`couple`) and `Integration` (`substep_post_coupling`).
 - **Kernels fuse**: the consecutive kernel stages of a phase become one generated kernel, so splitting the detection into Systems launches what the hand-written kernel launched.
 
 ---
@@ -427,10 +429,17 @@ sequenceDiagram
 Some couplings must run inside another System's kernel, on values held in registers, for speed and for the autodiff to reverse them as one. The owner declares a placeholder func; participants add funcs taking the same leading parameters plus their own Data.
 
 ```python
-class MPMSolver(System):
-    grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)   # vel = hook(f, i_b, pos, vel, mass)
+class MPMSolver(Solver):
+    grid_couplings = InlineSpec()                        # the slot, on the class
 
-class RigidMPM(System):
+    def __init__(self, ...) -> None:
+        self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)   # vel = hook(f, i_b, pos, vel, mass)
+
+class GridCoupling(System):
+    slot = MPMSolver.grid_couplings
+    entry = "grid_coupling"
+
+class RigidMPM(GridCoupling):
     grid_coupling = func_mpm_rigid                       # inlined into MPMSolver.grid_couplings
 ```
 
@@ -443,9 +452,11 @@ IPC simulates the rigid entities it couples before the rigid solver runs. A plug
 ```python
 class IPCRigidCoupling(System):
     """The coupling of rigid entities through IPC, which simulates them before the rigid solver runs."""
-    relocations = {RigidSolver.Dynamics: Step.substep.integrations}
+    relocations = {RoleOf(RigidSolver, Dynamics): Step.substep.integrations}
 
-    def __init__(self, ipc: IPCCoupler, rigid_solver: RigidSolver, coupled: IPCRigidEntities) -> None: ...
+    def __init__(
+        self, ipc_coupler: Annotated[IPCCoupler, Enabled("has_any_rigid_coupling")], rigid_solver: RigidSolver
+    ) -> None: ...
 ```
 
 ```mermaid
@@ -471,7 +482,7 @@ SAP solves the constraints of the rigid entities itself, between their dynamics 
 ```python
 class SAPCoupler(Coupler):
     supersedes = (ConstraintSolver,)                    # absent while SAP exists
-    relocations = {RigidSolver.Integration: Step.substep.integrations}
+    relocations = {RoleOf(RigidSolver, Integration): Step.substep.integrations}
 ```
 
 ```mermaid
@@ -498,8 +509,8 @@ The phases record their launches for the backward pass with no extra code. While
 
 | Question | Answer |
 |---|---|
-| Which Systems does this scene have? | `scene.sim.systems` |
-| Why is a registered System absent? | the reason recorded for it: which dependency will never exist, which condition failed |
+| Does this scene have a System? | `scene.sim.get_system(cls)` |
+| Why is a registered System absent? | the debug log of the build: which dependency will never exist, which condition failed |
 | Why does creation fail? | the error names the cycle of contradictory declarations |
 | Which kernel runs where? | each phase lists its stages by slot, with their fused launches |
 

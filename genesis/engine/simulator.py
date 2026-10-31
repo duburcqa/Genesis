@@ -16,7 +16,7 @@ from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, SAPCoupler
-from .pipeline import Coupler, System, call_with_dependencies, compose_systems, create_systems
+from .pipeline import Coupler, System, assemble_systems
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -241,31 +241,22 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
-        # The Systems of the scene: the solvers holding entities, the coupler, the sensors and the Systems they call
-        # for, created and set up before the solvers allocate their Data so that each one opts in what it uses of the
-        # others (see 'create_systems')
-        systems = [
-            *[solver for solver in self._solvers if solver.is_active],
-            *([self._coupler] if self._coupler else []),
-            *([self._sensor_manager] if self._sensor_manager.sensors else []),
-        ]
-        systems_created = create_systems(systems, (self._coupler_options,))
-        self._systems = [*systems, *systems_created]
-        call_with_dependencies([system.setup for system in self._systems], self._systems, (self._coupler_options,))
-
-        # solvers
-        for solver in self._solvers:
-            solver.build()
-            if solver.is_active:
-                self._active_solvers.append(solver)
+        # The Systems of the scene: the solvers holding entities, the coupler, which couples all of them, the sensors,
+        # and the Systems they call for (see 'assemble_systems'). A solver holding no entity is built for the arrays
+        # its getters read.
+        self._active_solvers.extend([solver for solver in self._solvers if solver.is_active])
         self._framed_solvers = [solver for solver in self._active_solvers if solver.has_frames]
-
-        # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
+        for solver in self._solvers:
+            if not solver.is_active:
+                solver.build()
         if self._coupler is not None:
-            self._coupler.build()
-        call_with_dependencies([system.build for system in systems_created], self._systems, (self._coupler_options,))
-        # The Systems compose the step from their stages
-        self._systems = compose_systems(self._systems, (self._coupler_options,))
+            self._coupler._dependencies = tuple(self._active_solvers)
+        systems_built = [self._sensor_manager] if self._sensor_manager.sensors else []
+        self._systems = assemble_systems(
+            [*self._active_solvers, *([self._coupler] if self._coupler else []), *systems_built],
+            systems_built,
+            (self._coupler_options, *[solver._options for solver in self._active_solvers]),
+        )
         self._step_system = self.get_system(Step)
 
         # Every System of a differentiable scene supports gradients, which it declares

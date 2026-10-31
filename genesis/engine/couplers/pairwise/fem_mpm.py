@@ -1,36 +1,16 @@
 """The coupling of the finite element method (FEM) surface with the grid of the material point method (MPM) solver."""
 
+from typing import Annotated
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.engine.pipeline import System, register_system
+from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.mpm_solver import MPMSolver, func_quadratic_bspline_stencil
 from genesis.options.solvers import LegacyCouplerOptions
 
-from .fem_surface import FEMSurface
-
-
-@register_system
-class FEMMPM(System):
-    """
-    Exchange momentum between the surface vertices of the FEM entities and the cells of the MPM grid near their surface.
-
-    The grid is coupled rather than the particles, after its boundary is imposed, and the surface is searched for from
-    the vertices, which spares searching it from every particle.
-    """
-
-    is_differentiable = False
-
-    def __init__(self, fem_surface: FEMSurface, mpm_solver: MPMSolver, options: LegacyCouplerOptions) -> None:
-        self._fem_surface = fem_surface
-
-    @classmethod
-    def create(cls, fem_surface: FEMSurface, mpm_solver: MPMSolver, options: LegacyCouplerOptions) -> "FEMMPM | None":
-        return cls(fem_surface, mpm_solver, options) if options.fem_mpm else None
-
-    def compose(self) -> None:
-        self._fem_surface.surface_couplings.add(func_fem_mpm)
+from .fem_surface import FEMSurface, SurfaceCoupling
 
 
 @qd.func
@@ -86,3 +66,24 @@ def func_fem_mpm(
     if mass_mpm <= fem_info.EPS[None]:
         new_vel = vel
     return new_vel
+
+
+@register_system
+class FEMMPM(SurfaceCoupling):
+    """
+    Exchange momentum between the surface vertices of the FEM entities and the cells of the MPM grid near their surface.
+
+    The grid is coupled rather than the particles, after its boundary is imposed, and the surface is searched for from
+    the vertices, which spares searching it from every particle.
+    """
+
+    is_differentiable = False
+    surface_coupling = func_fem_mpm
+
+    def __init__(
+        self,
+        fem_surface: FEMSurface,
+        mpm_solver: MPMSolver,
+        options: Annotated[LegacyCouplerOptions, Enabled("fem_mpm")],
+    ) -> None:
+        pass

@@ -5,7 +5,7 @@ import tempfile
 import weakref
 from collections.abc import Iterator
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import numpy as np
 
@@ -13,8 +13,10 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
-from genesis.engine.pipeline import Coupler
-from genesis.engine.step import Step
+from genesis.engine.pipeline import Coupler, Enabled, RoleOf, System, register_system
+from genesis.engine.solvers.fem_solver import FEMSolver
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+from genesis.engine.step import Coupling, Dynamics, Step
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ConfigItem, DataItem
@@ -24,7 +26,6 @@ if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
     from genesis.engine.entities.rigid_entity import RigidJoint, RigidLink
     from genesis.engine.simulator import Simulator
-    from genesis.engine.solvers import FEMSolver, RigidSolver
 
 # Check if libuipc is available
 try:
@@ -93,7 +94,7 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
 
 
-class IPCCoupler(RBC, Coupler):
+class IPCCoupler(RBC, Coupler, Coupling):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -103,6 +104,8 @@ class IPCCoupler(RBC, Coupler):
 
     # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
     is_differentiable = False
+    # IPC computes the dynamics of the FEM entities itself
+    supersedes = (RoleOf(FEMSolver, Dynamics),)
 
     def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:
         """
@@ -812,15 +815,6 @@ class IPCCoupler(RBC, Coupler):
     # Section 2: Core implementation
     # ============================================================
 
-    def compose(self, step: Step) -> None:
-        """Add the preprocessing of the coupler to the preparations of the step, and its coupling to the couplings."""
-        step.preparations.add(self.preprocess)
-        step.couplings.add(self.couple)
-
-    def preprocess(self, f):
-        """Preprocessing step before coupling"""
-        pass
-
     def couple(self, f):
         """
         Execute IPC coupling step with per-entity coupling types.
@@ -897,14 +891,6 @@ class IPCCoupler(RBC, Coupler):
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         gs.raise_exception("A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own.")
-
-    @property
-    def is_simulating_rigid_first(self) -> bool:
-        return self.has_any_rigid_coupling
-
-    @property
-    def is_simulating_fem(self) -> bool:
-        return True
 
     @property
     def is_using_rigid_coup_type(self) -> bool:
@@ -1215,3 +1201,15 @@ class IPCCoupler(RBC, Coupler):
             self._coupling_data.out_torques if self.sim.n_envs > 0 else self._coupling_data.out_torques[0],
             links_idx=self._coupling_data.links_idx,
         )
+
+
+@register_system
+class IPCRigidCoupling(System):
+    """Run the substep of the rigid solver after the couplings, once IPC simulated the rigid entities it couples."""
+
+    relocations = {RoleOf(RigidSolver, Dynamics): Step.substep.integrations}
+
+    def __init__(
+        self, ipc_coupler: Annotated[IPCCoupler, Enabled("has_any_rigid_coupling")], rigid_solver: RigidSolver
+    ):
+        pass

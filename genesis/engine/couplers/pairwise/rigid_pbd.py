@@ -1,18 +1,18 @@
 """The coupling of the rigid geoms with the position based dynamics (PBD) particles."""
 
 from collections.abc import Iterator
+from typing import Annotated
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
-from genesis.engine.pipeline import System, register_system
+from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.pbd_solver import PBDSolver
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force
-from genesis.engine.solvers.rigid.collider.collider import Collider
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
-from genesis.engine.step import Step
+from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.array_class import ENVS, PARTICLES
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
@@ -27,55 +27,6 @@ class RigidPBDInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
 
     link_idx: qd.Tensor = field(int)
     local_pos: qd.Tensor = field((float, 3))
-
-
-@register_system
-class RigidPBD(System):
-    """
-    Push the position based dynamics (PBD) particles out of the coupled rigid geoms, and carry some along with links.
-
-    A carried particle catches up with the point of the link it follows over `1 / clamped_inv_dt`, clamped to spare it
-    jerks (see 'attach_particles').
-    """
-
-    def __init__(self, rigid_solver: RigidSolver, pbd_solver: PBDSolver, options: LegacyCouplerOptions) -> None:
-        self._pbd_solver = pbd_solver
-        self._rigid_solver = rigid_solver
-        self.clamped_inv_dt = min(1.0 / pbd_solver.substep_dt, CLAMPED_INV_DT)
-        self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
-        self.rigid_pbd_info.link_idx.fill(-1)
-        # The particles collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
-
-    @classmethod
-    def create(
-        cls, rigid_solver: RigidSolver, pbd_solver: PBDSolver, options: LegacyCouplerOptions
-    ) -> "RigidPBD | None":
-        return cls(rigid_solver, pbd_solver, options) if options.rigid_pbd else None
-
-    def compose(self, step: Step, collider: Collider) -> None:
-        # The carried particles catch up with their link after both the rigid and the PBD solvers updated, so the
-        # correction lags by one substep
-        step.couplings.add(kernel_pbd_rigid_collide, kernel_drive_pbd_particles_by_link)
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        yield from iter_data(self, "rigid_pbd_info")
-
-    def attach_particles(self, particles_idx, envs_idx, link_idx):
-        """Carry some PBD particles along with a rigid link, where they lie now in its frame."""
-        kernel_attach_pbd_to_rigid_link(
-            particles_idx,
-            envs_idx,
-            link_idx,
-            self._pbd_solver.pbd_state,
-            self._rigid_solver.dyn_state.links,
-            self.rigid_pbd_info,
-        )
-
-    def detach_particles(self, particles_idx, envs_idx):
-        """Release some PBD particles from the link carrying them, if any."""
-        kernel_detach_pbd_from_rigid_link(particles_idx, envs_idx, self.rigid_pbd_info)
 
 
 @qd.func
@@ -216,3 +167,50 @@ def kernel_drive_pbd_particles_by_link(
             i_r = pbd_state.particles.reordered_idx[i_p, i_b]
             pos_correction = target_world_pos - pbd_state.particles_reordered.pos[i_r, i_b]
             pbd_state.particles_reordered.vel[i_r, i_b] = pos_correction * clamped_inv_dt + target_world_vel
+
+
+@register_system
+class RigidPBD(Coupling):
+    """
+    Push the position based dynamics (PBD) particles out of the coupled rigid geoms, and carry some along with links.
+
+    A carried particle catches up with the point of the link it follows over `1 / clamped_inv_dt`, clamped to spare it
+    jerks (see 'attach_particles').
+    """
+
+    # The carried particles catch up with their link after both the rigid and the PBD solvers updated, so the correction
+    # lags by one substep
+    couple = (kernel_pbd_rigid_collide, kernel_drive_pbd_particles_by_link)
+
+    def __init__(
+        self,
+        rigid_solver: RigidSolver,
+        pbd_solver: PBDSolver,
+        options: Annotated[LegacyCouplerOptions, Enabled("rigid_pbd")],
+    ) -> None:
+        self._pbd_solver = pbd_solver
+        self._rigid_solver = rigid_solver
+        self.clamped_inv_dt = min(1.0 / pbd_solver.substep_dt, CLAMPED_INV_DT)
+        self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
+        self.rigid_pbd_info.link_idx.fill(-1)
+        # The particles collide with the rigid geoms through their SDF
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "rigid_pbd_info")
+
+    def attach_particles(self, particles_idx, envs_idx, link_idx):
+        """Carry some PBD particles along with a rigid link, where they lie now in its frame."""
+        kernel_attach_pbd_to_rigid_link(
+            particles_idx,
+            envs_idx,
+            link_idx,
+            self._pbd_solver.pbd_state,
+            self._rigid_solver.dyn_state.links,
+            self.rigid_pbd_info,
+        )
+
+    def detach_particles(self, particles_idx, envs_idx):
+        """Release some PBD particles from the link carrying them, if any."""
+        kernel_detach_pbd_from_rigid_link(particles_idx, envs_idx, self.rigid_pbd_info)

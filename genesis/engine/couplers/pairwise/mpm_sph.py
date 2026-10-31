@@ -1,13 +1,15 @@
 """The coupling of the grid of the material point method (MPM) solver with the smoothed particle hydrodynamics (SPH)."""
 
+from typing import Annotated
+
 import numpy as np
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.engine.pipeline import System, register_system
-from genesis.engine.solvers.mpm_solver import MPMSolver
+from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.mpm_solver import GridCoupling, MPMSolver
 from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import Data, DataKind, field
@@ -24,25 +26,6 @@ class MPMSPHInfo(Data, kind=DataKind.CONSTANT):
     """
 
     stencil_size: qd.Tensor = field(int, shape=())
-
-
-@register_system
-class MPMSPH(System):
-    """Exchange momentum between the cells of the material point method grid and the smoothed particles in them."""
-
-    def __init__(self, mpm_solver: MPMSolver, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> None:
-        self._mpm_solver = mpm_solver
-        # A cell spans the cells of the hash grid closer than its size to its lower corner
-        self.mpm_sph_info = MPMSPHInfo(
-            values=dict(stencil_size=int(np.floor(mpm_solver.dx / sph_solver.hash_grid_cell_size) + 2))
-        )
-
-    @classmethod
-    def create(cls, mpm_solver: MPMSolver, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> "MPMSPH | None":
-        return cls(mpm_solver, sph_solver, options) if options.mpm_sph else None
-
-    def compose(self) -> None:
-        self._mpm_solver.grid_couplings.add(func_mpm_sph)
 
 
 @qd.func
@@ -91,3 +74,18 @@ def func_mpm_sph(
                         - delta_mv / sph_state.particles_info_reordered.mass[i, i_b]
                     )
     return vel
+
+
+@register_system
+class MPMSPH(GridCoupling):
+    """Exchange momentum between the cells of the material point method grid and the smoothed particles in them."""
+
+    grid_coupling = func_mpm_sph
+
+    def __init__(
+        self, mpm_solver: MPMSolver, sph_solver: SPHSolver, options: Annotated[LegacyCouplerOptions, Enabled("mpm_sph")]
+    ) -> None:
+        # A cell spans the cells of the hash grid closer than its size to its lower corner
+        self.mpm_sph_info = MPMSPHInfo(
+            values=dict(stencil_size=int(np.floor(mpm_solver.dx / sph_solver.hash_grid_cell_size) + 2))
+        )

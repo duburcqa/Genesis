@@ -1,6 +1,7 @@
 """The coupling of the rigid geoms with the material point method (MPM) solver."""
 
 from collections.abc import Iterator
+from typing import Annotated
 
 import numpy as np
 import torch
@@ -11,14 +12,13 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.pipeline import System, register_system
-from genesis.engine.solvers.mpm_solver import MPMSolver
+from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.mpm_solver import CellSeparation, CellVelocity, GridCoupling, MPMSolver
 from genesis.engine.solvers.rigid.abd import func_collide_in_rigid_geom
-from genesis.engine.solvers.rigid.collider.collider import Collider
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
-from genesis.engine.step import Step
-from genesis.options.solvers import LegacyCouplerOptions
+from genesis.engine.step import Integration, Preparation
+from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
 from genesis.utils.array_class import ENVS, GEOMS, PARTICLES
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import broadcast_tensor
@@ -26,7 +26,7 @@ from genesis.utils.misc import broadcast_tensor
 from .rigid_contact import func_collide_with_rigid
 
 
-class RigidMPMCPIC(Data, kind=DataKind.STATE):
+class RigidMPMCPICState(Data, kind=DataKind.STATE):
     """
     The thin rigid geoms separating each particle from the cells of its stencil, for Compatible Particle-In-Cell (CPIC).
 
@@ -36,58 +36,6 @@ class RigidMPMCPIC(Data, kind=DataKind.STATE):
 
     rigid_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, GEOMS, ENVS))
     cells_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 27, ENVS), kind=DataKind.SCRATCH)
-
-
-@register_system
-class RigidMPM(System):
-    """
-    Collide the cells of the material point method (MPM) grid holding mass with the coupled rigid geoms.
-
-    With Compatible Particle-In-Cell (CPIC), which the MPM solver enables, a particle and a cell of its stencil that a
-    thin rigid geom separates exchange nothing: the cell gets nothing from the particle, and gives it the velocity of the
-    particle colliding with the geom instead. CPIC carries no gradient.
-    """
-
-    def __init__(self, rigid_solver: RigidSolver, mpm_solver: MPMSolver, options: LegacyCouplerOptions) -> None:
-        self._mpm_solver = mpm_solver
-        self._is_cpic = mpm_solver.enable_CPIC
-        self.is_differentiable = not self._is_cpic
-        self.rigid_mpm_cpic: RigidMPMCPIC | None = None
-        if self._is_cpic:
-            self.rigid_mpm_cpic = RigidMPMCPIC(
-                sizes=dict(particles=mpm_solver.n_particles, geoms=max(1, rigid_solver.n_geoms), envs=mpm_solver.sim._B)
-            )
-        # The cells and the particles collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
-
-    @classmethod
-    def create(
-        cls, rigid_solver: RigidSolver, mpm_solver: MPMSolver, options: LegacyCouplerOptions
-    ) -> "RigidMPM | None":
-        return cls(rigid_solver, mpm_solver, options) if options.rigid_mpm else None
-
-    def compose(self, step: Step, collider: Collider) -> None:
-        self._mpm_solver.grid_couplings.add(func_mpm_rigid)
-        if self._is_cpic:
-            step.preparations.add(kernel_update_cpic_rigid_normal)
-            self._mpm_solver.p2g.add(func_cpic_cell_separation)
-            self._mpm_solver.g2p.add(func_cpic_cell_velocity)
-            # The thin rigid geoms the particles saw belong to the trajectory they leave
-            self._mpm_solver.subscribe(
-                Subscriber(frozenset((StateChange.GEOMETRY,)), callback=lambda _, envs_idx: self.reset(envs_idx))
-            )
-
-    def reset(self, envs_idx=None) -> None:
-        """Forget the thin rigid geoms the particles of some environments saw, every environment by default."""
-        if envs_idx is None:
-            self.rigid_mpm_cpic.rigid_normal.fill(0)
-        else:
-            kernel_reset_cpic_rigid_normal(self._mpm_solver.scene._sanitize_envs_idx(envs_idx), self.rigid_mpm_cpic)
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        if self.rigid_mpm_cpic is not None:
-            yield from iter_data(self, "rigid_mpm_cpic")
 
 
 @qd.func
@@ -126,7 +74,7 @@ def func_cpic_cell_separation(
     i_c: int,
     cell_pos: qd.types.vector(3),
     i_sep: int,
-    rigid_mpm_cpic: RigidMPMCPIC,
+    rigid_mpm_cpic: RigidMPMCPICState,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -163,7 +111,7 @@ def func_cpic_cell_velocity(
     weight: float,
     grid_vel: qd.types.vector(3),
     mpm_state: array_class.MPMState,
-    rigid_mpm_cpic: RigidMPMCPIC,
+    rigid_mpm_cpic: RigidMPMCPICState,
     dyn_state: array_class.DynState,
     mpm_info: array_class.MPMInfo,
     dyn_info: array_class.DynInfo,
@@ -194,7 +142,7 @@ def func_cpic_cell_velocity(
 def kernel_update_cpic_rigid_normal(
     f: int,
     mpm_state: array_class.MPMState,
-    rigid_mpm_cpic: RigidMPMCPIC,
+    rigid_mpm_cpic: RigidMPMCPICState,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -225,13 +173,72 @@ def kernel_update_cpic_rigid_normal(
 
 
 @qd.kernel(fastcache=True)
-def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), rigid_mpm_cpic: RigidMPMCPIC):
+def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), rigid_mpm_cpic: RigidMPMCPICState):
     """Zero the normals of the thin rigid geoms seen by the particles of some environments."""
     for i_p, i_g, i_b_ in qd.ndrange(
         rigid_mpm_cpic.rigid_normal.shape[0], rigid_mpm_cpic.rigid_normal.shape[1], envs_idx.shape[0]
     ):
         i_b = envs_idx[i_b_]
         rigid_mpm_cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@register_system
+class RigidMPM(GridCoupling):
+    """Collide the cells of the material point method (MPM) grid holding mass with the coupled rigid geoms."""
+
+    grid_coupling = func_mpm_rigid
+
+    def __init__(
+        self,
+        rigid_solver: RigidSolver,
+        mpm_solver: MPMSolver,
+        options: Annotated[LegacyCouplerOptions, Enabled("rigid_mpm")],
+    ) -> None:
+        # The cells collide with the rigid geoms through their SDF
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
+
+
+@register_system
+class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
+    """
+    Separate the particles and the cells of the material point method (MPM) grid that a thin coupled rigid geom splits.
+
+    With Compatible Particle-In-Cell (CPIC), a particle and a cell of its stencil that a thin rigid geom separates
+    exchange nothing: the cell gets nothing from the particle, and gives it the velocity of the particle colliding with
+    the geom instead. CPIC carries no gradient.
+    """
+
+    is_differentiable = False
+    preprocess = kernel_update_cpic_rigid_normal
+    cell_separation = func_cpic_cell_separation
+    cell_velocity = func_cpic_cell_velocity
+
+    def __init__(
+        self,
+        rigid_mpm: RigidMPM,
+        rigid_solver: RigidSolver,
+        mpm_solver: MPMSolver,
+        options: Annotated[MPMOptions, Enabled("enable_CPIC")],
+    ) -> None:
+        self._mpm_solver = mpm_solver
+        self.rigid_mpm_cpic = RigidMPMCPICState(
+            sizes=dict(particles=mpm_solver.n_particles, geoms=max(1, rigid_solver.n_geoms), envs=mpm_solver.sim._B)
+        )
+        # The thin rigid geoms the particles saw belong to the trajectory they leave
+        mpm_solver.subscribe(
+            Subscriber(frozenset((StateChange.GEOMETRY,)), callback=lambda _, envs_idx: self.reset(envs_idx))
+        )
+
+    def reset(self, envs_idx=None) -> None:
+        """Forget the thin rigid geoms the particles of some environments saw, every environment by default."""
+        if envs_idx is None:
+            self.rigid_mpm_cpic.rigid_normal.fill(0)
+        else:
+            kernel_reset_cpic_rigid_normal(self._mpm_solver.scene._sanitize_envs_idx(envs_idx), self.rigid_mpm_cpic)
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "rigid_mpm_cpic")
 
 
 class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
@@ -248,7 +255,7 @@ class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
 
 
 @register_system
-class RigidMPMAttachment(System):
+class RigidMPMAttachment(Integration):
     """
     Pull material point method (MPM) particles toward points of rigid links with critically damped springs.
 
@@ -260,10 +267,7 @@ class RigidMPMAttachment(System):
         self._mpm_solver = mpm_solver
         self.rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None = None
 
-    def compose(self, step: Step) -> None:
-        step.integrations.add(self.apply)
-
-    def apply(self, f: int) -> None:
+    def substep_post_coupling(self, f: int) -> None:
         """Pull the attached particles of the next frame toward their link."""
         if self.rigid_mpm_attachment_info is not None:
             kernel_apply_rigid_mpm_attachment(

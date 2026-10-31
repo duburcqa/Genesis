@@ -1,30 +1,14 @@
 """The couplings of the surface of the finite element method (FEM) entities with the other solvers, and its floor."""
 
 import quadrants as qd
+from quadrants.lang._quadrants_callable import QuadrantsCallable
 
 import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import func_impose_floor_boundary
-from genesis.engine.pipeline import Inline, System, register_system
+from genesis.engine.pipeline import Inline, InlineSpec, System, register_system
 from genesis.engine.solvers.fem_solver import FEMSolver
-from genesis.engine.step import Step
+from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
-
-
-@register_system
-class FEMSurface(System):
-    """
-    Couple the surface of the finite element method (FEM) entities with the other solvers, then impose the floor on it.
-
-    The couplings of the surface vertices are the funcs of `surface_couplings`, which the coupling Systems add (see
-    func_fem_surface_couplings).
-    """
-
-    def __init__(self, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
-        self.surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings, run_without_funcs=False)
-
-    def compose(self, step: Step, fem_solver: FEMSolver) -> None:
-        self.surface_couplings.bind()
-        step.couplings.add(self.surface_couplings, kernel_fem_surface_boundary)
 
 
 @qd.func
@@ -88,3 +72,31 @@ def kernel_fem_surface_boundary(f: int, fem_state: array_class.FEMState, fem_inf
         _, fem_state.vertices.vel[f + 1, i_v, i_b] = func_impose_floor_boundary(
             fem_state.vertices.pos[f, i_v, i_b], fem_state.vertices.vel[f + 1, i_v, i_b], fem_info.boundary
         )
+
+
+@register_system
+class FEMSurface(Coupling):
+    """
+    Couple the surface of the finite element method (FEM) entities with the other solvers, then impose the floor on it.
+
+    The couplings of the surface vertices are the funcs of the Systems playing SurfaceCoupling.
+    """
+
+    surface_couplings = InlineSpec()
+
+    def __init__(self, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
+        self.surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings, run_without_funcs=False)
+
+    def build(self) -> None:
+        self.surface_couplings.bind()
+
+    @property
+    def couple(self) -> tuple[Inline, QuadrantsCallable]:
+        return self.surface_couplings, kernel_fem_surface_boundary
+
+
+class SurfaceCoupling(System):
+    """A System coupling the velocity of the surface vertices of the FEM entities with another solver."""
+
+    slot = FEMSurface.surface_couplings
+    entry = "surface_coupling"

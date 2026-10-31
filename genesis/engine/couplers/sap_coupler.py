@@ -18,7 +18,7 @@ from genesis.engine.pipeline import Coupler
 from genesis.engine.solvers.fem_solver import func_compute_element_mapping_matrix
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
-from genesis.engine.step import Step
+from genesis.engine.step import Coupling, Preparation
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import FixedOrderSums, SAPState
@@ -118,7 +118,7 @@ class ContactMode(IntEnum):
     NO_CONTACT = 2
 
 
-class SAPCoupler(RBC, Coupler):
+class SAPCoupler(RBC, Coupler, Preparation, Coupling):
     """
     Couple the FEM and rigid solvers of a scene through the Semi-Analytic Primal (SAP) contact solver of Drake.
 
@@ -524,11 +524,6 @@ class SAPCoupler(RBC, Coupler):
     @property
     def is_solving_rigid_constraints(self) -> bool:
         return True
-
-    def compose(self, step: Step) -> None:
-        """Add the preprocessing of the coupler to the preparations of the step, and its coupling to the couplings."""
-        step.preparations.add(self.preprocess)
-        step.couplings.add(self.couple)
 
     def preprocess(self, f):
         fem_solver, rigid_solver = self.fem_solver, self.rigid_solver

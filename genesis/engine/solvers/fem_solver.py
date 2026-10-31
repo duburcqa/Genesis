@@ -13,10 +13,10 @@ import genesis.utils.linalg as lu
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
-from genesis.engine.pipeline import Coupler
+from genesis.engine.pipeline import RoleOf
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.engine.step import Step
+from genesis.engine.step import Dynamics
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
@@ -357,12 +357,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def compose(self, step: Step, coupler: Coupler | None) -> None:
-        """Add the substep of the solver to the step, its dynamics left to a coupler computing them itself if any."""
-        if coupler is None or not coupler.is_simulating_fem:
-            step.dynamics.add(self.substep_pre_coupling)
-        step.integrations.add(self.substep_post_coupling)
-
     def substep_pre_coupling(self, f):
         if not self.is_active:
             return
@@ -648,7 +642,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
             )
-        if self._sim.coupler is not None and self._sim.coupler.is_simulating_fem:
+        if self._sim.coupler is not None and RoleOf(FEMSolver, Dynamics) in self._sim.coupler.supersedes:
             gs.raise_exception(
                 "Vertex constraints are not supported by a coupler computing the dynamics of FEM entities."
             )

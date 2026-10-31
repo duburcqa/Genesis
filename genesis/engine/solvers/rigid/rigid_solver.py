@@ -12,10 +12,10 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
-from genesis.engine.pipeline import Coupler, Phase, System
+from genesis.engine.pipeline import Phase, System
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
-from genesis.engine.step import Step
+from genesis.engine.step import Completion
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
@@ -195,7 +195,7 @@ def _sanitize_sol_params(
     return sol_params
 
 
-class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
+class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     material_cls = Rigid
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
@@ -466,6 +466,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # FIXME: when the migration is finished, we will remove the about two lines
         self._func_vel_at_point = func_vel_at_point
         self._func_apply_coupling_force = func_apply_coupling_force
+
+        if self.is_active:
+            self._build_substep()
 
     def _resolve_broadphase_traversal(self):
         if self._options.broadphase_traversal is not None:
@@ -1279,9 +1282,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_pos_updated = True
         self._is_forward_vel_updated = True
 
-    def substep(self, f):
+    def substep_pre_coupling(self, f):
         """
-        Run a substep of the solver (see 'compose'), or its part before the couplings of a coupler solving them.
+        Run a substep of the solver (see '_build_substep'), or its part before the couplings of a coupler solving them.
 
         The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         updates the forward kinematics in full and places every geom, whose poses the reversal reads.
@@ -1497,23 +1500,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """Return the collider and the constraint solver, whose Data the couplings of the rigid geoms read."""
         return tuple([part for part in (self.collider, self.constraint_solver) if part is not None])
 
-    def compose(
-        self,
-        step: Step,
-        coupler: Coupler | None,
-        collider: Collider | None,
-        constraint_solver: ConstraintSolver | None,
-    ) -> None:
+    def _build_substep(self) -> None:
         """
-        Compose the substep of the solver and add it to the step, around the couplings of the coupler solving them at
-        once, if any.
+        Build the phases of the substep of the solver: its dynamics, its constraint force and its integration.
 
-        The substep is the dynamics, the constraint force and the integration. A coupler may solve the constraints of
-        the rigid entities itself, between the velocities of the dynamics and the integration, or simulate the rigid
-        entities first, the substep running after it (see 'Coupler'). The stages of the substep fuse into kernels
-        between the collision detection and the constraint solve, which run on the host, captured as graphs: the
-        compile time of a kernel grows faster than its size while one more graph replay costs next to nothing.
+        A coupler may solve the constraints of the rigid entities itself, between the velocities of the dynamics and the
+        integration, which then runs after the couplings (see 'substep_post_coupling'). The stages of the substep fuse
+        into kernels between the collision detection and the constraint solve, which run on the host, captured as
+        graphs: the compile time of a kernel grows faster than its size while one more graph replay costs next to
+        nothing.
         """
+        coupler = self._sim.coupler
         self._is_constraint_solved_by_coupler = coupler is not None and coupler.is_solving_rigid_constraints
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients fuses
         # the stages into kernels captured as no graph
@@ -1537,27 +1534,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             integration.add(kernel_update_forward_kinematics_after_integration)
 
         self.substep_phase = Phase(is_graph=is_graph)
-        # The external forces apply over the step they are set for
-        step.completions.add(self.clear_external_force)
+        self.integration_after_coupling = Phase(is_graph=is_graph)
         if self._is_constraint_solved_by_coupler:
             constraint_force.add(update_qvel)
             self.substep_phase.add(dynamics, constraint_force)
-            self.integration_after_coupling = Phase(is_graph=is_graph)
             self.integration_after_coupling.add(update_qacc_from_qvel_delta, integration)
-            step.dynamics.add(self.substep)
-            step.integrations.add(self.integrate_after_coupling)
             return
-        if constraint_solver is not None and not self._disable_constraint:
+        if not self._disable_constraint:
             constraint_force.add(kernel_add_equality_constraints)
-        if collider is not None and self._enable_collision:
-            constraint_force.add(collider.detection)
-        if constraint_solver is not None and not self._disable_constraint:
-            constraint_force.add(kernel_add_inequality_constraints, constraint_solver.solve, kernel_resolve_post)
+        if self._enable_collision:
+            constraint_force.add(self.collider.detection)
+        if not self._disable_constraint:
+            constraint_force.add(kernel_add_inequality_constraints, self.constraint_solver.solve, kernel_resolve_post)
         self.substep_phase.add(dynamics, constraint_force, integration)
-        if coupler is not None and coupler.is_simulating_rigid_first:
-            step.integrations.add(self.substep)
-        else:
-            step.dynamics.add(self.substep)
 
     def reset_grad(self):
         # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
@@ -1572,8 +1561,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
 
-    def integrate_after_coupling(self, f: int) -> None:
-        """Integrate the velocities a coupler solved the constraints of, the second half of a substep."""
+    def substep_post_coupling(self, f: int) -> None:
+        """Integrate the velocities a coupler solved the constraints of, the second half of a substep, if any."""
         self.integration_after_coupling(**self._get_substep_values(is_recording=False))
 
     # ------------------------------------------------------------------------------------
@@ -3272,6 +3261,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         kernel_clear_external_force(self.dyn_state, self.rigid_config)
+
+    # The external forces apply over the step they are set for
+    complete = clear_external_force
 
     def update_drone_propeller_vgeoms(self, propellers_vgeom_idxs, propellers_revs, propellers_spin):
         kernel_update_drone_propeller_vgeoms(

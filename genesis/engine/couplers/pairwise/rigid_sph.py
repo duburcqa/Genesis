@@ -1,35 +1,18 @@
 """The coupling of the rigid geoms with the smoothed particle hydrodynamics (SPH) particles."""
 
+from typing import Annotated
+
 import quadrants as qd
 
 import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
-from genesis.engine.pipeline import System, register_system
+from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
-from genesis.engine.solvers.rigid.collider.collider import Collider
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.solvers.sph_solver import SPHSolver
-from genesis.engine.step import Step
+from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.geom import func_cubic_kernel_plane_integral
-
-
-@register_system
-class RigidSPH(System):
-    """Collide the smoothed particle hydrodynamics particles with the coupled rigid geoms, which their pressure pushes."""
-
-    def __init__(self, rigid_solver: RigidSolver, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> None:
-        # The particles collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
-
-    @classmethod
-    def create(
-        cls, rigid_solver: RigidSolver, sph_solver: SPHSolver, options: LegacyCouplerOptions
-    ) -> "RigidSPH | None":
-        return cls(rigid_solver, sph_solver, options) if options.rigid_sph else None
-
-    def compose(self, step: Step, collider: Collider) -> None:
-        step.couplings.add(kernel_sph_rigid)
 
 
 @qd.func
@@ -129,3 +112,19 @@ def kernel_sph_rigid(
                         rigid_config,
                         collider_config,
                     )
+
+
+@register_system
+class RigidSPH(Coupling):
+    """Collide the smoothed particle hydrodynamics particles with the coupled rigid geoms, which their pressure pushes."""
+
+    couple = kernel_sph_rigid
+
+    def __init__(
+        self,
+        rigid_solver: RigidSolver,
+        sph_solver: SPHSolver,
+        options: Annotated[LegacyCouplerOptions, Enabled("rigid_sph")],
+    ) -> None:
+        # The particles collide with the rigid geoms through their SDF
+        rigid_solver.opt_ins.add(array_class.SDFInfo)

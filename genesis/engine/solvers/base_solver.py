@@ -13,9 +13,8 @@ import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFieldsDispatcher
 from genesis.engine.materials.base import Material
-from genesis.engine.pipeline import System
 from genesis.engine.state_change import StateChange, Subscriber, mutates
-from genesis.engine.step import Step
+from genesis.engine.step import Dynamics, Integration
 from genesis.engine.states import SystemCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
@@ -198,7 +197,7 @@ class GravityMixin:
         return tensor[0] if self._sim.n_envs == 0 else tensor
 
 
-class Solver(RBC, System):
+class Solver(RBC, Dynamics, Integration):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
@@ -440,11 +439,6 @@ class Solver(RBC, System):
             if tensor_ is not None and n_envs == 0:
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
-
-    def compose(self, step: Step) -> None:
-        """Add the substep of the solver to the step, its dynamics before the couplings and its integration after."""
-        step.dynamics.add(self.substep_pre_coupling)
-        step.integrations.add(self.substep_post_coupling)
 
     def build(self):
         self._B = self._sim._B

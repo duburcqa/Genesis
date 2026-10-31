@@ -13,10 +13,10 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.materials import MPM
-from genesis.engine.pipeline import Inline
+from genesis.engine.pipeline import Inline, InlineSpec, System
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
-from genesis.engine.step import Step
+from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ConfigItem, DataItem, iter_data
@@ -90,9 +90,15 @@ class MPMMaterialDispatcher:
         return stress
 
 
-class MPMSolver(ParticleSolver):
+class MPMSolver(ParticleSolver, Coupling):
     material_cls = MPM.Base
     has_frames = True
+
+    # The extension points of the transfers between the particles and the grid, and of the update of the grid, filled
+    # by the Systems playing CellSeparation, GridCoupling and CellVelocity
+    p2g = InlineSpec()
+    grid_couplings = InlineSpec()
+    g2p = InlineSpec()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -107,8 +113,6 @@ class MPMSolver(ParticleSolver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
-        # The extension points of the transfers between the particles and the grid, and of the update of the grid,
-        # which the coupling Systems add their funcs to
         self.p2g = Inline(kernel_p2g, func_mpm_cell_separation)
         self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
         self.g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
@@ -228,6 +232,9 @@ class MPMSolver(ParticleSolver):
         self._build_gravity(self.mpm_info.gravity)
 
         if self.is_active:
+            self.p2g.bind(static_config=self.mpm_static_config, material_dispatcher=self._material_dispatcher)
+            self.grid_couplings.bind(force_fields=self.force_fields_dispatcher)
+            self.g2p.bind(static_config=self.mpm_static_config)
             self.register_errors(
                 self.mpm_state.errno,
                 {
@@ -316,18 +323,10 @@ class MPMSolver(ParticleSolver):
             kernel_compute_F_tmp(f, self.mpm_state, self.mpm_info, compute_svd=self.mpm_static_config.is_svd_needed)
         self.p2g(f=f)
 
-    def compose(self, step: Step) -> None:
-        """
-        Add the substep of the solver to the step, and the update of the velocity of its grid to the couplings.
-
-        The couplings of the grid with the other solvers run between the velocity of the cells and the boundary of the
-        grid (see 'func_mpm_grid_couplings').
-        """
-        super().compose(step)
-        self.p2g.bind(static_config=self.mpm_static_config, material_dispatcher=self._material_dispatcher)
-        self.grid_couplings.bind(force_fields=self.force_fields_dispatcher)
-        self.g2p.bind(static_config=self.mpm_static_config)
-        step.couplings.add(self.grid_couplings)
+    @property
+    def couple(self) -> Inline:
+        """The update of the velocity of the grid, which runs the couplings with the other solvers (see GridCoupling)."""
+        return self.grid_couplings
 
     def substep_post_coupling(self, f):
         self.g2p(f=f)
@@ -1310,3 +1309,24 @@ def kernel_mpm_grid_op(
                 vel += force_fields.fields[i_ff].get_acc(pos, vel, t, i=-1) * substep_dt
             vel = func_mpm_grid_couplings(f, i_b, pos, vel, mass)
             _, mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = func_impose_cube_boundary(pos, vel, mpm_info.boundary)
+
+
+class CellSeparation(System):
+    """A System adding the separation of the particles of a cell to the transfer from the particles to the grid."""
+
+    slot = MPMSolver.p2g
+    entry = "cell_separation"
+
+
+class GridCoupling(System):
+    """A System coupling the velocity of the grid with another solver, between its update and its boundary."""
+
+    slot = MPMSolver.grid_couplings
+    entry = "grid_coupling"
+
+
+class CellVelocity(System):
+    """A System adding the velocity of a cell it separates to the transfer from the grid to the particles."""
+
+    slot = MPMSolver.g2p
+    entry = "cell_velocity"

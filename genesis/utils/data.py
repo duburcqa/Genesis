@@ -280,34 +280,6 @@ def requires(*, opt_in: bool = False):
     return dataclasses.field(metadata={_SPEC: _FieldSpec(opt_in=opt_in, is_required=True)})
 
 
-def attach(target: "type[Data]", **structs: "type[Data]") -> None:
-    """Add to a struct owned elsewhere the requirements of the given structs, by field name, each declared `opt_in`.
-
-    A module calls it when imported, `attach(ColliderInfo, sdf=SDFInfo)`, so that a kernel reaches the struct through
-    the target without the owner of the target declaring it, and opts the field in where it uses it (see 'requires'). A
-    field attached again with the same struct is left as is. The fields of a struct are final once an instance is built,
-    since a kernel taking it compiles its layout in.
-    """
-    for field_name, struct_cls in structs.items():
-        target_field = target.__dataclass_fields__.get(field_name)
-        if target_field is not None:
-            spec = target_field.metadata.get(_SPEC, _FieldSpec())
-            if not (spec.is_required and spec.opt_in and _resolve_type(target_field.type, target) is struct_cls):
-                raise TypeError(f"attach({target.__name__}, {field_name}={struct_cls.__name__}) names another field.")
-            continue
-        if target._is_sealed:
-            raise TypeError(
-                f"attach({target.__name__}, {field_name}={struct_cls.__name__}) comes too late, an instance being "
-                f"already built: import the module calling it before building any scene."
-            )
-        # The field of the requirement, taken from a dataclass declaring it alone
-        target.__dataclass_fields__[field_name] = dataclasses.fields(
-            dataclasses.make_dataclass(field_name, [(field_name, struct_cls, requires(opt_in=True))])
-        )[0]
-        setattr(target, field_name, FieldRef(target, (field_name,)))
-        target._requires[field_name] = struct_cls
-
-
 class OptIns:
     """
     The fields and structs opted in among those a component owns, with the sizes of their arrays (see 'field').
@@ -389,8 +361,7 @@ class Data:
     _lazy: ClassVar[dict[str, type]] = {}
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
-    # The type of each struct the struct requires by its field, those attached to it among them, its fields being
-    # final once an instance is built
+    # The type of each struct the struct requires by its field, resolved once an instance is built
     _requires: ClassVar[dict[str, type]] = {}
     _is_sealed: ClassVar[bool] = False
 

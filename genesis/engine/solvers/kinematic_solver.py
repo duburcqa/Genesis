@@ -170,6 +170,11 @@ class KinematicSolver(Solver):
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
+    # The Data the solver owns, which other Systems may depend on (see 'assemble_systems')
+    rigid_info: array_class.RigidInfo
+    dyn_info: array_class.DynInfo
+    dyn_state: array_class.DynState
+
     def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
         super().__init__(scene, sim, options)
 

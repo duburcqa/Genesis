@@ -1,13 +1,15 @@
 """The coupling of the grid of the material point method (MPM) solver with the position based dynamics (PBD)."""
 
+from typing import Annotated
+
 import numpy as np
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.engine.pipeline import System, register_system
-from genesis.engine.solvers.mpm_solver import MPMSolver
+from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.mpm_solver import GridCoupling, MPMSolver
 from genesis.engine.solvers.pbd_solver import PBDSolver
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import Data, DataKind, field
@@ -24,25 +26,6 @@ class MPMPBDInfo(Data, kind=DataKind.CONSTANT):
     """
 
     stencil_size: qd.Tensor = field(int, shape=())
-
-
-@register_system
-class MPMPBD(System):
-    """Exchange momentum between the cells of the material point method grid and the free PBD particles in them."""
-
-    def __init__(self, mpm_solver: MPMSolver, pbd_solver: PBDSolver, options: LegacyCouplerOptions) -> None:
-        self._mpm_solver = mpm_solver
-        # A cell spans the cells of the hash grid closer than its size to its lower corner
-        self.mpm_pbd_info = MPMPBDInfo(
-            values=dict(stencil_size=int(np.floor(mpm_solver.dx / pbd_solver.hash_grid_cell_size) + 2))
-        )
-
-    @classmethod
-    def create(cls, mpm_solver: MPMSolver, pbd_solver: PBDSolver, options: LegacyCouplerOptions) -> "MPMPBD | None":
-        return cls(mpm_solver, pbd_solver, options) if options.mpm_pbd else None
-
-    def compose(self) -> None:
-        self._mpm_solver.grid_couplings.add(func_mpm_pbd)
 
 
 @qd.func
@@ -92,3 +75,18 @@ def func_mpm_pbd(
                             - delta_mv / pbd_state.particles_info_reordered.mass[i, i_b]
                         )
     return vel
+
+
+@register_system
+class MPMPBD(GridCoupling):
+    """Exchange momentum between the cells of the material point method grid and the free PBD particles in them."""
+
+    grid_coupling = func_mpm_pbd
+
+    def __init__(
+        self, mpm_solver: MPMSolver, pbd_solver: PBDSolver, options: Annotated[LegacyCouplerOptions, Enabled("mpm_pbd")]
+    ) -> None:
+        # A cell spans the cells of the hash grid closer than its size to its lower corner
+        self.mpm_pbd_info = MPMPBDInfo(
+            values=dict(stencil_size=int(np.floor(mpm_solver.dx / pbd_solver.hash_grid_cell_size) + 2))
+        )
