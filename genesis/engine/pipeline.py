@@ -461,17 +461,20 @@ class Phase:
         # The kernels and Python stages to launch, with their arguments
         calls: list[tuple[Callable, tuple[Any, ...]]] = []
         run: list[tuple[FusedStage, tuple[Any, ...]]] = []
-        # The objects of the kernel methods of the run, whose rank names them in the fused kernel
-        owners: list[object] = []
+        # The name of each object of the run in the fused kernel, by parameter name and identity: objects of one name,
+        # such as the states of two instances of a template, are numbered apart
+        fused_names: dict[tuple[str, int], str] = {}
         for item, args in [*self.get_items(), (None, ())]:
             if isinstance(item, (QuadrantsCallable, BoundQuadrantsCallable)):
                 names = list(inspect.signature(item.fn).parameters)
                 is_method = isinstance(item, BoundQuadrantsCallable)
                 if is_method:
-                    if all([item.instance is not owner for owner in owners]):
-                        owners.append(item.instance)
-                    names[0] = f"owner_{[owner is item.instance for owner in owners].index(True)}"
+                    names[0] = "owner"
                     item, args = item.quadrants_callable, (item.instance, *args)
+                for i, (name, arg) in enumerate(zip(names, args)):
+                    if not isinstance(arg, CallArg):
+                        n_named = len([key for key in fused_names if key[0] == name])
+                        names[i] = fused_names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
                 run.append((FusedStage(item, tuple(names), is_method), args))
                 continue
             if run:
@@ -480,7 +483,7 @@ class Phase:
                 args_by_name = {n: a for stage_, args_ in run for n, a in zip(stage_.names, args_)}
                 calls.append((kernel, tuple([args_by_name[name] for name in names])))
                 run.clear()
-                owners.clear()
+                fused_names.clear()
             if item is not None:
                 calls.append((item, args))
         self._launches = tuple(
