@@ -642,6 +642,9 @@ class Inline:
         # The names of the module of the kernel, which its body refers to
         lines.append(f"globals().update(vars(sys.modules[{fn.__module__!r}]))")
         args_by_name = dict(zip(inspect.signature(fn).parameters, self._args))
+        # The name of each object in the kernel generated, by parameter name and identity: objects of one name, such as
+        # the info structs of two couplings, are numbered apart (see 'Phase.get_launches')
+        bound_names = {(name, id(arg)): name for name, arg in args_by_name.items() if not isinstance(arg, CallArg)}
         params_new: list[ast.arg] = []
         calls_data: list[list[str]] = []
         for i, (func, args) in enumerate(self.items):
@@ -650,18 +653,22 @@ class Inline:
             lines.append(f"from {func.fn.__module__} import {owner_name} as func_module_{i}")
             lines.append(f"func_{i} = func_module_{i}{''.join([f'.{attr}' for attr in path])}")
             names = list(inspect.signature(func.fn).parameters)[-len(args) :] if args else []
+            names_bound = []
             for name, arg in zip(names, args):
                 # A parameter that the scope of the func leaves unbound takes the value the kernel binds to its name
-                if name in args_by_name:
-                    assert args_by_name[name] is arg or isinstance(arg, CallArg), (
-                        f"Parameter '{name}' of '{func.fn.__qualname__}' is bound to another value by another func."
-                    )
-                    continue
-                args_by_name[name] = arg
-                annotation = f"inspect.signature(func_{i}.fn).parameters['{name}'].annotation"
-                lines.append(f"{name}_annotation = {annotation}")
-                params_new.append(ast.arg(arg=name, annotation=ast.Name(id=f"{name}_annotation", ctx=ast.Load())))
-            calls_data.append(names)
+                if isinstance(arg, CallArg):
+                    name_bound = name
+                else:
+                    n_named = len([key for key in bound_names if key[0] == name])
+                    name_bound = bound_names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
+                names_bound.append(name_bound)
+                if name_bound not in args_by_name:
+                    args_by_name[name_bound] = arg
+                    annotation = f"inspect.signature(func_{i}.fn).parameters['{name}'].annotation"
+                    lines.append(f"{name_bound}_annotation = {annotation}")
+                    annotation_node = ast.Name(id=f"{name_bound}_annotation", ctx=ast.Load())
+                    params_new.append(ast.arg(arg=name_bound, annotation=annotation_node))
+            calls_data.append(names_bound)
         funcdef.args.args += params_new
 
         hook_name = self.hook.__name__
