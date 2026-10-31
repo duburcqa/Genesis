@@ -15,7 +15,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Step
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.array_class import ENVS, PARTICLES
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data, opt_in
+from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 # The largest inverse timestep at which the particles carried by a link catch up with it, which spares them jerks
@@ -45,7 +45,7 @@ class RigidPBD(System):
         self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
         self.rigid_pbd_info.link_idx.fill(-1)
         # The particles collide with the rigid geoms through their SDF
-        opt_in(array_class.SDFInfo)
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     @classmethod
     def create(

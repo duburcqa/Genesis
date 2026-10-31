@@ -11,7 +11,6 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.engine.step import Step
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.data import opt_in
 from genesis.utils.geom import func_cubic_kernel_plane_integral
 
 
@@ -21,7 +20,7 @@ class RigidSPH(System):
 
     def __init__(self, rigid_solver: RigidSolver, sph_solver: SPHSolver, options: LegacyCouplerOptions) -> None:
         # The particles collide with the rigid geoms through their SDF
-        opt_in(array_class.SDFInfo)
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     @classmethod
     def create(

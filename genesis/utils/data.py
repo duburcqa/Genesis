@@ -1,15 +1,12 @@
 """Declarative solver data: the structs kernels take as arguments, their sizes, and the records of their arrays."""
 
-import contextlib
 import dataclasses
 import math
 import operator
 import sys
 import types
 import typing
-import weakref
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextvars import ContextVar
+from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
 from typing import Annotated, Any, ClassVar, NamedTuple
 
@@ -311,101 +308,48 @@ def attach(target: "type[Data]", **structs: "type[Data]") -> None:
         target._requires[field_name] = struct_cls
 
 
-def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None" = None, **sizes: Any) -> None:
-    """Opt in a field declared `opt_in` (see 'field'), or a whole struct, for those built in the entered namespace.
-
-    The target is a field by reference from the struct holding it, `opt_in(GJKScratch.contact0, envs=n_threads)`, with
-    the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
-    with 'is_opted_in'. Opting in a requirement (see 'requires') opts in the struct it requires as well. `cond` defers
-    the decision to the moment the struct is built, the opt-in holding if it returns true then, so that a component asks
-    before it knows. It holds in the children of the namespace too, and must come before any instance of the struct is
-    built in it.
+class OptIns:
     """
-    root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
-    entered_namespace = _ACTIVE_NAMESPACE.get()
-    if entered_namespace is None:
-        raise TypeError(f"opt_in({target!r}) needs an entered namespace (see 'namespace').")
-    if entered_namespace._structs.get(root_cls):
-        raise TypeError(
-            f"opt_in({target!r}) comes too late: a {root_cls.__name__} is already built in {entered_namespace!r}."
-        )
-    entered_namespace._opt_ins.setdefault((root_cls, path), []).append((cond, sizes))
-    if len(path) == 1 and path[0] in root_cls._requires:
-        required_cls = _resolve_type(root_cls._requires[path[0]], root_cls)
-        entered_namespace._opt_ins.setdefault((required_cls, ()), []).append((cond, {}))
+    The fields and structs opted in among those a component owns, with the sizes of their arrays (see 'field').
 
-
-def is_opted_in(target: "FieldRef | type[Data]") -> bool:
-    """Return whether a field or a struct is opted in for those built in the entered namespace (see 'opt_in')."""
-    root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
-    return path in _opt_in_sizes(root_cls)
-
-
-def _opt_in_sizes(cls: type) -> dict[tuple[str, ...], dict[str, Any]]:
-    """Return the sizes of the fields of a struct opted in within the entered namespace or its ancestors, by path."""
-    opted_in = {}
-    opting_namespace = _ACTIVE_NAMESPACE.get()
-    while opting_namespace is not None:
-        for (root_cls, path), requests in opting_namespace._opt_ins.items():
-            if root_cls is not cls or path in opted_in:
-                continue
-            for cond, sizes in requests:
-                if cond is None or cond():
-                    if opted_in.setdefault(path, sizes) != sizes:
-                        raise TypeError(f"{cls.__name__}.{'.'.join(path)} is opted in with different sizes.")
-        opting_namespace = opting_namespace.parent
-    return opted_in
-
-
-# The namespace structs register in and find the structs they require from, set while one is entered (see Namespace)
-_ACTIVE_NAMESPACE: ContextVar["Namespace | None"] = ContextVar("data_namespace", default=None)
-
-
-class Namespace:
-    """
-    A named namespace of the structs built within it (see Data and 'namespace').
-
-    Namespaces form a tree, each child named under its parent and kept, so that a struct registered once serves every
-    struct built later requiring it. The structs built within a namespace register in it and find the structs they
-    require in it, else in its ancestors, so a child shadows the structs of the same type of its ancestors and several
-    instances of a struct serve distinct structs requiring it.
+    A component using a struct that another component owns opts it in on the registry of the owner, which passes it to
+    the constructor of the struct (see Data). The scope of an opt-in is thus the owner the component depends on, and two
+    instances of a struct owned by distinct components are opted in apart.
     """
 
-    def __init__(self, name: str, parent: "Namespace | None" = None):
-        self.name, self.parent = name, parent
-        self._structs: dict[type, weakref.WeakSet] = {}
-        self._children: dict[str, Namespace] = {}
-        # The requests opting in fields or structs, by the struct they start from and their path (see 'opt_in')
-        self._opt_ins: dict[tuple[type, tuple[str, ...]], list[tuple[Callable[[], bool] | None, dict[str, Any]]]] = {}
+    def __init__(self):
+        # The sizes of each request, by the struct it starts from and its path
+        self._requests: dict[tuple[type, tuple[str, ...]], list[dict[str, Any]]] = {}
+        self._built: set[type] = set()
 
-    def __repr__(self):
-        return self.name if self.parent is None else f"{self.parent!r}.{self.name}"
+    def add(self, target: "FieldRef | type[Data]", **sizes: Any) -> None:
+        """
+        Opt in a field declared `opt_in`, or a whole struct, before the owner builds it.
 
+        The target is a field by reference from the struct holding it, `add(GJKScratch.contact0, envs=n_threads)`, with
+        the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
+        with `in`. Opting in a requirement (see 'requires') opts in the struct it requires as well.
+        """
+        root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
+        if root_cls in self._built:
+            raise TypeError(f"Opting in {target!r} comes too late: a {root_cls.__name__} is already built.")
+        self._requests.setdefault((root_cls, path), []).append(sizes)
+        if len(path) == 1 and path[0] in root_cls._requires:
+            required_cls = _resolve_type(root_cls._requires[path[0]], root_cls)
+            self._requests.setdefault((required_cls, ()), []).append({})
 
-@contextlib.contextmanager
-def namespace(name: "str | Namespace", *, root: bool = False):
-    """Enter a namespace for the structs built within the block (see Namespace).
+    def __contains__(self, target: "FieldRef | type[Data]") -> bool:
+        root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
+        return path in self.get_sizes(root_cls)
 
-    The namespace is the child of the given name of the namespace entered, created the first time it is asked for, with
-    `root` a new namespace, whatever namespace is entered, or a namespace given itself, kept by its owner to enter it
-    again. The namespace entered is local to the thread.
-    """
-    parent = _ACTIVE_NAMESPACE.get()
-    if isinstance(name, Namespace):
-        entered_namespace = name
-    elif root:
-        entered_namespace = Namespace(name)
-    elif parent is None:
-        raise TypeError(f"namespace({name!r}) opens a child of the entered namespace, but none is entered.")
-    else:
-        if name not in parent._children:
-            parent._children[name] = Namespace(name, parent)
-        entered_namespace = parent._children[name]
-    token = _ACTIVE_NAMESPACE.set(entered_namespace)
-    try:
-        yield
-    finally:
-        _ACTIVE_NAMESPACE.reset(token)
+    def get_sizes(self, cls: type) -> dict[tuple[str, ...], dict[str, Any]]:
+        """Return the sizes of the opted-in fields of a struct, by path, the struct itself under the empty path."""
+        opted_in = {}
+        for (root_cls, path), requests in self._requests.items():
+            for sizes in requests if root_cls is cls else ():
+                if opted_in.setdefault(path, sizes) != sizes:
+                    raise TypeError(f"{cls.__name__}.{'.'.join(path)} is opted in with different sizes.")
+        return opted_in
 
 
 class _Node(NamedTuple):
@@ -436,8 +380,8 @@ class Data:
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
     `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
     environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
-    placeholder no kernel reads. Each required struct is bound to the one of its type built in the entered namespace or
-    its nearest ancestor holding one (see Namespace).
+    placeholder no kernel reads. `opt_ins` is the registry of the owner opting in fields (see OptIns), and `binds` maps a
+    field to the struct or array allocated elsewhere it holds, every required struct opted in among them.
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -497,7 +441,8 @@ class Data:
         layout: "Mapping[Any, tuple[int, ...] | None] | tuple[int, ...] | None" = None,
         unused: Mapping[Any, bool] | bool | None = None,
         requires_grad: bool = False,
-        _binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
+        opt_ins: OptIns | None = None,
+        binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
     ):
         cls = type(self)
         name = cls.__name__
@@ -514,26 +459,18 @@ class Data:
                 raise TypeError(f"{name}: a struct requires one struct per type.")
             cls._is_sealed = True
 
-        # The fields opted in within the entered namespace or its ancestors (see 'opt_in'), the struct itself aside
-        opted_in = {path: path_sizes for path, path_sizes in _opt_in_sizes(cls).items() if path}
-        # The required structs are bound in their fields, from the entered namespace, else from the nearest ancestor
-        binds = {}
+        # The fields opted in on the registry of the owner (see OptIns), the struct itself aside
+        opted_in = {path: sizes for path, sizes in (opt_ins or OptIns()).get_sizes(cls).items() if path}
+        if opt_ins is not None:
+            opt_ins._built.add(cls)
+        # The required structs are bound by the owner, an opt-in requirement opted in by nobody holding placeholders of
+        # its own, its arrays being unused as those of any opt-in field
+        binds = {(key._path if isinstance(key, FieldRef) else (key,)): bound for key, bound in (binds or {}).items()}
         for field_name, required_cls in cls._requires.items():
-            holding_namespace = _ACTIVE_NAMESPACE.get()
-            while holding_namespace is not None and not holding_namespace._structs.get(required_cls):
-                holding_namespace = holding_namespace.parent
-            if holding_namespace is None:
-                # An opt-in requirement built nowhere and opted in by nobody holds placeholders of its own, its arrays
-                # being unused as those of any opt-in field
+            if (field_name,) not in binds:
                 if cls.__dataclass_fields__[field_name].metadata[_SPEC].opt_in and (field_name,) not in opted_in:
                     continue
-                raise TypeError(f"{name}() finds no {required_cls.__name__} in {_ACTIVE_NAMESPACE.get()!r}.")
-            structs = list(holding_namespace._structs[required_cls])
-            if len(structs) > 1:
-                raise TypeError(
-                    f"{name}() finds {len(structs)} {required_cls.__name__} in {holding_namespace!r}, not one."
-                )
-            binds[(field_name,)] = structs[0]
+                raise TypeError(f"{name}() takes no {required_cls.__name__} in 'binds'.")
 
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
         # fields each has left
@@ -565,11 +502,9 @@ class Data:
 
         # A field bound to an array or a struct allocated elsewhere, which no kernel may access through both, since
         # Quadrants assumes distinct kernel arguments never alias
-        for key, bound in (_binds or {}).items():
-            key_path = key._path if isinstance(key, FieldRef) else (key,)
+        for key_path in binds:
             if key_path not in paths:
-                raise TypeError(f"{name}() '_binds' names {key}, which is no field of it.")
-            binds[key_path] = bound
+                raise TypeError(f"{name}() 'binds' names {'.'.join(key_path)}, which is no field of it.")
         sizes = _by_path(name, "sizes", sizes or {}, paths)
         if unknown := sorted(opted_in.keys() - {node.path for node in nodes if node.spec.opt_in}):
             raise TypeError(f"{name}() is opted in at {unknown}, which no field declares opt_in.")
@@ -707,10 +642,6 @@ class Data:
                 held.add(id(value))
                 if isinstance(value, Data):
                     pending.append(((*path, data_field.name), value))
-
-        entered_namespace = _ACTIVE_NAMESPACE.get()
-        if entered_namespace is not None:
-            entered_namespace._structs.setdefault(cls, weakref.WeakSet()).add(self)
 
 
 def _resolve_type(annotation: Any, owner: type) -> Any:

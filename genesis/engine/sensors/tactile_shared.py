@@ -11,7 +11,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
-from genesis.utils.data import opt_in
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
 
 if TYPE_CHECKING:
@@ -557,7 +556,7 @@ class ContactDepthQuerySensorMixin:
         super().__init__(*args, **kwargs)
         # Queried through signed distance fields unless raycast
         if self._options.contact_depth_query != "raycast":
-            opt_in(array_class.SDFInfo)
+            self._manager._sim.rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     def build(self):
         super().build()

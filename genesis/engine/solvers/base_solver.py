@@ -19,7 +19,16 @@ from genesis.engine.step import Step
 from genesis.engine.states import SystemCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
+from genesis.utils.data import (
+    CHECKPOINT_KINDS,
+    ArrayItem,
+    ConfigItem,
+    DataItem,
+    DataKind,
+    OptIns,
+    ScalarItem,
+    fill_data,
+)
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -205,6 +214,8 @@ class Solver(RBC, System):
         self._scene = scene
         self._options = options
         self._entities: list[Entity] = gs.List()
+        # The Data of the solver that other components opted in, which it passes to the structs it builds (see OptIns)
+        self.opt_ins = OptIns()
 
         # Whether the state of the solver tracks gradients, and the autograd graph of the simulator recording them
         self._requires_grad: bool = sim.options.requires_grad

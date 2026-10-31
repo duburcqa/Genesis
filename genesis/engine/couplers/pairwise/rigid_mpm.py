@@ -20,7 +20,7 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.step import Step
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.array_class import ENVS, GEOMS, PARTICLES
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data, opt_in
+from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import broadcast_tensor
 
 from .rigid_contact import func_collide_with_rigid
@@ -58,7 +58,7 @@ class RigidMPM(System):
                 sizes=dict(particles=mpm_solver.n_particles, geoms=max(1, rigid_solver.n_geoms), envs=mpm_solver.sim._B)
             )
         # The cells and the particles collide with the rigid geoms through their SDF
-        opt_in(array_class.SDFInfo)
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     @classmethod
     def create(

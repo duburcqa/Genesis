@@ -19,7 +19,7 @@ from genesis.engine.states.solvers import MPMSolverState
 from genesis.engine.step import Step
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
 
 from .particle_solver import ParticleSolver, kernel_add_vverts

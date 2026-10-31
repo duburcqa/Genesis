@@ -22,7 +22,7 @@ import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
-from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
@@ -95,20 +95,20 @@ class Collider(System):
         if self._use_split_narrowphase:
             gpu_cores = self.collider_config.gpu_cores
             n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
-            opt_in(array_class.MPRScratch.contact0, envs=n_contact0_threads)
-            opt_in(array_class.MPRScratch.multicontact, envs=max(gpu_cores, self._n_terrain_threads))
-            opt_in(array_class.GJKScratch.contact0, envs=n_contact0_threads)
-            opt_in(array_class.GJKScratch.multicontact, envs=gpu_cores)
+            self._solver.opt_ins.add(array_class.MPRScratch.contact0, envs=n_contact0_threads)
+            self._solver.opt_ins.add(array_class.MPRScratch.multicontact, envs=max(gpu_cores, self._n_terrain_threads))
+            self._solver.opt_ins.add(array_class.GJKScratch.contact0, envs=n_contact0_threads)
+            self._solver.opt_ins.add(array_class.GJKScratch.multicontact, envs=gpu_cores)
         else:
             if self.collider_config.has_terrain:
-                opt_in(array_class.MPRScratch.multicontact, envs=self._n_terrain_threads)
+                self._solver.opt_ins.add(array_class.MPRScratch.multicontact, envs=self._n_terrain_threads)
             if self.collider_config.has_non_box_plane_convex_convex:
-                opt_in(array_class.GJKScratch.main, envs=self._solver._B)
+                self._solver.opt_ins.add(array_class.GJKScratch.main, envs=self._solver._B)
 
         if self.collider_config.has_nonconvex_nonterrain:
-            opt_in(array_class.ColliderInfo.sdf)
+            self._solver.opt_ins.add(array_class.ColliderInfo.sdf)
         if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
-            opt_in(array_class.ColliderInfo.support_field)
+            self._solver.opt_ins.add(array_class.ColliderInfo.support_field)
 
         # Each narrowphase sub-component builds its part of the collider info (see ColliderInfo)
         self.sdf = SDF(rigid_solver)
@@ -349,6 +349,18 @@ class Collider(System):
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
+            opt_ins=self._solver.opt_ins,
+            # The info of the narrowphase sub-components, the SDF and the support tables when built
+            binds={
+                name: info
+                for name, info in (
+                    ("mpr", self.mpr.mpr_info),
+                    ("gjk", self.gjk.gjk_info),
+                    ("sdf", self.sdf.sdf_info),
+                    ("support_field", self._support_field.support_field_info),
+                )
+                if info is not None
+            },
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)

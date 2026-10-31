@@ -119,6 +119,7 @@ class GJK:
                 array_class.GJKScratch.multicontact: full,
             },
             requires_grad=requires_grad,
+            opt_ins=rigid_solver.opt_ins,
         )
         self.gjk_state, self.contact0_gjk_state, self.multicontact_gjk_state = (
             scratch.main,

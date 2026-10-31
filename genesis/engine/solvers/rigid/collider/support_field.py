@@ -7,7 +7,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.data import is_opted_in
 
 
 if TYPE_CHECKING:
@@ -39,7 +38,8 @@ class SupportField:
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        if not is_opted_in(array_class.SupportFieldInfo):
+        self.support_field_info: array_class.SupportFieldInfo | None = None
+        if array_class.SupportFieldInfo not in self.solver.opt_ins:
             return
 
         band_rows = self._support_res // 2

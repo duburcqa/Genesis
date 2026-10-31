@@ -11,7 +11,6 @@ from genesis.engine.solvers.rigid.collider.collider import Collider
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Step
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.data import opt_in
 
 from .fem_surface import FEMSurface
 from .rigid_contact import func_collide_with_rigid
@@ -30,7 +29,7 @@ class RigidFEM(System):
     def __init__(self, rigid_solver: RigidSolver, fem_surface: FEMSurface, options: LegacyCouplerOptions) -> None:
         self._fem_surface = fem_surface
         # The vertices collide with the rigid geoms through their SDF
-        opt_in(array_class.SDFInfo)
+        rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     @classmethod
     def create(

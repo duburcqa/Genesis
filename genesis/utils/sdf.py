@@ -7,7 +7,6 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.data import is_opted_in
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
@@ -23,7 +22,8 @@ class SDF:
 
     def __init__(self, rigid_solver):
         # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in
-        if not is_opted_in(array_class.SDFInfo):
+        self.sdf_info: array_class.SDFInfo | None = None
+        if array_class.SDFInfo not in rigid_solver.opt_ins:
             return
 
         geoms = rigid_solver.geoms
