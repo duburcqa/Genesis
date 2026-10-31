@@ -12,7 +12,7 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
-from genesis.engine.pipeline import Phase, System
+from genesis.engine.pipeline import Phase, Stages, System
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.engine.step import Completion
@@ -96,8 +96,6 @@ from .abd.forward_dynamics import (
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
     kernel_update_acc,
-    update_qacc_from_qvel_delta,
-    update_qvel,
 )
 from .abd.forward_kinematics import (
     func_forward_velocity,
@@ -204,6 +202,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     collider: Collider | None
     constraint_solver: ConstraintSolver | None
 
+    # The constraint force of a substep, after its smooth acceleration, and its integration, which another System may
+    # take over (see 'System.supersedes' and 'System.relocations')
+    constraints = Phase()
+    integration = Phase()
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -282,9 +285,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 options.impratio = 1.0
 
         self.collider = None
-        # The coupler solving the constraints of the rigid entities in place of the constraint solver, if any (see
-        # 'compose')
-        self._is_constraint_solved_by_coupler = False
         self.constraint_solver = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
@@ -1287,7 +1287,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     def substep_pre_coupling(self, f):
         """
-        Run a substep of the solver (see '_build_substep'), or its part before the couplings of a coupler solving them.
+        Run a substep of the solver (see '_build_substep').
 
         The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         updates the forward kinematics in full and places every geom, whose poses the reversal reads.
@@ -1295,12 +1295,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         is_recording = self._requires_grad and is_recording_launches()
         if self.collider is not None:
             self.collider._contact_data_cache.clear()
-        self.substep_phase(**self._get_substep_values(is_recording))
-        if not self._is_constraint_solved_by_coupler:
-            self._is_forward_pos_updated = not self._enable_mujoco_compatibility
-            self._is_forward_vel_updated = not self._enable_mujoco_compatibility
+        self.substep_phase(**self.get_substep_values(is_recording))
 
-    def _get_substep_values(self, is_recording: bool) -> dict:
+    def get_substep_values(self, is_recording: bool) -> dict:
         """Return the values of the call arguments of the stages of the substep."""
         return dict(
             is_forward_pos_updated=self._is_forward_pos_updated and not is_recording,
@@ -1502,14 +1499,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         """
         Build the phases of the substep of the solver: its dynamics, its constraint force and its integration.
 
-        A coupler may solve the constraints of the rigid entities itself, between the velocities of the dynamics and the
-        integration, which then runs after the couplings (see 'substep_post_coupling'). The stages of the substep fuse
-        into kernels between the collision detection and the constraint solve, which run on the host, captured as
-        graphs: the compile time of a kernel grows faster than its size while one more graph replay costs next to
-        nothing.
+        The stages of the substep fuse into kernels between the collision detection and the constraint solve, which run
+        on the host, captured as graphs: the compile time of a kernel grows faster than its size while one more graph
+        replay costs next to nothing.
         """
-        coupler = self._sim.coupler
-        self._is_constraint_solved_by_coupler = coupler is not None and coupler.is_solving_rigid_constraints
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients fuses
         # the stages into kernels captured as no graph
         is_graph = not self._requires_grad
@@ -1521,30 +1514,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         dynamics.add(kernel_update_forward_kinematics, kernel_forward_dynamics_without_qacc)
         # The smooth acceleration and the constraint solve are reversed together, through the implicit function
         # theorem, which spares reversing the factor of the mass matrix
+        if not self._disable_constraint:
+            self.constraints.add(kernel_add_equality_constraints)
+        if self._enable_collision:
+            self.constraints.add(self.collider.detection)
+        if not self._disable_constraint:
+            self.constraints.add(kernel_add_inequality_constraints, self.constraint_solver.solve, kernel_resolve_post)
         constraint_force = Phase(is_graph=is_graph, backward=self._constraint_force_grad)
-        constraint_force.add(kernel_compute_smooth_qacc)
+        constraint_force.add(kernel_compute_smooth_qacc, self.constraints)
         # Position, velocity and acceleration must be consistent when computing the accelerations of the links, which
         # is only possible right before the integration: the acceleration at the end of the substep is unknown, as it
         # may change discontinuously under external forces and constraints. They are thus one substep behind.
-        integration = Phase(is_graph=is_graph)
-        integration.add(kernel_update_acc, kernel_integrate, kernel_copy_next_to_curr_clear_coupling)
+        self.integration.add(kernel_update_acc, kernel_integrate, kernel_copy_next_to_curr_clear_coupling)
         if not self._enable_mujoco_compatibility:
-            integration.add(kernel_update_forward_kinematics_after_integration)
-
+            self.integration.add(kernel_update_forward_kinematics_after_integration)
+        self.integration.add(self._set_forward_updated)
         self.substep_phase = Phase(is_graph=is_graph)
-        self.integration_after_coupling = Phase(is_graph=is_graph)
-        if self._is_constraint_solved_by_coupler:
-            constraint_force.add(update_qvel)
-            self.substep_phase.add(dynamics, constraint_force)
-            self.integration_after_coupling.add(update_qacc_from_qvel_delta, integration)
-            return
-        if not self._disable_constraint:
-            constraint_force.add(kernel_add_equality_constraints)
-        if self._enable_collision:
-            constraint_force.add(self.collider.detection)
-        if not self._disable_constraint:
-            constraint_force.add(kernel_add_inequality_constraints, self.constraint_solver.solve, kernel_resolve_post)
-        self.substep_phase.add(dynamics, constraint_force, integration)
+        self.substep_phase.add(dynamics, constraint_force, self.integration)
+
+    def _set_forward_updated(self) -> None:
+        """Record the forward kinematics up to date once integrated, unless MuJoCo compatibility defers them."""
+        self._is_forward_pos_updated = not self._enable_mujoco_compatibility
+        self._is_forward_vel_updated = not self._enable_mujoco_compatibility
 
     def reset_grad(self):
         # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
@@ -1559,9 +1550,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
 
-    def substep_post_coupling(self, f: int) -> None:
-        """Integrate the velocities a coupler solved the constraints of, the second half of a substep, if any."""
-        self.integration_after_coupling(**self._get_substep_values(is_recording=False))
+    # The integration runs at the end of the substep, unless another System relocates it (see 'integration')
+    substep_post_coupling = ()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -3336,3 +3326,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         if self.is_built:
             return self._equalities
         return gs.List(equality for entity in self._entities for equality in entity.equalities)
+
+
+class RigidConstraints(System):
+    """A System solving the constraints of the rigid entities in place of the rigid solver, which it supersedes."""
+
+    slot = RigidSolver.constraints
+    solve_rigid_constraints: Stages

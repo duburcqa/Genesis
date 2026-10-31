@@ -78,10 +78,10 @@ class System:
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
-    # The slots the roles of other Systems move to while this System exists, by role (see 'RoleOf')
-    relocations: ClassVar[dict["RoleOf", "SlotRef"]] = {}
-    # The Systems, or roles of Systems, absent while this System exists
-    supersedes: ClassVar["tuple[type[System] | RoleOf, ...]"] = ()
+    # The slots the roles of other Systems, or the stages of other slots, move to while this System exists (see 'RoleOf')
+    relocations: ClassVar[dict["RoleOf | Phase", "SlotRef | Phase"]] = {}
+    # The Systems, roles of Systems, or stages their owner adds to a slot, absent while this System exists
+    supersedes: ClassVar["tuple[type[System] | RoleOf | Phase, ...]"] = ()
     # The Systems and the structs its constructor depends on, whose Data its stages bind, the structs read-only
     _dependencies: "tuple[System, ...]" = ()
     _data_dependencies: ClassVar[dict[str, Data]] = {}
@@ -175,11 +175,6 @@ class Coupler(System):
     A System solving the interactions of several solvers at once, which the solvers it couples arrange their substep
     around.
     """
-
-    @property
-    def is_solving_rigid_constraints(self) -> bool:
-        """Whether the coupler solves the constraints of the rigid entities, between their dynamics and integration."""
-        return False
 
     @property
     def is_using_rigid_coup_type(self) -> bool:
@@ -978,6 +973,20 @@ def assemble_systems(
     return systems
 
 
+def _get_owner(systems: Sequence[System], system: System, owner_cls: type) -> System | None:
+    """
+    Return the System of a class offering a slot to a System: the one it depends on, else the one of the scene.
+
+    A slot of a System the scene does not hold is None, the roles filling it and the stages moving it doing nothing.
+    """
+    owners = [dep for dep in (system, *system._dependencies) if isinstance(dep, owner_cls)] or [
+        other for other in systems if isinstance(other, owner_cls)
+    ]
+    if len(owners) > 1:
+        raise TypeError(f"{type(system).__name__} names a slot that {len(owners)} {owner_cls.__name__} offer.")
+    return owners[0] if owners else None
+
+
 def _get_declared(system: System, name: str) -> "Phase | Inline":
     """Return the Phase or the extension point a System class declares under a name, that of the System itself."""
     return vars(system).get(name) or inspect.getattr_static(system, name).__get__(system, type(system))
@@ -985,10 +994,25 @@ def _get_declared(system: System, name: str) -> "Phase | Inline":
 
 def _route_roles(systems: Sequence[System]) -> None:
     """Add the stage of every role of every System to its slot, or to the slot another System relocates it to."""
+    # The stages the owner of a slot adds to it are dropped by a System superseding the slot, and moved by a System
+    # relocating it, before the roles fill it
+    for system in systems:
+        moves = [(slot, None) for slot in type(system).supersedes if isinstance(slot, Phase)]
+        moves += [(slot, target) for slot, target in type(system).relocations.items() if isinstance(slot, Phase)]
+        for slot, target in moves:
+            owner = _get_owner(systems, system, slot.owner)
+            if owner is None:
+                continue
+            source = _get_declared(owner, slot.name)
+            if target is not None:
+                _get_declared(_get_owner(systems, system, target.owner), target.name).items += source.items
+            source.items.clear()
     relocations: dict[RoleOf, tuple[SlotRef, System]] = {}
     superseded_roles: list[RoleOf] = []
     for system in systems:
         for role_of, slot in type(system).relocations.items():
+            if not isinstance(role_of, RoleOf):
+                continue
             if role_of in relocations:
                 raise TypeError(
                     f"{type(system).__name__} and {type(relocations[role_of][1]).__name__} both relocate {role_of}."
@@ -1006,14 +1030,10 @@ def _route_roles(systems: Sequence[System]) -> None:
                 continue
             slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
             slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot
-            owners = [dep for dep in system._dependencies if isinstance(dep, slot.owner)] or [
-                other for other in systems if isinstance(other, slot.owner)
-            ]
-            if len(owners) != 1:
-                raise TypeError(
-                    f"{type(system).__name__} plays {role.__name__}, which {len(owners)} {slot.owner.__name__} offer."
-                )
-            target = _get_declared(owners[0], slot.attr)
+            owner = _get_owner(systems, system, slot.owner)
+            if owner is None:
+                continue
+            target = _get_declared(owner, slot.attr)
             if slot.slot is not None:
                 target = target.slots[slot.slot]
             with _scoped(system):

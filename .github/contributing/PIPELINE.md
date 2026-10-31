@@ -479,14 +479,16 @@ flowchart LR
 - Two existing Systems relocating the same role is refused at build, both named.
 - Whether the rearranged pipeline is physically right is the plugin author's responsibility. If it is not, the user disables the System that declares it.
 
-### 10.6 Superseding a System: SAP
+### 10.6 Superseding a slot: SAP
 
-SAP solves the constraints of the rigid entities itself, between their dynamics and their integration:
+SAP solves the constraints of the rigid entities itself, between their dynamics and their integration. The rigid solver declares the two slots it fills itself, `constraints` and `integration`, and SAP takes them over:
 
 ```python
-class SAPCoupler(Coupler):
-    supersedes = (ConstraintSolver,)                    # absent while SAP exists
-    relocations = {RoleOf(RigidSolver, Integration): Step.substep.integrations}
+class SAPCoupler(Coupler, Integration, RigidConstraints):
+    rigid_integration = Phase()
+    supersedes = (RigidSolver.constraints,)             # the rigid stages of the slot are dropped
+    relocations = {RigidSolver.integration: rigid_integration}  # and those of this one run after the couplings
+    solve_rigid_constraints = update_qvel               # SAP fills the constraint slot through its role
 ```
 
 ```mermaid

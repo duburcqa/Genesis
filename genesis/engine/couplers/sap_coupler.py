@@ -14,11 +14,16 @@ import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
-from genesis.engine.pipeline import Coupler
+from genesis.engine.pipeline import Coupler, Phase
 from genesis.engine.solvers.fem_solver import func_compute_element_mapping_matrix
-from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch
+from genesis.engine.solvers.rigid.abd.forward_dynamics import (
+    func_solve_mass_batch,
+    update_qacc_from_qvel_delta,
+    update_qvel,
+)
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
-from genesis.engine.step import Coupling, Preparation
+from genesis.engine.solvers.rigid.rigid_solver import RigidConstraints, RigidSolver
+from genesis.engine.step import Coupling, Integration, Preparation
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import FixedOrderSums, SAPState
@@ -118,7 +123,7 @@ class ContactMode(IntEnum):
     NO_CONTACT = 2
 
 
-class SAPCoupler(RBC, Coupler, Preparation, Coupling):
+class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstraints):
     """
     Couple the FEM and rigid solvers of a scene through the Semi-Analytic Primal (SAP) contact solver of Drake.
 
@@ -128,6 +133,14 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling):
 
     # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
     is_differentiable = False
+
+    # SAP solves the constraints of the rigid entities itself, on the velocities their dynamics reach: their velocities
+    # are predicted in place of their constraint force, and their acceleration is recovered from the velocities the
+    # couplings solve before they are integrated
+    rigid_integration = Phase()
+    supersedes = (RigidSolver.constraints,)
+    relocations = {RigidSolver.integration: rigid_integration}
+    solve_rigid_constraints = update_qvel
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -194,6 +207,8 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling):
         self._has_contact = False
 
     def build(self) -> None:
+        if self.rigid_solver.is_active:
+            self.rigid_integration.add(update_qacc_from_qvel_delta)
         B = self.sim._B
         fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
 
@@ -521,9 +536,9 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling):
     # -------------------------------------- Main ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @property
-    def is_solving_rigid_constraints(self) -> bool:
-        return True
+    def substep_post_coupling(self, f: int) -> None:
+        """Integrate the rigid entities from the velocities the couplings solved."""
+        self.rigid_integration(**self.rigid_solver.get_substep_values(is_recording=False))
 
     def preprocess(self, f):
         fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
