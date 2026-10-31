@@ -33,6 +33,9 @@ from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SystemCheckpoint
 from .step import Step
 
+# The couplings between pairs of solvers register as Systems once imported
+from .couplers import pairwise  # noqa: F401
+
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene

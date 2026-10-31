@@ -10,10 +10,12 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
+from genesis.engine.couplers import IPCCoupler, SAPCoupler
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
+from genesis.engine.step import Step
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
@@ -280,6 +282,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 options.impratio = 1.0
 
         self.collider = None
+        # The coupler solving the constraints of the rigid entities in place of the constraint solver, if any (see
+        # 'compose')
+        self._sap_coupler: SAPCoupler | None = None
         self.constraint_solver = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
@@ -756,13 +761,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception(
                     "Only approximate_implicitfast integrator is supported yet when requires_grad is True."
                 )
-            from genesis.engine.couplers import SAPCoupler, IPCCoupler
-
-            if isinstance(self.sim.coupler, (SAPCoupler, IPCCoupler)):
-                gs.raise_exception(
-                    f"{type(self.sim.coupler).__name__} is not supported yet when requires_grad is True."
-                )
-
             if self._options.noslip_iterations > 0:
                 gs.raise_exception("Noslip is not supported yet when requires_grad is True.")
             if self._options.enable_torsional_friction or self._options.enable_rolling_friction:
@@ -1285,8 +1283,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self, f):
-        from genesis.engine.couplers import SAPCoupler
-
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
         # autodiff of its kernel or by the backward given to it (see LaunchRecorder), where the forward pass fuses them.
@@ -1330,7 +1326,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
             if not self._enable_mujoco_compatibility:
                 self._update_forward_kinematics(envs_idx)
-        elif isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
+        elif self._sap_coupler is not None or self._requires_grad:
             # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
             # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
             # launches the substep kernels one by one.
@@ -1343,7 +1339,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 is_forward_pos_updated,
                 is_forward_vel_updated,
             )
-            if isinstance(self.sim.coupler, SAPCoupler):
+            if self._sap_coupler is not None:
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
             else:
                 self._func_constraint_force()
@@ -1400,7 +1396,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._errno,
             )
 
-        if not isinstance(self.sim.coupler, SAPCoupler):
+        if self._sap_coupler is None:
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
             self._is_forward_vel_updated = not self._enable_mujoco_compatibility
 
@@ -1595,19 +1591,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """Return the collider, whose Data the couplings of the rigid geoms read (see 'Collider')."""
         return () if self.collider is None else (self.collider,)
 
-    def substep_pre_coupling(self, f):
-        if self.is_active:
-            # Skip rigid body computation when using IPCCoupler (IPC handles rigid simulation)
-            from genesis.engine.couplers import IPCCoupler
+    def compose(self, step: Step, sap_coupler: SAPCoupler | None, ipc_coupler: IPCCoupler | None) -> None:
+        """
+        Add the substep of the solver to the step, around the couplings of the coupler solving them at once, if any.
 
-            if isinstance(self.sim.coupler, IPCCoupler):
-                # If any rigid entity is coupled to IPC, skip pre-coupling rigid simulation
-                # The rigid simulation will be done in post-coupling phase instead
-                if self.sim.coupler.has_any_rigid_coupling:
-                    return
-
-            # Run Genesis rigid simulation step for non-IPC couplers
-            self.substep(f)
+        A SAP coupler solves the constraints of the rigid entities itself, between the dynamics of the substep and its
+        integration. An IPC coupler coupling rigid entities simulates them first, the substep running after it.
+        """
+        self._sap_coupler = sap_coupler
+        if ipc_coupler is not None and ipc_coupler.has_any_rigid_coupling:
+            step.integrations.add(self.substep)
+        elif sap_coupler is not None:
+            step.dynamics.add(self.substep)
+            step.integrations.add(self.integrate_after_coupling)
+        else:
+            step.dynamics.add(self.substep)
 
     def reset_grad(self):
         # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
@@ -1622,20 +1620,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
 
-    def substep_post_coupling(self, f):
-        from genesis.engine.couplers import SAPCoupler, IPCCoupler
-
-        if not self.is_active:
-            return
-
-        if isinstance(self.sim.coupler, SAPCoupler):
-            update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-            kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
-        elif isinstance(self.sim.coupler, IPCCoupler):
-            # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
-            # Collision exclusion for IPC-coupled links is handled in the collider at build time.
-            if self.sim.coupler.has_any_rigid_coupling:
-                self.substep(f)
+    def integrate_after_coupling(self, f: int) -> None:
+        """Integrate the velocities a SAP coupler solved the constraints of, the second half of a substep."""
+        update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
+        kernel_step_2(
+            self.dyn_state,
+            self.constraint_solver.constraint_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            self._errno,
+        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
