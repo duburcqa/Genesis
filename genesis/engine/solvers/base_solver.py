@@ -11,6 +11,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
+from genesis.engine.force_fields import ForceField, ForceFieldsDispatcher
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
@@ -123,24 +124,15 @@ class GravityMixin:
 
     _gravity: "qd.Tensor | None" = None
 
-    def _build_gravity(self, gravity=None):
-        """Allocate the buffer storing this solver's gravity and fill it with the value from the options.
+    def _build_gravity(self, gravity):
+        """Fill the buffer storing this solver's gravity with the value from the options, for every environment.
 
-        Called once, at build time, every environment getting the same value. Pass `gravity` to reuse a buffer the
-        solver already declares among its own arrays, as the rigid solver does with `RigidInfo.gravity`, so that
-        `set_gravity` and the kernels read the same memory. Leave it out to have a field allocated here, for a
-        solver whose kernels read gravity as an attribute of the solver object. A solver holding no entity gets no
-        buffer, and its accessors then raise.
+        Called once, at build time. `gravity` is the buffer the solver declares among its own arrays, such as
+        `RigidInfo.gravity`, so that `set_gravity` and the kernels read the same memory. A solver holding no entity
+        stores no buffer, and its accessors then raise.
         """
-        # FIXME: a field is what a kernel taking the solver as a template can read, since Quadrants resolves no
-        # ndarray attribute of a @qd.data_oriented class in kernel scope. Two ways out, either of which lets the solver
-        # declare its buffer: adding ndarray support to that resolution, or migrating the solver to a frozen dataclass
-        # so its ndarrays are predeclared. Until then the buffer is only allocated for a solver with an entity, since a
-        # field costs an SNode tree that Quadrants never gives back short of qd.reset().
         if not self.is_active:
             return
-        if gravity is None:
-            gravity = qd.tensor(gs.qd_vec3, (self._B,), backend=qd.Backend.FIELD)
         self._gravity = gravity
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
 
@@ -220,8 +212,7 @@ class Solver(RBC):
         # valid from then on since the arrays are never reallocated, which spares walking the structs at every step
         self._boundary_items: BoundaryItems | None = None
 
-        # force fields
-        self._ffs = list()
+        self._force_fields_dispatcher = ForceFieldsDispatcher()
 
         # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
         # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
@@ -250,7 +241,7 @@ class Solver(RBC):
         self._errno_host_context: str | None = None
 
     def _add_force_field(self, force_field):
-        self._ffs.append(force_field)
+        self._force_fields_dispatcher.fields.append(force_field)
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""
@@ -702,8 +693,13 @@ class Solver(RBC):
         return len(self._entities)
 
     @property
-    def force_fields(self) -> list:
-        return self._ffs
+    def force_fields(self) -> list[ForceField]:
+        return self._force_fields_dispatcher.fields
+
+    @property
+    def force_fields_dispatcher(self) -> ForceFieldsDispatcher:
+        """The force fields acting on the solver, as the template argument its kernels and the couplers take."""
+        return self._force_fields_dispatcher
 
     def _repr_brief(self):
         repr_str = f"{self.__repr_name__()}: {self._uid}, n_entities: {self.n_entities}"
@@ -712,8 +708,8 @@ class Solver(RBC):
 
 @qd.kernel
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
-    # The qd.Tensor annotation accepts both forms the buffer is allocated in: a field, for a solver whose kernels
-    # reach gravity through the solver itself, and an ndarray for every other one (see _build_gravity).
+    # The qd.Tensor annotation accepts both backends the buffer may be allocated with, a field or an ndarray (see V in
+    # genesis/utils/array_class.py)
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]

@@ -1,6 +1,7 @@
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 
 
 @qd.func
@@ -99,3 +100,39 @@ def mat_mask(A, mask, n, m, i_b):
     for i in range(n):
         for j in range(m):
             A[i, j, i_b] *= mask[i]
+
+
+@qd.func
+def func_chunk_range(i_start: int, i_chunk: int, n_items: int, n_chunks: int):
+    """Return the bounds of one of the contiguous chunks a range of items splits into for a fixed-order sum.
+
+    The items i_start to i_start + n_items split into n_chunks chunks of equal size but the last, chunk i_chunk being
+    the items between the returned bounds.
+    """
+    chunk_size = (n_items + n_chunks - 1) // n_chunks
+    return i_start + qd.min(i_chunk * chunk_size, n_items), i_start + qd.min((i_chunk + 1) * chunk_size, n_items)
+
+
+@qd.func(requires_top_level=True)
+def func_reduce_terms(sums: array_class.FixedOrderSums, mask: qd.template()):
+    """
+    Sum in order the terms of each environment whose mask is set over contiguous chunks of its items.
+
+    See FixedOrderSums in genesis/utils/array_class.py. The chunks are summed in parallel.
+    """
+    for i_chunk, k, i_b in qd.ndrange(sums.partials.shape[0], sums.terms.shape[1], sums.terms.shape[2]):
+        if mask[i_b]:
+            value_sum = gs.qd_float(0.0)
+            i_start, i_end = func_chunk_range(0, i_chunk, sums.terms.shape[0], sums.partials.shape[0])
+            for i in range(i_start, i_end):
+                value_sum += sums.terms[i, k, i_b]
+            sums.partials[i_chunk, k, i_b] = value_sum
+
+
+@qd.func
+def func_sum_chunks(i_b: int, k: int, sums: array_class.FixedOrderSums):
+    """Sum in order the partial sums of the sum `k` of an environment (see FixedOrderSums in array_class.py)."""
+    value_sum = gs.qd_float(0.0)
+    for i_chunk in range(sums.partials.shape[0]):
+        value_sum += sums.partials[i_chunk, k, i_b]
+    return value_sum

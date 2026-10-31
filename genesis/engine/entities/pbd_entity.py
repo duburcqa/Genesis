@@ -3,8 +3,6 @@ import torch
 
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
@@ -92,7 +90,6 @@ class PBDBaseEntity(ParticleEntity):
         return f"pbd_{super()._get_morph_identifier()}"
 
 
-@qd.data_oriented
 class PBDTetEntity(PBDBaseEntity):
     """
     PBD entity represented by tetrahedral elements.
@@ -155,7 +152,6 @@ class PBDTetEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
             active=True,
             material_type=self._material_type,
@@ -221,7 +217,6 @@ class PBDTetEntity(PBDBaseEntity):
         return len(self._edges)
 
 
-@qd.data_oriented
 class PBD2DEntity(PBDTetEntity):
     """
     PBD entity represented by a 2D mesh.
@@ -336,7 +331,6 @@ class PBD2DEntity(PBDTetEntity):
         return len(self._inner_edges)
 
 
-@qd.data_oriented
 class PBD3DEntity(PBDTetEntity):
     """
     PBD entity represented by a 3D mesh.
@@ -467,7 +461,6 @@ class PBD3DEntity(PBDTetEntity):
         return self._elem_start + self.n_elems
 
 
-@qd.data_oriented
 class PBDParticleEntity(PBDBaseEntity):
     """
     PBD entity represented solely by particles.
@@ -501,7 +494,6 @@ class PBDParticleEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
             active=self.active,
             material_type=int(self._solver.MATERIAL.LIQUID),
@@ -521,7 +513,6 @@ class PBDParticleEntity(PBDBaseEntity):
         return self.n_particles
 
 
-@qd.data_oriented
 class PBDFreeParticleEntity(PBDBaseEntity):
     """
     PBD-based entity represented by non-physics particles
@@ -555,7 +546,6 @@ class PBDFreeParticleEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
             active=self.active,
             material_type=int(self._solver.MATERIAL.PARTICLE),

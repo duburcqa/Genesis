@@ -25,10 +25,8 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
-from .mpm_entity import MPMEntity
 
 
-@qd.data_oriented
 class HybridEntity(Entity):
     """
     A hybrid simulation entity composed of both rigid and soft components.
@@ -55,6 +53,11 @@ class HybridEntity(Entity):
 
     def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
         super().__init__(idx, scene, morph, None, material, surface, name=name)
+
+        # The binding of the soft part to the rigid part, which the MPM solver drives after each substep unless the
+        # default coupling applies (see 'update_soft_part')
+        self._soft_part_info: array_class.HybridSoftPartInfo | None = None
+        self._muscle_group_cache: np.ndarray | None = None
 
         material_rigid = material.material_rigid
         material_soft = material.material_soft
@@ -132,51 +135,14 @@ class HybridEntity(Entity):
             material_soft.n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
-            # set up info in Quadrants field
-            if isinstance(material_soft, gs.materials.MPM.Base):
-                part_soft_info = qd.types.struct(
-                    link_idx=gs.qd_int,
-                    geom_idx=gs.qd_int,
-                    trans_local_to_global=gs.qd_vec3,
-                    quat_local_to_global=gs.qd_vec4,
-                ).field(shape=(material_soft.n_groups,), needs_grad=False, layout=qd.Layout.SOA)
-                part_soft_info.link_idx.from_numpy(np.asarray(link_idcs, dtype=gs.np_int))
-                part_soft_info.geom_idx.from_numpy(np.asarray(geom_idcs, dtype=gs.np_int))
-                part_soft_info.trans_local_to_global.from_numpy(np.asarray(trans_local_to_global, dtype=gs.np_float))
-                part_soft_info.quat_local_to_global.from_numpy(np.asarray(quat_local_to_global, dtype=gs.np_float))
-
-                part_soft_init_positions = qd.field(dtype=gs.qd_vec3, shape=(part_soft.init_particles.shape[0],))
-                part_soft_init_positions.from_numpy(part_soft.init_particles)
-
-                self._part_soft_info = part_soft_info
-                self._part_soft_init_positions = part_soft_init_positions
-            else:
-                raise ValueError(f"Cannot handle soft material {material_soft}")
-
-            # set coupling func
-            def wrap_func(func, before=False):
-                def wrapper(f):
-                    if before:
-                        self.update_soft_part(f)
-                    func(f)
-                    if not before:
-                        self.update_soft_part(f)
-
-                return wrapper
-
-            if isinstance(material_soft, gs.materials.MPM.Base):
-                # NOTE: coupling operating at particle level and here we modify post_coupling, i.e., update particle state after g2p
-                self._update_soft_part_at_pre_coupling = False
-                if self._update_soft_part_at_pre_coupling:
-                    part_soft.solver.substep_pre_coupling = wrap_func(
-                        part_soft.solver.substep_pre_coupling, before=True
-                    )
-                else:
-                    part_soft.solver.substep_post_coupling = wrap_func(
-                        part_soft.solver.substep_post_coupling, before=False
-                    )
-            else:
-                raise ValueError(f"Cannot handle soft material {material_soft}")
+            self._soft_part_info = array_class.HybridSoftPartInfo(
+                sizes=dict(groups=material_soft.n_groups, particles=part_soft.init_particles.shape[0])
+            )
+            self._soft_part_info.groups_link_idx.from_numpy(np.array(link_idcs, dtype=gs.np_int))
+            self._soft_part_info.groups_geom_idx.from_numpy(np.array(geom_idcs, dtype=gs.np_int))
+            self._soft_part_info.groups_frame_pos.from_numpy(np.array(trans_local_to_global, dtype=gs.np_float))
+            self._soft_part_info.groups_frame_quat.from_numpy(np.array(quat_local_to_global, dtype=gs.np_float))
+            self._soft_part_info.particles_init_pos.from_numpy(part_soft.init_particles)
 
         # set members
         self._material_rigid = material_rigid
@@ -379,76 +345,27 @@ class HybridEntity(Entity):
 
     def update_soft_part(self, f):
         """
-        Update the state of the soft part of the hybrid entity based on the current simulation frame.
+        Drive the particles of the soft part toward the links of the rigid part, once the substep advected them.
+
+        The MPM solver calls it at the end of each substep of an entity without the default coupling.
 
         Parameters
         ----------
         f : int
-            The current simulation frame index.
+            The frame of the substep.
         """
-        if isinstance(self._part_soft, MPMEntity):
-            self._kernel_update_soft_part_mpm(
-                f=f, geoms_info=self._solver_rigid.dyn_info.geoms, links_state=self._solver_rigid.dyn_state.links
-            )
-        else:
-            raise NotImplementedError
-
-    @qd.kernel
-    def _kernel_update_soft_part_mpm(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState):
-        for i_p_, i_b in qd.ndrange(self._part_soft.n_particles, self._part_soft._sim._B):
-            if self._solver_soft.particles_ng[f, i_p_, i_b].active:
-                i_global = i_p_ + self._part_soft.particle_start
-                f_ = f
-                if qd.static(not self._update_soft_part_at_pre_coupling):
-                    f_ = f + 1  # NOTE: this is after g2p and thus we use f + 1
-
-                # get corresponding link
-                group_idx = self._solver_soft.particles_info[i_global].muscle_group
-
-                link_idx = self._part_soft_info.link_idx[group_idx]
-                geom_idx = self._part_soft_info.geom_idx[group_idx]
-                trans_local_to_global = self._part_soft_info.trans_local_to_global[group_idx]
-                quat_local_to_global = self._part_soft_info.quat_local_to_global[group_idx]
-
-                g_pos_0 = geoms_info.pos[geom_idx]
-                g_quat_0 = geoms_info.quat[geom_idx]
-
-                # compute new pos in minimal coordinate using rigid-bodied dynamics
-                x_init_pos = self._part_soft_init_positions[i_p_]
-                x_init_local = gu.qd_inv_transform_by_trans_quat(
-                    x_init_pos, trans_local_to_global, quat_local_to_global
-                )
-                scaled_pos = gu.qd_transform_by_quat(gu.qd_inv_transform_by_quat(g_pos_0, g_quat_0), g_quat_0)
-                tx_pos, tx_quat = gu.qd_transform_pos_quat_by_trans_quat(
-                    scaled_pos, g_quat_0, links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
-                )
-                new_x_pos = gu.qd_transform_by_trans_quat(x_init_local, trans=tx_pos, quat=tx_quat)
-
-                # compute velocity in closed-loop setting
-                dt = self._solver_soft.substep_dt
-                dt_scale = (
-                    self._solver_soft.substep_dt / self._solver_rigid.dt
-                )  # NOTE: move soft part incrementally at soft solver's substeps
-                x_pos = self._solver_soft.particles.pos[f_, i_global, i_b]
-                xd_vel = (new_x_pos - x_pos) / dt
-                xd_vel *= dt_scale  # assume linear scaling between the timestep difference of soft/rigid solver
-
-                vel_d = xd_vel - self._solver_soft.particles.vel[f_, i_global, i_b]
-                vel_d *= qd.exp(-self._solver_soft.dt * self.material.damping)
-
-                # soft-to-rigid coupling
-                dt_for_rigid_acc = (
-                    self._solver_rigid.dt
-                )  # NOTE: use rigid dt here as we are sorta doing integration within soft solver substep
-                mass_real = self._solver_soft.particles_info[i_global].mass / self._solver_soft._particle_volume_scale
-                acc = vel_d / dt_for_rigid_acc
-                frc_vel = mass_real * acc
-                frc_ang = (x_pos - links_state.root_COM[link_idx, i_b]).cross(frc_vel)
-                links_state.cfrc_coupling_vel[link_idx, i_b] += frc_vel
-                links_state.cfrc_coupling_ang[link_idx, i_b] += frc_ang
-
-                # rigid-to-soft coupling # NOTE: this may lead to unstable feedback loop
-                self._solver_soft.particles.vel[f_, i_global, i_b] += vel_d * self.material.soft_dv_coef
+        kernel_update_soft_part_mpm(
+            f,
+            self._part_soft.particle_start,
+            self._solver_soft.dt,
+            self.material.damping,
+            self.material.soft_dv_coef,
+            self._solver_soft.mpm_state,
+            self._solver_rigid.dyn_state.links,
+            self._soft_part_info,
+            self._solver_soft.mpm_info,
+            self._solver_rigid.dyn_info.geoms,
+        )
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -490,6 +407,64 @@ class HybridEntity(Entity):
 # ------------------------------------------------------------------------------------
 
 
+@qd.kernel(fastcache=True)
+def kernel_update_soft_part_mpm(
+    f: int,
+    particle_start: int,
+    dt: float,
+    damping: float,
+    soft_dv_coef: float,
+    mpm_state: array_class.MPMState,
+    links_state: array_class.LinksState,
+    soft_part_info: array_class.HybridSoftPartInfo,
+    mpm_info: array_class.MPMInfo,
+    geoms_info: array_class.GeomsInfo,
+):
+    """
+    Couple the particles of the soft part of a hybrid entity with the links of its rigid part, once g2p advected them.
+
+    Each active particle is driven toward the pose its muscle group takes with its link, the velocity correction being
+    damped by `damping` over the timestep `dt` shared by both solvers, partly applied to the particle by
+    `soft_dv_coef`, and its momentum applied to the link.
+    """
+    for i_p_, i_b in qd.ndrange(soft_part_info.particles_init_pos.shape[0], mpm_state.particles.pos.shape[2]):
+        i_p = i_p_ + particle_start
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            i_mg = mpm_info.particles.muscle_group[i_p]
+            i_l = soft_part_info.groups_link_idx[i_mg]
+            i_g = soft_part_info.groups_geom_idx[i_mg]
+
+            # Target position of the particle, rigidly attached to its link
+            local_pos = gu.qd_inv_transform_by_trans_quat(
+                soft_part_info.particles_init_pos[i_p_],
+                soft_part_info.groups_frame_pos[i_mg],
+                soft_part_info.groups_frame_quat[i_mg],
+            )
+            target_pos, target_quat = gu.qd_transform_pos_quat_by_trans_quat(
+                geoms_info.pos[i_g], geoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
+            )
+            new_x_pos = gu.qd_transform_by_trans_quat(local_pos, trans=target_pos, quat=target_quat)
+
+            # The velocity covers the distance to the target over a whole step, so each substep moves the particle part
+            # of the way
+            x_pos = mpm_state.particles.pos[f + 1, i_p, i_b]
+            xd_vel = (new_x_pos - x_pos) / dt
+
+            vel_d = xd_vel - mpm_state.particles.vel[f + 1, i_p, i_b]
+            vel_d *= qd.exp(-dt * damping)
+
+            # Soft to rigid, over the timestep of the rigid solver since the update integrates within a substep of the
+            # soft solver
+            mass_real = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
+            frc_vel = mass_real * (vel_d / dt)
+            frc_ang = (x_pos - links_state.root_COM[i_l, i_b]).cross(frc_vel)
+            links_state.cfrc_coupling_vel[i_l, i_b] += frc_vel
+            links_state.cfrc_coupling_ang[i_l, i_b] += frc_ang
+
+            # Rigid to soft, which may destabilize the loop
+            mpm_state.particles.vel[f + 1, i_p, i_b] += vel_d * soft_dv_coef
+
+
 def augment_link_world_coords(part_rigid):
     ordered_links_idx = [link.idx for link in part_rigid.links]  # now links are pre-ordered
     for i, i_l_global in enumerate(ordered_links_idx):
@@ -520,18 +495,6 @@ def augment_link_world_coords(part_rigid):
                 )
 
 
-def _visualize_muscle_group(positions, muscle_group):
-    import open3d as o3d
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(positions)
-    colors = np.zeros((positions.shape[0], 3))
-    for gii, group_id in enumerate(np.unique(muscle_group)):
-        colors[muscle_group == group_id] = np.random.uniform(0, 1, (3,))
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    o3d.visualization.draw([pcd])
-
-
 # ------------------------------------------------------------------------------------
 # ----------------------------- default instantiation --------------------------------
 # ------------------------------------------------------------------------------------
@@ -551,9 +514,8 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
         )
         euler = gu.quat_to_xyz(quat, rpy=True, degrees=True)
 
-        # can also do link.init_verts here and it seems to have more indices than geom.init_verts (but there is no idx_offset_vert)
+        # The vertices of the link hold more entries than those of the geom, but carry no vertex offset
         verts = geom.init_verts
-        assert hasattr(geom, "init_normals")
         inner_mesh = trimesh.Trimesh(
             vertices=verts,  # NOTE: scale is already applied here
             faces=geom.init_faces,

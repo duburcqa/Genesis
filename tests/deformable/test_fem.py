@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -184,6 +184,70 @@ def test_offset_pos(box_obj_path, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
+def test_vertices_force(show_viewer):
+    DT = 1e-3
+    E, NU, RHO = 1e6, 0.3, 1000.1
+    SCALE = 1.01
+    VEL = (0.1, -0.2, 0.3)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=1,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+            n_newton_iterations=1,
+            damping_alpha=0.0,
+            damping_beta=0.0,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.5, 1.3),
+            camera_lookat=(0.0, 0.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 1.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=E,
+            nu=NU,
+            rho=RHO,
+            model="linear",
+        ),
+    )
+    scene.build()
+
+    # A uniform dilation by SCALE gives the linear model the uniform stress (2 mu + 3 lam) (SCALE - 1) I, which the
+    # divergence theorem turns into the force on each vertex of a third of the area-weighted outward normal of its
+    # surface triangles. The first Newton iterate adds the inertial force of the lumped vertex mass, VEL being the
+    # velocity the inertial target extrapolates.
+    verts_rest = tensor_to_array(box.init_positions)
+    center = verts_rest.mean(axis=0)
+    box.set_verts_pos(center + SCALE * (verts_rest - center))
+    box.set_velocity(VEL)
+    scene.step()
+
+    tris = verts_rest[box.surface_triangles]
+    tris_area_normal = 0.5 * np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    tris_side = np.sign(np.sum(tris_area_normal * (tris.mean(axis=1) - center), axis=-1, keepdims=True))
+    verts_surface_load = np.zeros_like(verts_rest)
+    np.add.at(verts_surface_load, box.surface_triangles, (tris_side * tris_area_normal / 3.0)[:, None])
+    mu, lam = E / (2.0 * (1.0 + NU)), E * NU / ((1.0 + NU) * (1.0 - 2.0 * NU))
+    elems = verts_rest[box.elems]
+    elems_vol = np.abs(np.linalg.det(elems[:, :3] - elems[:, 3:])) / 6.0
+    verts_mass = np.zeros(len(verts_rest))
+    np.add.at(verts_mass, box.elems, (RHO * elems_vol / 4.0)[:, None])
+    verts_force = -(2.0 * mu + 3.0 * lam) * (SCALE - 1.0) * verts_surface_load + verts_mass[:, None] * VEL / DT
+    assert_allclose(scene.fem_solver.get_forces()[0], verts_force, tol=1e-12)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
     "coupler_type, material_model",
     [
@@ -198,6 +262,7 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     SPHERE_RHO = 500.0
     BOX_POS = (0.0, 0.1, 0.3)
     BOX_SIZE = 0.05
+    N_STEPS_RESET = 5
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -238,18 +303,26 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     scene.build()
 
     sphere_mass_ref = (4 / 3 * np.pi * SPHERE_RADIUS**3) * SPHERE_RHO
-    elems_mass_scaled = scene.fem_solver.elements_i.mass_scaled.to_numpy()
+    elems_mass_scaled = qd_to_numpy(scene.fem_solver.fem_info.elements.mass_scaled)
     sphere_elems_mass_scaled = elems_mass_scaled[sphere.el_start : (sphere.el_start + sphere.n_elements)]
     sphere_mass_1 = sphere_elems_mass_scaled.sum() / scene.fem_solver.vol_scale
-    verts_mass = scene.fem_solver.elements_v_info.mass.to_numpy()
+    verts_mass = qd_to_numpy(scene.fem_solver.fem_info.vertices.mass)
     sphere_verts_mass = verts_mass[sphere.v_start : (sphere.v_start + sphere.n_vertices)]
     sphere_mass_2 = sphere_verts_mass.sum()
     assert_allclose(sphere_mass_1, sphere_mass_2, tol=gs.EPS)
     assert_allclose(sphere_mass_ref, sphere_mass_1, rtol=0.01)  # Large tolerance due to tessellation
 
-    # Run simulation
+    # Run simulation, bitwise reproducible after a reset
     n_steps = 40 if coupler_type == gs.options.SAPCouplerOptions else 150
-    for _ in range(n_steps):
+    for _ in range(N_STEPS_RESET):
+        scene.step()
+    entities_pos = [entity.get_state().pos for entity in (sphere, box)]
+    scene.reset()
+    for _ in range(N_STEPS_RESET):
+        scene.step()
+    for entity, pos in zip((sphere, box), entities_pos):
+        assert_equal(entity.get_state().pos, pos)
+    for _ in range(n_steps - N_STEPS_RESET):
         scene.step()
 
     for entity, init_pos, entity_halfsize_ref in zip(scene.entities, (SPHERE_POS, BOX_POS), (SPHERE_RADIUS, BOX_SIZE)):

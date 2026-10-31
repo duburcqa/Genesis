@@ -1,11 +1,11 @@
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 
 from .base_solver import Solver, TimeBasedMixin
 
 
-@qd.data_oriented
 class SFSolver(TimeBasedMixin, Solver):
     """
     Stable Fluid solver for eulerian-based gaseous simulation.
@@ -22,8 +22,6 @@ class SFSolver(TimeBasedMixin, Solver):
             return
 
         self.n_grid = options.res
-        self.dx = 1 / self.n_grid
-        self.res = (self.n_grid, self.n_grid, self.n_grid)
         self.solver_iters = options.solver_iters
         self.decay = options.decay
 
@@ -32,38 +30,18 @@ class SFSolver(TimeBasedMixin, Solver):
 
         self.jets = ()
 
-    def setup_fields(self):
-        assert self.jets
-
-        cell_state = qd.types.struct(
-            v=gs.qd_vec3,
-            v_tmp=gs.qd_vec3,
-            div=gs.qd_float,
-            p=gs.qd_float,
-            q=qd.types.vector(len(self.jets), gs.qd_float),
-        )
-
-        self.grid = cell_state.field(shape=self.res, layout=qd.Layout.SOA)
-
-        # swap area for pressure projection solver
-        self.p_swap = TexPair(
-            cur=qd.field(dtype=gs.qd_float, shape=self.res),
-            nxt=qd.field(dtype=gs.qd_float, shape=self.res),
-        )
-
-    @qd.kernel
-    def init_fields(self):
-        for I in qd.grouped(qd.ndrange(*self.res)):
-            for q in qd.static(range(self.grid.q.n)):
-                self.grid.q[I][q] = 0.0
+        self.sf_state: array_class.SFState | None = None
+        self.sf_info: array_class.SFInfo | None = None
 
     def build(self):
         super().build()
 
         if self.is_active:
             self.t = 0.0
-            self.setup_fields()
-            self.init_fields()
+            self.sf_state = array_class.SFState(sizes=dict(sf_grid=self.n_grid, jets=len(self.jets)))
+            self.sf_info = array_class.SFInfo(
+                values=dict(substep_dt=self.substep_dt, inlet_s=self.inlet_s, decay=self.decay)
+            )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -77,186 +55,16 @@ class SFSolver(TimeBasedMixin, Solver):
         assert isinstance(jets, (list, tuple))
         self.jets = tuple(jets)
 
-    def reset_swap(self):
-        self.p_swap.cur.fill(0)
-        self.p_swap.nxt.fill(0)
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- simulation -------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @qd.kernel
-    def pressure_jacobi(self, pf: qd.template(), new_pf: qd.template()):
-        for u, v, w in qd.ndrange(*self.res):
-            pl = pf[self.compute_location(u, v, w, -1, 0, 0)]
-            pr = pf[self.compute_location(u, v, w, 1, 0, 0)]
-            pb = pf[self.compute_location(u, v, w, 0, -1, 0)]
-            pt = pf[self.compute_location(u, v, w, 0, 1, 0)]
-            pp = pf[self.compute_location(u, v, w, 0, 0, -1)]
-            pq = pf[self.compute_location(u, v, w, 0, 0, 1)]
-
-            new_pf[u, v, w] = (pl + pr + pb + pt + pp + pq - self.grid[u, v, w].div) / 6.0
-
-    @qd.kernel
-    def advect_and_impulse(self, f: qd.i32, t: qd.f32):
-        for i, j, k in qd.ndrange(*self.res):
-            p = qd.Vector([i, j, k], dt=gs.qd_float) + 0.5
-            p = self.backtrace(self.grid.v, p, self.substep_dt)
-            v_tmp = self.trilerp(self.grid.v, p)
-
-            for q in qd.static(range(self.grid.q.n)):
-                q_f = self.trilerp_scalar(self.grid.q, p, q)
-
-                imp_dir = self.jets[q].get_tan_dir(t)
-                factor = self.jets[q].get_factor(i, j, k, self.dx, t)
-                momentum = (imp_dir * self.inlet_s * factor) * self.substep_dt
-
-                v_tmp += momentum
-
-                self.grid.q[i, j, k][q] = (1 - factor) * q_f + factor
-                # self.grid.q[i, j, k][q] *= self.decay
-                self.grid.q[i, j, k][q] -= self.decay * self.substep_dt
-                self.grid.q[i, j, k][q] = max(0.0, self.grid.q[i, j, k][q])
-
-            self.grid.v_tmp[i, j, k] = v_tmp
-
-    @qd.kernel
-    def divergence(self):
-        for u, v, w in qd.ndrange(*self.res):
-            vl = self.grid.v_tmp[self.compute_location(u, v, w, -1, 0, 0)]
-            vr = self.grid.v_tmp[self.compute_location(u, v, w, 1, 0, 0)]
-            vb = self.grid.v_tmp[self.compute_location(u, v, w, 0, -1, 0)]
-            vt = self.grid.v_tmp[self.compute_location(u, v, w, 0, 1, 0)]
-            vp = self.grid.v_tmp[self.compute_location(u, v, w, 0, 0, -1)]
-            vq = self.grid.v_tmp[self.compute_location(u, v, w, 0, 0, 1)]
-            vc = self.grid.v_tmp[self.compute_location(u, v, w, 0, 0, 0)]
-
-            if not self.is_free(u, v, w, -1, 0, 0):
-                vl.x = -vc.x
-            if not self.is_free(u, v, w, 1, 0, 0):
-                vr.x = -vc.x
-            if not self.is_free(u, v, w, 0, -1, 0):
-                vb.y = -vc.y
-            if not self.is_free(u, v, w, 0, 1, 0):
-                vt.y = -vc.y
-            if not self.is_free(u, v, w, 0, 0, -1):
-                vp.z = -vc.z
-            if not self.is_free(u, v, w, 0, 0, 1):
-                vq.z = -vc.z
-
-            self.grid.div[u, v, w] = 0.5 * (vr.x - vl.x + vt.y - vb.y + vq.z - vp.z)
-
-    @qd.kernel
-    def pressure_to_swap(self):
-        for I in qd.grouped(qd.ndrange(*self.res)):
-            self.p_swap.cur[I] = self.grid.p[I]
-
-    @qd.kernel
-    def pressure_from_swap(self):
-        for I in qd.grouped(qd.ndrange(*self.res)):
-            self.grid.p[I] = self.p_swap.cur[I]
-
-    @qd.kernel
-    def subtract_gradient(self):
-        for I in qd.grouped(qd.ndrange(*self.res)):
-            u, v, w = I
-            pl = self.grid.p[self.compute_location(u, v, w, -1, 0, 0)]
-            pr = self.grid.p[self.compute_location(u, v, w, 1, 0, 0)]
-            pb = self.grid.p[self.compute_location(u, v, w, 0, -1, 0)]
-            pt = self.grid.p[self.compute_location(u, v, w, 0, 1, 0)]
-            pp = self.grid.p[self.compute_location(u, v, w, 0, 0, -1)]
-            pq = self.grid.p[self.compute_location(u, v, w, 0, 0, 1)]
-
-            self.grid.v[I] = self.grid.v_tmp[I] - 0.5 * qd.Vector([pr - pl, pt - pb, pq - pp], dt=gs.qd_float)
-
-    @qd.func
-    def compute_location(self, u, v, w, du, dv, dw):
-        I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
-        return qd.math.clamp(I, 0, self.n_grid - 1)
-
-    @qd.func
-    def is_free(self, u, v, w, du, dv, dw):
-        I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
-        return gs.qd_bool((0 <= I).all() and (I < self.n_grid).all())
-
-    @qd.func
-    def trilerp_scalar(self, qf, p, qf_idx):
-        """
-        p: position, within (0, 1).
-        qf: field for interpolation
-        """
-        # convert position to grid index
-        base_I = qd.floor(p - 0.5, gs.qd_int)
-        p_I = p - 0.5
-
-        q = 0.0
-        w_total = 0.0
-        for offset in qd.static(qd.grouped(qd.ndrange(2, 2, 2))):
-            grid_I = base_I + offset
-            w_xyz = 1 - qd.abs(p_I - grid_I)
-            w = w_xyz[0] * w_xyz[1] * w_xyz[2]
-            grid_I_ = self.compute_location(grid_I[0], grid_I[1], grid_I[2], 0, 0, 0)
-            q += w * qf[grid_I_][qf_idx]
-            w_total += w
-        # w_total is less then one when at boundary
-        q /= w_total
-        return q
-
-    @qd.func
-    def trilerp(self, qf, p):
-        """
-        p: position, within (0, 1).
-        qf: field for interpolation
-        """
-        # convert position to grid index
-        base_I = qd.floor(p - 0.5, gs.qd_int)
-        p_I = p - 0.5
-
-        q = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
-        w_total = 0.0
-        for offset in qd.static(qd.grouped(qd.ndrange(2, 2, 2))):
-            grid_I = base_I + offset
-            w_xyz = 1 - qd.abs(p_I - grid_I)
-            w = w_xyz[0] * w_xyz[1] * w_xyz[2]
-            grid_I_ = self.compute_location(grid_I[0], grid_I[1], grid_I[2], 0, 0, 0)
-            q += w * qf[grid_I_]
-            w_total += w
-        # w_total is less then one when at boundary
-        q /= w_total
-        return q
-
-    # RK3
-    @qd.func
-    def backtrace(self, vf, p, dt):
-        """
-        vf: velocity field
-        """
-        v1 = self.trilerp(vf, p)
-        p1 = p - 0.5 * dt * v1
-        v2 = self.trilerp(vf, p1)
-        p2 = p - 0.75 * dt * v2
-        v3 = self.trilerp(vf, p2)
-        p -= dt * ((2 / 9) * v1 + (1 / 3) * v2 + (4 / 9) * v3)
-        return p
-
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        self.advect_and_impulse(f, self.t)
-        self.divergence()
-
-        # projection
-        self.reset_swap()
-        self.pressure_to_swap()
-        for _ in range(self.solver_iters):
-            self.pressure_jacobi(self.p_swap.cur, self.p_swap.nxt)
-            self.p_swap.swap()
-        self.pressure_from_swap()
-        self.reset_swap()
-
-        self.subtract_gradient()
+        kernel_advect_and_impulse(self.t, self.sf_state, self.sf_info, self.jets)
+        kernel_divergence(self.sf_state)
+        for i_iter in range(self.solver_iters):
+            kernel_pressure_jacobi(i_iter % 2, self.sf_state)
+        kernel_subtract_gradient(self.solver_iters % 2, self.sf_state)
         self.t += self.substep_dt
 
     def substep_post_coupling(self, f):
@@ -273,10 +81,153 @@ class SFSolver(TimeBasedMixin, Solver):
         pass
 
 
-class TexPair:
-    def __init__(self, cur, nxt):
-        self.cur = cur
-        self.nxt = nxt
+@qd.kernel
+def kernel_advect_and_impulse(
+    t: float, sf_state: array_class.SFState, sf_info: array_class.SFInfo, jets: qd.template()
+):
+    """Advect the velocity and the smoke along the velocity, then let every jet inject its smoke and its momentum."""
+    n_grid = sf_state.vel.shape[0]
+    substep_dt = sf_info.substep_dt[None]
+    for i, j, k in qd.ndrange(n_grid, n_grid, n_grid):
+        p = qd.Vector([i, j, k], dt=gs.qd_float) + 0.5
+        p = func_backtrace(sf_state.vel, p, substep_dt, n_grid)
+        vel_advected = func_trilerp(sf_state.vel, p, n_grid)
+        smoke_advected = func_trilerp(sf_state.smoke, p, n_grid)
 
-    def swap(self):
-        self.cur, self.nxt = self.nxt, self.cur
+        for q in qd.static(range(len(jets))):
+            q_f = smoke_advected[q]
+
+            imp_dir = jets[q].get_tan_dir(t)
+            factor = jets[q].get_factor(i, j, k, 1.0 / n_grid, t)
+            momentum = (imp_dir * sf_info.inlet_s[None] * factor) * substep_dt
+
+            vel_advected += momentum
+
+            sf_state.smoke[i, j, k][q] = (1 - factor) * q_f + factor
+            sf_state.smoke[i, j, k][q] -= sf_info.decay[None] * substep_dt
+            sf_state.smoke[i, j, k][q] = max(0.0, sf_state.smoke[i, j, k][q])
+
+        sf_state.vel_advected[i, j, k] = vel_advected
+
+
+@qd.kernel(fastcache=True)
+def kernel_divergence(sf_state: array_class.SFState):
+    """Compute the divergence of the advected velocity, mirrored at the walls of the grid."""
+    n_grid = sf_state.vel.shape[0]
+    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
+        vl = sf_state.vel_advected[func_compute_location(u, v, w, -1, 0, 0, n_grid)]
+        vr = sf_state.vel_advected[func_compute_location(u, v, w, 1, 0, 0, n_grid)]
+        vb = sf_state.vel_advected[func_compute_location(u, v, w, 0, -1, 0, n_grid)]
+        vt = sf_state.vel_advected[func_compute_location(u, v, w, 0, 1, 0, n_grid)]
+        vp = sf_state.vel_advected[func_compute_location(u, v, w, 0, 0, -1, n_grid)]
+        vq = sf_state.vel_advected[func_compute_location(u, v, w, 0, 0, 1, n_grid)]
+        vc = sf_state.vel_advected[u, v, w]
+
+        if not func_is_free(u, v, w, -1, 0, 0, n_grid):
+            vl.x = -vc.x
+        if not func_is_free(u, v, w, 1, 0, 0, n_grid):
+            vr.x = -vc.x
+        if not func_is_free(u, v, w, 0, -1, 0, n_grid):
+            vb.y = -vc.y
+        if not func_is_free(u, v, w, 0, 1, 0, n_grid):
+            vt.y = -vc.y
+        if not func_is_free(u, v, w, 0, 0, -1, n_grid):
+            vp.z = -vc.z
+        if not func_is_free(u, v, w, 0, 0, 1, n_grid):
+            vq.z = -vc.z
+
+        sf_state.div[u, v, w] = 0.5 * (vr.x - vl.x + vt.y - vb.y + vq.z - vp.z)
+
+
+@qd.kernel(fastcache=True)
+def kernel_pressure_jacobi(i_src: int, sf_state: array_class.SFState):
+    """
+    Run one Jacobi iteration of the pressure projection, from one pressure buffer to the other.
+
+    `i_src` is the buffer the iteration reads, the other one receiving the result.
+    """
+    n_grid = sf_state.vel.shape[0]
+    i_dst = 1 - i_src
+    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
+        pl = sf_state.pressure[i_src, func_compute_location(u, v, w, -1, 0, 0, n_grid)]
+        pr = sf_state.pressure[i_src, func_compute_location(u, v, w, 1, 0, 0, n_grid)]
+        pb = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, -1, 0, n_grid)]
+        pt = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 1, 0, n_grid)]
+        pp = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, -1, n_grid)]
+        pq = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, 1, n_grid)]
+        sf_state.pressure[i_dst, u, v, w] = (pl + pr + pb + pt + pp + pq - sf_state.div[u, v, w]) / 6.0
+
+
+@qd.kernel(fastcache=True)
+def kernel_subtract_gradient(i_src: int, sf_state: array_class.SFState):
+    """
+    Make the advected velocity divergence-free by subtracting the gradient of the pressure.
+
+    `i_src` is the pressure buffer holding the result of the last Jacobi iteration, copied into the first buffer as the
+    warm start of the next substep.
+    """
+    n_grid = sf_state.vel.shape[0]
+    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
+        pl = sf_state.pressure[i_src, func_compute_location(u, v, w, -1, 0, 0, n_grid)]
+        pr = sf_state.pressure[i_src, func_compute_location(u, v, w, 1, 0, 0, n_grid)]
+        pb = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, -1, 0, n_grid)]
+        pt = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 1, 0, n_grid)]
+        pp = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, -1, n_grid)]
+        pq = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, 1, n_grid)]
+
+        sf_state.vel[u, v, w] = sf_state.vel_advected[u, v, w] - 0.5 * qd.Vector(
+            [pr - pl, pt - pb, pq - pp], dt=gs.qd_float
+        )
+        # Keep the result in the first buffer as the warm start of the next substep. No read races with this write: the
+        # stencil above reads the second buffer whenever it holds the result, and the copy leaves the cell unchanged
+        # otherwise.
+        sf_state.pressure[0, u, v, w] = sf_state.pressure[i_src, u, v, w]
+
+
+@qd.func
+def func_compute_location(u: int, v: int, w: int, du: int, dv: int, dw: int, n_grid: int):
+    """Return the cell at the given offset of a cell, clamped to the grid."""
+    I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
+    return qd.math.clamp(I, 0, n_grid - 1)
+
+
+@qd.func
+def func_is_free(u: int, v: int, w: int, du: int, dv: int, dw: int, n_grid: int):
+    """Return whether the cell at the given offset of a cell lies inside the grid."""
+    I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
+    return (0 <= I).all() and (I < n_grid).all()
+
+
+@qd.func
+def func_trilerp(qf: qd.template(), p: qd.types.vector(3), n_grid: int):
+    """
+    Interpolate trilinearly a vector field of the grid at a position.
+
+    The position is in cell units. The weights of the cells outside the grid are dropped and the others renormalized.
+    """
+    base_I = qd.floor(p - 0.5, gs.qd_int)
+    p_I = p - 0.5
+
+    q = qd.Vector.zero(gs.qd_float, qf[0, 0, 0].n)
+    w_total = 0.0
+    for offset in qd.static(qd.grouped(qd.ndrange(2, 2, 2))):
+        grid_I = base_I + offset
+        w_xyz = 1 - qd.abs(p_I - grid_I)
+        w = w_xyz[0] * w_xyz[1] * w_xyz[2]
+        grid_I_ = func_compute_location(grid_I[0], grid_I[1], grid_I[2], 0, 0, 0, n_grid)
+        q += w * qf[grid_I_]
+        w_total += w
+    q /= w_total
+    return q
+
+
+@qd.func
+def func_backtrace(vf: qd.template(), p: qd.types.vector(3), dt: float, n_grid: int):
+    """Trace a position back along a velocity field over a timestep, by third-order Runge-Kutta."""
+    v1 = func_trilerp(vf, p, n_grid)
+    p1 = p - 0.5 * dt * v1
+    v2 = func_trilerp(vf, p1, n_grid)
+    p2 = p - 0.75 * dt * v2
+    v3 = func_trilerp(vf, p2, n_grid)
+    p -= dt * ((2 / 9) * v1 + (1 / 3) * v2 + (4 / 9) * v3)
+    return p

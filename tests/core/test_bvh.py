@@ -13,7 +13,8 @@ from ..utils.assertions import assert_equal
 
 @pytest.fixture(scope="function")
 def bvh(n_leaves, n_trees, boxes_layout):
-    bvh_state, bvh_config = get_bvh_data(n_trees, n_leaves)
+    bvh_config, bvh_sizes, bvh_unused = get_bvh_data(n_trees, n_leaves)
+    bvh_state = array_class.BVHState(sizes=bvh_sizes, unused=bvh_unused)
     leaves_min = np.random.rand(n_trees, n_leaves, 3).astype(gs.np_float) * 20.0
     leaves_max = leaves_min + np.random.rand(n_trees, n_leaves, 3).astype(gs.np_float)
     if boxes_layout == "flat":
@@ -82,17 +83,19 @@ def test_build_tree(bvh):
 def test_query(bvh):
     bvh_state, bvh_config = bvh
     n_trees, n_leaves = bvh_state.leaves.aabbs_min.shape
-    query_state = array_class.BVHQueryState(
-        leaves=bvh_state.leaves,
-        tree=bvh_state.tree,
-        results=array_class.BVHQueryResults(sizes=dict(query_results=n_trees * n_leaves * n_leaves)),
-    )
+    query_results = array_class.BVHQueryResults(sizes=dict(query_results=n_trees * n_leaves * n_leaves))
+    query_filter = array_class.BVHQueryFilter(unused={None: True})
 
     @qd.kernel
-    def query_leaves(query_state: BVHQueryState) -> bool:
-        query_state.results.count[0] = 0
-        func_bvh_query_leaves(query_state, func_no_filter, 0)
-        return query_state.results.count[0] > query_state.results.triplets.shape[0]
+    def query_leaves(
+        bvh_leaves: array_class.BVHLeaves,
+        bvh_tree_state: array_class.BVHTreeState,
+        query_results: array_class.BVHQueryResults,
+        query_filter: array_class.BVHQueryFilter,
+    ) -> bool:
+        query_results.count[0] = 0
+        func_bvh_query_leaves(bvh_leaves, bvh_tree_state, query_results, func_no_filter, query_filter)
+        return query_results.count[0] > query_results.triplets.shape[0]
 
     leaves_min = qd_to_numpy(bvh_state.leaves.aabbs_min)
     leaves_max = qd_to_numpy(bvh_state.leaves.aabbs_max)
@@ -100,16 +103,14 @@ def test_query(bvh):
     is_hit &= (leaves_max[:, :, None] >= leaves_min[:, None]).all(axis=-1)
 
     # Every leaf queried against its own tree finds exactly the leaves its box meets, itself included
-    assert not query_leaves(query_state)
-    count = qd_to_numpy(query_state.results.count)[0]
-    triplets = qd_to_numpy(query_state.results.triplets)[:count]
+    assert not query_leaves(bvh_state.leaves, bvh_state.tree, query_results, query_filter)
+    count = qd_to_numpy(query_results.count)[0]
+    triplets = qd_to_numpy(query_results.triplets)[:count]
     is_found = np.zeros((n_trees, n_leaves, n_leaves), dtype=bool)
     is_found[triplets[:, 0], triplets[:, 1], triplets[:, 2]] = True
     assert_equal(is_found, is_hit)
 
     # A result list holding one pair reports the overflow exactly when there are more, and the pair it holds is genuine
-    short_query_state = array_class.BVHQueryState(
-        leaves=bvh_state.leaves, tree=bvh_state.tree, results=array_class.BVHQueryResults(sizes=dict(query_results=1))
-    )
-    assert query_leaves(short_query_state) == (is_hit.sum() > 1)
-    assert is_hit[tuple(qd_to_numpy(short_query_state.results.triplets)[0])]
+    short_query_results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+    assert query_leaves(bvh_state.leaves, bvh_state.tree, short_query_results, query_filter) == (is_hit.sum() > 1)
+    assert is_hit[tuple(qd_to_numpy(short_query_results.triplets)[0])]

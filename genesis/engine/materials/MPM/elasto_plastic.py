@@ -1,10 +1,9 @@
-from typing import Any
-
-import quadrants as qd
 from pydantic import StrictBool
 
+import quadrants as qd
+
 import genesis as gs
-from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat
 
 from .base import Base
 
@@ -21,7 +20,7 @@ class ElastoPlastic(Base):
     nu : float, optional
         Poisson ratio. Default is 0.2.
     rho : float, optional
-        Density (kg/m³). Default is 1000.
+        Density (kg/m^3). Default is 1000.
     yield_lower : float, optional
         Lower bound for the yield clamp (ignored if using von Mises). Default is 2.5e-2.
     yield_higher : float, optional
@@ -37,12 +36,16 @@ class ElastoPlastic(Base):
     use_von_mises: StrictBool = True
     von_mises_yield_stress: PositiveFloat = 10000.0
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self.update_F_S_Jp = self._update_F_S_Jp_elasto_plastic
-
     @qd.func
-    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+    ):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.use_von_mises):

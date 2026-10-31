@@ -6,8 +6,6 @@ import torch
 
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
@@ -31,7 +29,6 @@ def assert_active(method):
     return wrapper
 
 
-@qd.data_oriented
 class ParticleEntity(Entity):
     """
     Base class for particle-based entity.

@@ -31,6 +31,7 @@ from .forward_kinematics import (
 )
 from .misc import (
     func_add_safe_backward,
+    func_apply_coupling_force,
     func_is_awake_link,
     func_is_awake_tree,
     func_wakeup_island,
@@ -125,7 +126,61 @@ def func_vel_at_point(link_idx: int, i_b: int, pos_world: qd.types.vector(3), li
 
 
 @qd.func
-def func_crb_initialize(i_l: int, i_b: int, dyn_state: DynState, rigid_config: qd.template()):
+def func_collide_in_rigid_geom(
+    i_g: int,
+    i_b: int,
+    pos_world: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    normal_rigid: qd.types.vector(3),
+    influence: float,
+    links_state: array_class.LinksState,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+):
+    """
+    Return the velocity of a particle colliding with a coupled geom, applying the reaction to the link of the geom.
+
+    The particle of the given mass moves at `vel` at the point `pos_world`, where the outward normal of the geom is
+    `normal_rigid`. A particle moving inward takes the velocity of the geom plus its relative velocity once the
+    friction and the restitution of the geom apply, blended with its own by `influence`, in [0, 1].
+    """
+    i_l = geoms_info.link_idx[i_g]
+    vel_rigid = func_vel_at_point(i_l, i_b, pos_world, links_state)
+
+    # Velocity relative to the geom, its normal component negative inward
+    rvel = vel - vel_rigid
+    rvel_normal_magnitude = rvel.dot(normal_rigid)
+
+    if rvel_normal_magnitude < 0:
+        # Tangential component after friction, plus normal component after restitution
+        rvel_tan = rvel - rvel_normal_magnitude * normal_rigid
+        rvel_tan_norm = rvel_tan.norm(rigid_info.EPS[None])
+        rvel_tan = (
+            rvel_tan / rvel_tan_norm * qd.max(0, rvel_tan_norm + rvel_normal_magnitude * geoms_info.coup_friction[i_g])
+        )
+        rvel_normal = -normal_rigid * rvel_normal_magnitude * geoms_info.coup_restitution[i_g]
+        rvel_new = rvel_tan + rvel_normal
+
+        vel_old = vel
+        vel = vel_rigid + rvel_new * influence + rvel * (1 - influence)
+
+        # The momentum the particle gains is taken from the link
+        delta_mv = mass * (vel - vel_old)
+        force = -delta_mv / rigid_info.substep_dt[None]
+        func_apply_coupling_force(i_l, i_b, pos_world, force, links_state)
+
+    return vel
+
+
+@qd.func
+def func_crb_initialize(
+    i_l: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.links.is_hibernated[i_l, i_b]

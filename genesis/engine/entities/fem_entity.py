@@ -7,13 +7,10 @@ import torch
 import igl
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
@@ -118,7 +115,6 @@ def assert_muscle(method):
     return wrapper
 
 
-@qd.data_oriented
 class FEMEntity(Entity):
     """
     A finite element method (FEM)-based entity for deformable simulation.
@@ -213,6 +209,9 @@ class FEMEntity(Entity):
             tri2el = np.repeat(np.arange(self.elems.shape[0], dtype=gs.np_int)[:, np.newaxis], 4, axis=1)
             unique_el = tri2el.flat[unique_idcs]
             self._surface_el_np = unique_el[cnt == 1]
+
+        # Imported here to avoid a circular dependency, the couplers importing the FEM solver
+        from genesis.engine.couplers import SAPCoupler
 
         if isinstance(self.sim.coupler, SAPCoupler):
             self.compute_pressure_field()
@@ -434,29 +433,20 @@ class FEMEntity(Entity):
         verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
-            self._solver.add_cloth(
-                f=self._sim.cur_substep_local,
-                v_start=self._v_start,
-                s_start=self._s_start,
-                verts=verts_numpy,
-                tri2v=self._surface_tri_np,
-            )
+            self._solver.add_cloth(f=self._sim.cur_substep_local, v_start=self._v_start, verts=verts_numpy)
         else:
             elems_np = self.elems.astype(gs.np_int, copy=False)
             self._solver.add_elements(
                 f=self._sim.cur_substep_local,
-                mat_idx=self._material.idx,
+                material_idx=self._material.idx,
                 mat_mu=self._material.mu,
                 mat_lam=self._material.lam,
                 mat_rho=self._material.rho,
                 mat_friction_mu=self._material.friction_mu,
                 v_start=self._v_start,
                 el_start=self._el_start,
-                s_start=self._s_start,
                 verts=verts_numpy,
                 elems=elems_np,
-                tri2v=self._surface_tri_np,
-                tri2el=self._surface_el_np,
             )
 
         for vgeom in self._vgeoms:
@@ -486,10 +476,13 @@ class FEMEntity(Entity):
         Drake's implementation of margin seems buggy.
         """
         init_positions = tensor_to_array(self.init_positions)
+        # The unsigned query returns bitwise identical distances for identical inputs, whereas the signed ones differ in
+        # their last bits from one call to the next, which makes the whole simulation irreproducible.
         unsigned_distance, *_ = igl.signed_distance(
             init_positions, init_positions, self._surface_tri_np, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
         )
         unsigned_distance = unsigned_distance.astype(gs.np_float, copy=False)
+
         max_distance = np.max(unsigned_distance)
         if max_distance < gs.EPS:
             gs.raise_exception(
@@ -709,6 +702,11 @@ class FEMEntity(Entity):
     def surface_triangles(self):
         """Surface triangles of the FEM mesh."""
         return self._surface_tri_np
+
+    @property
+    def surface_triangles_element(self):
+        """Local index of the element each surface triangle belongs to."""
+        return self._surface_el_np
 
     @property
     def tet_cfg(self):

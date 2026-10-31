@@ -1,14 +1,18 @@
 import re
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+import sys
+from typing import TYPE_CHECKING, Annotated, Any
+
+from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
+from pydantic_core import PydanticCustomError
 
 import quadrants as qd
-from pydantic import BeforeValidator, Field, PrivateAttr
-from pydantic_core import PydanticCustomError
+from quadrants.lang._quadrants_callable import QuadrantsCallable
 
 import genesis as gs
 from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
 from ..base import Material
+
 
 if TYPE_CHECKING:
     from genesis.engine.entities.mpm_entity import MPMEntity
@@ -45,7 +49,7 @@ class Base(Material["MPMEntity"]):
     nu : float, optional
         Poisson ratio. Default is 0.2.
     rho : float, optional
-        Density (kg/m³). Default is 1000.
+        Density (kg/m^3). Default is 1000.
     lam : float, optional
         The first Lame's parameter. Default is None, computed from E and nu.
     mu : float, optional
@@ -56,6 +60,9 @@ class Base(Material["MPMEntity"]):
         the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
 
+    # The quadrants funcs a kernel dispatches over are methods of the material, which pydantic takes for fields otherwise
+    model_config = ConfigDict(ignored_types=(QuadrantsCallable,))
+
     E: PositiveFloat = 1e6
     nu: Annotated[ValidFloat, Field(gt=-1.0, lt=0.5)] = 0.2
     rho: PositiveFloat = 1000.0
@@ -63,12 +70,9 @@ class Base(Material["MPMEntity"]):
     mu: ValidFloat | None = None
     sampler: SamplerType = "pbs"
 
-    # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
-    # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken
-    # elastic).
-    update_F_S_Jp: Any = Field(default=None, exclude=True, repr=False)
-    update_stress: Any = Field(default=None, exclude=True, repr=False)
-    needs_svd: bool = Field(default=True, exclude=True, repr=False)
+    # Whether 'update_F_S_Jp' or 'update_stress' reads the singular value decomposition of the deformation gradient
+    # (see MPMStaticConfig), set by the subclasses
+    is_svd_needed: bool = Field(default=True, exclude=True, repr=False)
 
     # Auto-generated fields.
     idx: StrictInt | None = Field(default=None, exclude=True)
@@ -83,18 +87,43 @@ class Base(Material["MPMEntity"]):
         if self.lam is None:
             self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
 
-        # Set dispatch defaults
-        if self.update_F_S_Jp is None:
-            self.update_F_S_Jp = self._update_F_S_Jp_noop
-        if self.update_stress is None:
-            self.update_stress = self._update_stress_default
-
     @qd.func
-    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+    ):
+        """
+        Return the deformation gradient, its singular values and the plastic volume ratio once the plasticity applies.
+
+        `F_tmp` is the deformation gradient advected over the substep, `U`, `S`, `V` its singular value decomposition, `J`
+        its determinant and `Jp` the plastic volume ratio of the particle.
+        """
         raise NotImplementedError
 
     @qd.func
-    def _update_stress_default(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
+        """
+        Return the stress of a particle, as the corotated elastic model gives it by default.
+
+        `F_new` is the deformation gradient once the plasticity applies, `actu` the actuation of the particle and `m_dir`
+        the direction of its muscle fibers, the other arguments being those of 'update_F_S_Jp'.
+        """
         stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
             gs.qd_float, 3
         ) * self.lam * J * (J - 1)

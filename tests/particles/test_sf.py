@@ -1,14 +1,16 @@
 import math
 
 import numpy as np
+import pytest
 
 import genesis as gs
+from genesis.utils.misc import qd_to_numpy
 
 
-def test_jets(show_viewer):
+@pytest.mark.parametrize("res, solver_iters", [(384, 200), (64, 1)])
+def test_jets(res, solver_iters, show_viewer):
     import quadrants as qd
 
-    res = 384
     orbit_tau = 0.2
     orbit_radius = 0.3
     orbit_radius_vel = 0.0
@@ -24,7 +26,7 @@ def test_jets(show_viewer):
         ),
         sf_options=gs.options.SFOptions(
             res=res,
-            solver_iters=200,
+            solver_iters=solver_iters,
             decay=0.025,
         ),
         show_viewer=show_viewer,
@@ -110,3 +112,17 @@ def test_jets(show_viewer):
     scene.sim.sf_solver.set_jets(jet)
     scene.build()
     scene.step()
+
+    # The pressure projection cancels part of the divergence of the advected velocity, whatever the parity of the
+    # number of Jacobi iterations. The divergence is the central difference the projection uses, away from the walls.
+    vel = qd_to_numpy(scene.sim.sf_solver.sf_state.vel)
+    div_advected = qd_to_numpy(scene.sim.sf_solver.sf_state.div)[1:-1, 1:-1, 1:-1]
+    div = 0.5 * (
+        vel[2:, 1:-1, 1:-1, 0]
+        - vel[:-2, 1:-1, 1:-1, 0]
+        + vel[1:-1, 2:, 1:-1, 1]
+        - vel[1:-1, :-2, 1:-1, 1]
+        + vel[1:-1, 1:-1, 2:, 2]
+        - vel[1:-1, 1:-1, :-2, 2]
+    )
+    assert np.abs(div).mean() < 0.95 * np.abs(div_advected).mean()

@@ -10,7 +10,10 @@ import pytest
 import numpy as np
 
 import genesis as gs
+from genesis.engine.solvers.sph_solver import kernel_compute_rho, kernel_reorder_particles
 from genesis.utils.misc import qd_to_numpy
+
+from ..utils.assertions import assert_allclose
 
 
 def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH"):
@@ -82,17 +85,17 @@ def get_sph_density_pressure(scene, n_particles):
 
     # Reorder particles into spatial grid cells for efficient neighbor queries,
     # then compute density. This mirrors what happens in substep_pre_coupling.
-    # We must reorder first because _kernel_compute_rho operates on particles_reordered.
-    sph_solver._kernel_reorder_particles(0)
-    sph_solver._kernel_compute_rho(0)
+    # We must reorder first because kernel_compute_rho operates on the sorted particles.
+    kernel_reorder_particles(sph_solver.sph_state, sph_solver.sph_info)
+    kernel_compute_rho(sph_solver.sph_state, sph_solver.sph_info)
 
-    # Get density values from reordered particles (where _kernel_compute_rho stores results)
-    densities = sph_solver.particles_reordered.rho.to_numpy()[:n_particles, 0]
+    # Get density values from reordered particles (where kernel_compute_rho stores results)
+    densities = qd_to_numpy(sph_solver.sph_state.particles_reordered.rho)[:n_particles, 0]
 
     # Get material properties for pressure computation
-    rho0 = sph_solver.particles_info[0].rho
-    stiffness = sph_solver.particles_info[0].stiffness
-    exponent = sph_solver.particles_info[0].exponent
+    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    stiffness = qd_to_numpy(sph_solver.sph_info.particles.stiffness)[0]
+    exponent = qd_to_numpy(sph_solver.sph_info.particles.exponent)[0]
 
     # Compute pressure using the same formula as the solver:
     # p = stiffness * ((max(rho, rho0) / rho0)^exponent - 1)
@@ -108,10 +111,13 @@ def test_initial_density_regular_sampler(show_viewer, pressure_solver, tol):
     # A regular sampler places particles at uniform spacing: interior particles see a consistent near-rest
     # density while boundary particles sit lower (fewer neighbors inside the kernel support), so the mean lands
     # below the rest density with a bounded spread.
-    scene, _ = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
+    scene, liquid = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
-    rho0 = sph_solver.particles_info[0].rho
+    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+
+    # Every particle weighs the rest density of its material times the volume it stands for
+    assert_allclose(sph_solver.get_particles_mass(), liquid.material.rho * sph_solver.particle_volume, tol=tol)
 
     # Get initial density values
     densities, _ = get_sph_density_pressure(scene, n_particles)
@@ -150,8 +156,8 @@ def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
     scene, _ = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
-    rho0 = sph_solver.particles_info[0].rho
-    stiffness = sph_solver.particles_info[0].stiffness
+    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    stiffness = qd_to_numpy(sph_solver.sph_info.particles.stiffness)[0]
 
     # Get initial pressure values
     densities, pressures = get_sph_density_pressure(scene, n_particles)
@@ -231,7 +237,7 @@ def test_density_consistency_different_particle_sizes(show_viewer, pressure_solv
 
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
-    rho0 = sph_solver.particles_info[0].rho
+    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
 
     # Get density values
     densities, pressures = get_sph_density_pressure(scene, n_particles)
@@ -318,15 +324,15 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
         scene.step()
 
     sph_solver = scene.sph_solver
-    pressures = qd_to_numpy(sph_solver.particles_reordered.p, transpose=True)[0]
-    heights = qd_to_numpy(sph_solver.particles_reordered.pos, transpose=True)[0, :, 2]
+    pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
+    heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
 
     # The pressure at the bottom of a settled column carries the weight of the whole column, which is exactly
     # the particle count times the particle weight spread over the column footprint. The tolerance absorbs the
     # residual sloshing of the column and two boundary effects that pull in opposite directions: the wall
     # pressure force from the floor relieves part of the compression that the WCSPH equation of state reads,
     # while the positive-part clamp of the DFSPH density solve rectifies velocity noise into extra pressure.
-    weight_per_area = sph_solver.n_particles * sph_solver.particles_info[0].mass * 9.81 / (0.3 * 0.3)
+    weight_per_area = sph_solver.n_particles * qd_to_numpy(sph_solver.sph_info.particles.mass)[0] * 9.81 / (0.3 * 0.3)
     p_bottom = pressures[heights < 0.05].mean()
     assert 0.4 * weight_per_area < p_bottom < 1.5 * weight_per_area
 

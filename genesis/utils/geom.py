@@ -10,6 +10,7 @@ import numba as nb
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 from genesis.typing import Vec3FType
 from genesis.utils.cache import register_cache_clear
 
@@ -2504,104 +2505,126 @@ def default_dofs_kv(n=6):
     return np.full((n,), fill_value=10.0, dtype=gs.np_float)
 
 
-@qd.data_oriented
-class SpatialHasher:
-    def __init__(self, cell_size, grid_res, n_slots=None):
-        self.cell_size = cell_size
-        self.grid_res = grid_res
+@qd.func(requires_top_level=True)
+def func_hash_compute_reordered_idx(
+    pos: qd.template(), active: qd.template(), reordered_idx: qd.template(), hash_grid: array_class.SpatialHashGrid
+):
+    """
+    Sort the active elements of every environment by the slot of the hash grid their position falls in.
 
-        if n_slots is None:
-            self.n_slots = np.prod(grid_res)
+    `reordered_idx` receives the index of each element once sorted, and the slots their range of sorted indices.
+    """
+    n_slots = hash_grid.slot_size.shape[0]
+    for i_s, i_b in qd.ndrange(n_slots, hash_grid.slot_size.shape[1]):
+        hash_grid.slot_size[i_s, i_b] = 0
+    for i_b in range(hash_grid.slot_size.shape[1]):
+        hash_grid.cur_cnt[i_b] = 0
+
+    for i_n, i_b in qd.ndrange(pos.shape[0], hash_grid.slot_size.shape[1]):
+        if active[i_n, i_b]:
+            i_s = func_hash_grid_to_slot(func_hash_pos_to_grid(pos[i_n, i_b], hash_grid), hash_grid)
+            qd.atomic_add(hash_grid.slot_size[i_s, i_b], 1)
+
+    # The slots take their ranges by chunks, one atomic increment of the counter of the environment per chunk. One
+    # increment per slot would serialize millions of them on a single address.
+    n_chunk_slots = 256
+    for i_chunk, i_b in qd.ndrange((n_slots + n_chunk_slots - 1) // n_chunk_slots, hash_grid.slot_size.shape[1]):
+        i_s_start = i_chunk * n_chunk_slots
+        i_s_end = qd.min(i_s_start + n_chunk_slots, n_slots)
+        chunk_size = 0
+        for i_s in range(i_s_start, i_s_end):
+            chunk_size += hash_grid.slot_size[i_s, i_b]
+        slot_start = qd.atomic_add(hash_grid.cur_cnt[i_b], chunk_size)
+        for i_s in range(i_s_start, i_s_end):
+            hash_grid.slot_start[i_s, i_b] = slot_start
+            slot_start += hash_grid.slot_size[i_s, i_b]
+
+    for i_n, i_b in qd.ndrange(pos.shape[0], hash_grid.slot_size.shape[1]):
+        if active[i_n, i_b]:
+            i_s = func_hash_grid_to_slot(func_hash_pos_to_grid(pos[i_n, i_b], hash_grid), hash_grid)
+            reordered_idx[i_n, i_b] = qd.atomic_add(hash_grid.slot_start[i_s, i_b], 1)
+
+    # The atomic increments above left every slot start at the end of its range
+    for i_s, i_b in qd.ndrange(n_slots, hash_grid.slot_size.shape[1]):
+        hash_grid.slot_start[i_s, i_b] -= hash_grid.slot_size[i_s, i_b]
+
+
+@qd.func
+def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: array_class.SpatialHashGrid):
+    """Return the integer coordinates of the cell of the hash grid a position lies in."""
+    return qd.floor(pos / hash_grid.cell_size[None], gs.qd_int)
+
+
+# The integer dtype is spelled out since the Genesis integer vector types only exist once Genesis is initialized
+@qd.func
+def func_hash_grid_to_slot(grid_id: qd.types.vector(3, qd.i32), hash_grid: array_class.SpatialHashGrid):
+    """Return the slot of the hash grid a cell of integer coordinates hashes to."""
+    grid_res = hash_grid.grid_res[None]
+    n_slots = hash_grid.slot_size.shape[0]
+    return (grid_id[0] * grid_res[1] * grid_res[2] + grid_id[1] * grid_res[2] + grid_id[2]) % n_slots
+
+
+@qd.func
+def func_cubic_kernel(r_norm: float, h: float):
+    """
+    Return the cubic spline smoothing kernel at a distance.
+
+    `h` is the support radius of the kernel.
+    """
+    res = gs.qd_float(0.0)
+    k = 8.0 / np.pi / h**3
+    q = r_norm / h
+    if q <= 1.0:
+        if q <= 0.5:
+            q2 = q**2
+            q3 = q2 * q
+            res = k * (6.0 * q3 - 6.0 * q2 + 1.0)
         else:
-            self.n_slots = n_slots
+            res = 2 * k * (1.0 - q) ** 3
+    return res
 
-    def build(self, n_batch):
-        self._B = n_batch
-        # number of elements in each slot
-        self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        # element index offset in each slot
-        self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
 
-    @qd.func
-    def compute_reordered_idx(self, n, pos, active, reordered_idx):
-        """
-        Reordered element idx based on the given positions and active flags.
+@qd.func
+def func_cubic_kernel_derivative(r: qd.types.vector(3), h: float):
+    """
+    Return the gradient of the cubic spline smoothing kernel at a vector.
 
-        Parameters:
-            n (int)       : The number of elements in the positions and active arrays.
-            pos           : The array of positions.
-            active        : The array of active flags.
-            reordered_idx : The array to store the computed reordered indices.
+    `h` is the support radius of the kernel.
+    """
+    res = qd.Vector.zero(gs.qd_float, 3)
 
-        Returns:
-            None
-        """
+    r_norm = r.norm()
+    k = 8.0 / np.pi / h**3
+    q = r_norm / h
+    if r_norm > 1e-5 and q <= 1.0:
+        grad_q = r / (r_norm * h)
+        if q <= 0.5:
+            res = 6.0 * k * q * (3.0 * q - 2.0) * grad_q
+        else:
+            res = -6.0 * k * (1.0 - q) ** 2 * grad_q
+    return res
 
-        self.slot_size.fill(0)
-        self.slot_start.fill(0)
-        self.cur_cnt.fill(0)
 
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                qd.atomic_add(self.slot_size[slot_idx, i_b], 1)
+@qd.func
+def func_cubic_kernel_plane_integral(dist: float, h: float):
+    """
+    Return the integral of the cubic spline smoothing kernel over the plane at a distance from its center.
 
-        for i_n in range(self.n_slots):
-            for i_b in range(self._B):
-                self.slot_start[i_n, i_b] = qd.atomic_add(self.cur_cnt[i_b], self.slot_size[i_n, i_b])
-
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                reordered_idx[i_n, i_b] = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
-
-        # recover slot_start
-        for i_s, i_b in qd.ndrange(self.n_slots, self._B):
-            self.slot_start[i_s, i_b] -= self.slot_size[i_s, i_b]
-
-    @qd.func
-    def for_all_neighbors(self, i_p, pos, task_range, ret: qd.template(), task: qd.template(), i_b):
-        """
-        Iterates over all neighbors of a given position and performs a task on each neighbor.
-        Elements are considered neighbors if they are within task_range.
-
-        Parameters:
-            i_p (int)  : Index of the querying particle.
-            pos        : Template for the positions of all particles.
-            task       : Template for the task to be performed on each neighbor of the querying particle.
-            task_range : Range within which the task should be performed.
-            ret        : Template for the return value of the task.
-
-        Returns:
-            None
-        """
-        base = self.pos_to_grid(pos[i_p, i_b])
-        for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-            slot_idx = self.grid_to_slot(base + offset)
-            for j_p in range(
-                self.slot_start[slot_idx, i_b], self.slot_size[slot_idx, i_b] + self.slot_start[slot_idx, i_b]
-            ):
-                if i_p != j_p and (pos[i_p, i_b] - pos[j_p, i_b]).norm() < task_range:
-                    task(i_p, j_p, ret, i_b)
-
-    @qd.func
-    def pos_to_grid(self, pos):
-        return qd.floor(pos / self.cell_size, gs.qd_int)
-
-    @qd.func
-    def grid_to_pos(self, grid_id):
-        return (grid_id + 0.5) * self.cell_size
-
-    @qd.func
-    def grid_to_slot(self, grid_id):
-        return (
-            grid_id[0] * self.grid_res[1] * self.grid_res[2] + grid_id[1] * self.grid_res[2] + grid_id[2]
-        ) % self.n_slots
-
-    @qd.func
-    def pos_to_slot(self, pos):
-        return self.grid_to_slot(self.pos_to_grid(pos))
+    Closed form of 2 * pi * int_{|dist|}^{h} W(r) r dr, with `h` the support radius of the kernel. Its own integral
+    along the plane normal equals half the kernel normalization: int_{0}^{h} of this quantity over dist is exactly 1/2,
+    which makes forces weighted by it integrate to a per-unit-area magnitude over a covering layer of particles.
+    """
+    res = gs.qd_float(0.0)
+    q = qd.abs(dist) / h
+    if q <= 1.0:
+        q2 = q**2
+        q3 = q2 * q
+        if q <= 0.5:
+            res = 0.0875 - (1.2 * q3 * q2 - 1.5 * q2**2 + 0.5 * q2)
+        else:
+            res = 0.1 - (q2 - 2.0 * q3 + 1.5 * q2**2 - 0.4 * q3 * q2)
+        res = res * 16.0 / h
+    return res
 
 
 @nb.jit(nopython=True, cache=True)

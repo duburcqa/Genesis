@@ -871,7 +871,7 @@ def _get_sdf_grid(
             # it is measured against that mesh
             closest_faces = sdf_closest_faces
             if not (np.array_equal(sdf_verts, verts) and np.array_equal(sdf_faces, faces)):
-                # Unsigned, since the closest faces alone are read
+                # See FEMEntity.compute_pressure_field for the unsigned query
                 _, closest_faces, *_ = igl.signed_distance(
                     query_points, verts, faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
                 )

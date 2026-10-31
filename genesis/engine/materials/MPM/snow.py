@@ -1,10 +1,8 @@
-from typing import Any
-
-import quadrants as qd
 from pydantic import StrictBool, model_validator
 
+import quadrants as qd
+
 import genesis as gs
-from genesis.typing import PositiveFloat
 
 from .base import SamplerType
 from .elasto_plastic import ElastoPlastic
@@ -27,7 +25,7 @@ class Snow(ElastoPlastic):
     nu : float, optional
         Poisson ratio. Default is 0.2.
     rho : float, optional
-        Density (kg/m³). Default is 1000.
+        Density (kg/m^3). Default is 1000.
     sampler : str, optional
         Particle sampler. Default is 'random'.
     yield_lower : float, optional
@@ -47,13 +45,16 @@ class Snow(ElastoPlastic):
         data["use_von_mises"] = False
         return data
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self.update_F_S_Jp = self._update_F_S_Jp_snow
-        self.update_stress = self._update_stress_snow
-
     @qd.func
-    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+    ):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = Jp
         for d in qd.static(range(3)):
@@ -63,7 +64,18 @@ class Snow(ElastoPlastic):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_snow(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         # Hardening coefficient: material harder when compressed
         h = qd.exp(10 * (1.0 - Jp))
         mu, lam = self.mu * h, self.lam * h

@@ -29,7 +29,7 @@ class Cloth(Base):
         Poisson's ratio, describing volume change under stress.
         Default is 0.49 (nearly incompressible).
     rho : float, optional
-        Material density (kg/m³). Default is 200 (typical fabric).
+        Material density (kg/m^3). Default is 200 (typical fabric).
     thickness : float, optional
         Shell thickness (m). Default is 0.001 (1mm).
     bending_stiffness : float, optional

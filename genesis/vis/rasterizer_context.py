@@ -786,12 +786,12 @@ class RasterizerContext:
     def update_mpm(self):
         if self.sim.mpm_solver.is_active:
             if any(mpm_entity.surface.vis_mode == "particle" for mpm_entity in self.sim.mpm_solver.entities):
-                particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
+                particles_all = qd_to_numpy(self.sim.mpm_solver.mpm_state.particles_render.pos, transpose=True)
                 for mpm_entity in self.sim.mpm_solver.entities:
                     if mpm_entity.surface.vis_mode == "particle":
                         for idx in self.rendered_envs_idx:
                             tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
+                            tfs[:, :3, 3] = particles_all[idx, mpm_entity.particle_start : mpm_entity.particle_end]
 
                             node = self.static_nodes[(idx, mpm_entity.uid)]
                             self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
@@ -803,17 +803,18 @@ class RasterizerContext:
 
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
-        particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-        vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos)
+        particles_render = self.sim.mpm_solver.mpm_state.particles_render
+        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
+        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
+        vverts_all = qd_to_numpy(self.sim.mpm_solver.mpm_state.vverts_render.pos, transpose=True)
         meshes = []
         for mpm_entity in self.sim.mpm_solver.entities:
             for env_i in envs_idx:
                 idx = self.rendered_envs_idx[env_i]
                 if mpm_entity.surface.vis_mode == "recon":
                     mesh = pu.particles_to_mesh(
-                        positions=particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx][
-                            active_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
+                        positions=particles_all[idx, mpm_entity.particle_start : mpm_entity.particle_end][
+                            active_all[idx, mpm_entity.particle_start : mpm_entity.particle_end]
                         ],
                         radius=self.sim.mpm_solver.particle_radius,
                         backend=mpm_entity.surface.recon_backend,
@@ -821,7 +822,7 @@ class RasterizerContext:
                     mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
                     meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), mpm_entity.idx))
                 elif mpm_entity.surface.vis_mode == "visual":
-                    mpm_entity._vmesh.trimesh.vertices = vverts_all[mpm_entity.vvert_start : mpm_entity.vvert_end, idx]
+                    mpm_entity._vmesh.trimesh.vertices = vverts_all[idx, mpm_entity.vvert_start : mpm_entity.vvert_end]
                     mesh = pyrender.Mesh.from_trimesh(
                         mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth, envs=env_i
                     )
@@ -869,12 +870,12 @@ class RasterizerContext:
     def update_sph(self):
         if self.sim.sph_solver.is_active:
             if any(sph_entity.surface.vis_mode == "particle" for sph_entity in self.sim.sph_solver.entities):
-                particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
+                particles_all = qd_to_numpy(self.sim.sph_solver.sph_state.particles_render.pos, transpose=True)
                 for sph_entity in self.sim.sph_solver.entities:
                     if sph_entity.surface.vis_mode == "particle":
                         for idx in self.rendered_envs_idx:
                             tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_all[sph_entity.particle_start : sph_entity.particle_end, idx]
+                            tfs[:, :3, 3] = particles_all[idx, sph_entity.particle_start : sph_entity.particle_end]
 
                             node = self.static_nodes[(idx, sph_entity.uid)]
                             self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
@@ -886,8 +887,9 @@ class RasterizerContext:
 
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
-        particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.sph_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        particles_render = self.sim.sph_solver.sph_state.particles_render
+        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
+        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
         meshes = []
         for sph_entity in self.sim.sph_solver.entities:
             if sph_entity.surface.vis_mode != "recon":
@@ -895,8 +897,8 @@ class RasterizerContext:
             for env_i in envs_idx:
                 idx = self.rendered_envs_idx[env_i]
                 mesh = pu.particles_to_mesh(
-                    positions=particles_all[sph_entity.particle_start : sph_entity.particle_end, idx][
-                        active_all[sph_entity.particle_start : sph_entity.particle_end, idx]
+                    positions=particles_all[idx, sph_entity.particle_start : sph_entity.particle_end][
+                        active_all[idx, sph_entity.particle_start : sph_entity.particle_end]
                     ],
                     radius=self.sim.sph_solver.particle_radius,
                     backend=sph_entity.surface.recon_backend,
@@ -974,14 +976,14 @@ class RasterizerContext:
 
     def update_pbd(self):
         if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
-            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos)
+            particles_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.particles_render.pos, transpose=True)
+            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.particles_render.vel, transpose=True)
+            vverts_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.vverts_render.pos, transpose=True)
             for pbd_entity in self.sim.pbd_solver.entities:
                 for idx in self.rendered_envs_idx:
-                    particles_env = particles_all[:, idx]
-                    particles_vel_env = particles_vel_all[:, idx]
-                    vverts_env = vverts_all[:, idx]
+                    particles_env = particles_all[idx]
+                    particles_vel_env = particles_vel_all[idx]
+                    vverts_env = vverts_all[idx]
 
                     # TODO: need to support multi-env visulaization for tet mode (it's using static node)
                     if pbd_entity.surface.vis_mode == "particle":
@@ -1020,16 +1022,17 @@ class RasterizerContext:
 
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
-        particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        particles_render = self.sim.pbd_solver.pbd_state.particles_render
+        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
+        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
         meshes = []
         for pbd_entity in self.sim.pbd_solver.entities:
             if pbd_entity.surface.vis_mode != "recon":
                 continue
             for env_i in envs_idx:
                 idx = self.rendered_envs_idx[env_i]
-                positions = particles_all[pbd_entity.particle_start : pbd_entity.particle_end, idx][
-                    active_all[pbd_entity.particle_start : pbd_entity.particle_end, idx]
+                positions = particles_all[idx, pbd_entity.particle_start : pbd_entity.particle_end][
+                    active_all[idx, pbd_entity.particle_start : pbd_entity.particle_end]
                 ]
                 mesh = pu.particles_to_mesh(
                     positions=positions,

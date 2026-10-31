@@ -1,4 +1,3 @@
-import dataclasses
 from enum import IntEnum
 
 import numpy as np
@@ -1565,22 +1564,820 @@ class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
 GeomsInitAABB = qd.Tensor
 
 
+# =========================================== Particle solvers ===========================================
+
+
+# Sizes of the particle solvers: the particles, the slots of the hash grid and the support particles of a visual vertex
+PARTICLES = Size("particles")
+HASH_SLOTS = Size("hash_slots")
+VVERT_SUPPORTS = Size("vvert_supports")
+
+
+class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
+    """
+    The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
+
+    A cell of integer coordinates hashes to one of the slots, whose particles take the indices from `slot_start` to
+    `slot_start + slot_size` once sorted (see func_hash_compute_reordered_idx in genesis/utils/geom.py).
+    """
+
+    slot_size: qd.Tensor = field(int)
+    slot_start: qd.Tensor = field(int)
+    cur_cnt: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.SCRATCH)
+    cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
+    grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
+
+
+class CubeBoundaryBox(Data, kind=DataKind.CONSTANT, shape=()):
+    """An axis-aligned box confining the particles, which bounce off its walls with the given restitution."""
+
+    lower: qd.Tensor = field((float, 3))
+    upper: qd.Tensor = field((float, 3))
+    restitution: qd.Tensor = field(float)
+
+
+class Particles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
+    """
+    Runtime state shared by the particles of every particle-based solver, one value per particle and environment.
+
+    The struct of each solver extends it with its own fields, and the accessors of 'ParticleSolver' take any of them.
+    """
+
+    pos: qd.Tensor = field((float, 3))
+    vel: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
+
+
+class ParticlesParams(Data, kind=DataKind.CONSTANT, shape=(PARTICLES,)):
+    """Model parameters shared by the particles of every particle-based solver, one value per particle."""
+
+    mass: qd.Tensor = field(float)
+
+
+class ParticlesRender(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
+    """The particles as drawn: their position and velocity, an inactive particle moved out of sight."""
+
+    pos: qd.Tensor = field((float, 3))
+    vel: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
+
+
+class VVertsSupport(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
+    """The visual vertices skinned by particles: each one the weighted sum of the positions of its support particles."""
+
+    support_idxs: qd.Tensor = field((int, VVERT_SUPPORTS))
+    support_weights: qd.Tensor = field((float, VVERT_SUPPORTS))
+
+
+class VVertsRender(Data, kind=DataKind.SCRATCH, shape=(VVERTS, ENVS)):
+    """The visual vertices as drawn, active when their first support particle is."""
+
+    pos: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
+
+
+# =========================================== PBDSolver ===========================================
+
+
+class PBDParticles(Particles):
+    """
+    Runtime state of the PBD particles, one value per particle and environment.
+
+    A particle that is not `free` follows the user or a rigid link alone. `ipos` is the position at the start of the
+    substep, `dpos` the correction the constraint projections accumulate, and `lam` the multiplier of the density
+    constraint. `reordered_idx` is the index of the particle once sorted by hash grid cell.
+    """
+
+    free: qd.Tensor = field(bool)
+    ipos: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    dpos: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    lam: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    rho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    reordered_idx: qd.Tensor = field(int, kind=DataKind.DERIVED)
+
+
+class PBDParticlesParams(ParticlesParams):
+    """Model parameters of the PBD particles, one value per particle (and per environment once sorted)."""
+
+    pos_rest: qd.Tensor = field((float, 3))
+    rho_rest: qd.Tensor = field(float)
+    material_type: qd.Tensor = field(int)
+    mu_s: qd.Tensor = field(float)
+    mu_k: qd.Tensor = field(float)
+    air_resistance: qd.Tensor = field(float)
+    density_relaxation: qd.Tensor = field(float)
+    viscosity_relaxation: qd.Tensor = field(float)
+
+
+# Sizes of the PBD solver: its bending constraints and its volume constraints
+INNER_EDGES = Size("inner_edges")
+ELEMS = Size("elems")
+
+
+class PBDEdges(Data, kind=DataKind.CONSTANT, shape=(EDGES,)):
+    """The stretch constraints, one per edge between the particles `v1` and `v2`."""
+
+    len_rest: qd.Tensor = field(float)
+    stretch_compliance: qd.Tensor = field(float)
+    stretch_relaxation: qd.Tensor = field(float)
+    v1: qd.Tensor = field(int)
+    v2: qd.Tensor = field(int)
+
+
+class PBDInnerEdges(Data, kind=DataKind.CONSTANT, shape=(INNER_EDGES,)):
+    """The bending constraints, one per edge `v1`-`v2` shared by the triangles `v1, v2, v3` and `v1, v2, v4`."""
+
+    len_rest: qd.Tensor = field(float)
+    bending_compliance: qd.Tensor = field(float)
+    bending_relaxation: qd.Tensor = field(float)
+    v1: qd.Tensor = field(int)
+    v2: qd.Tensor = field(int)
+    v3: qd.Tensor = field(int)
+    v4: qd.Tensor = field(int)
+
+
+class PBDElems(Data, kind=DataKind.CONSTANT, shape=(ELEMS,)):
+    """The volume constraints, one per tetrahedron of the particles `v1` to `v4`."""
+
+    vol_rest: qd.Tensor = field(float)
+    volume_compliance: qd.Tensor = field(float)
+    volume_relaxation: qd.Tensor = field(float)
+    v1: qd.Tensor = field(int)
+    v2: qd.Tensor = field(int)
+    v3: qd.Tensor = field(int)
+    v4: qd.Tensor = field(int)
+
+
+class PBDState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the PBD solver.
+
+    The constraint projections that look for neighbours run on the copies of the particles sorted by hash grid cell,
+    `particles_reordered` and `particles_info_reordered`, which the particles take back at the end of the substep.
+    """
+
+    particles: PBDParticles
+    particles_reordered: PBDParticles = field(kind=DataKind.SCRATCH)
+    particles_info_reordered: PBDParticlesParams = field(shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
+    particles_render: ParticlesRender
+    vverts_render: VVertsRender
+
+
+class PBDInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the PBD solver.
+
+    `dist_scale` maps a distance between particles to the unit support of the smoothing kernels.
+    """
+
+    particles: PBDParticlesParams
+    edges: PBDEdges
+    inner_edges: PBDInnerEdges
+    elems: PBDElems
+    vverts: VVertsSupport
+    vverts_uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
+    vfaces_indices: qd.Tensor = field((int, 3), shape=(VFACES,))
+    boundary: CubeBoundaryBox
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float, shape=())
+    particle_size: qd.Tensor = field(float, shape=())
+    dist_scale: qd.Tensor = field(float, shape=())
+    EPS: qd.Tensor = field(float, shape=())
+
+
+# =========================================== SPHSolver ===========================================
+
+
+class SPHParticles(Particles):
+    """
+    Runtime state of the SPH particles, one value per particle and environment.
+
+    `p` is the pressure, `dfsph_factor` the factor of the divergence-free and density solves of divergence-free smoothed
+    particle hydrodynamics (DFSPH), and `drho` the rate of change of the density they correct. `reordered_idx` is the
+    index of the particle once sorted by hash grid cell.
+    """
+
+    acc: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    rho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    p: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    dfsph_factor: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    drho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    reordered_idx: qd.Tensor = field(int, kind=DataKind.DERIVED)
+
+
+class SPHParticlesParams(ParticlesParams):
+    """
+    Model parameters of the SPH particles, one value per particle (and per environment once sorted).
+
+    `rho` is the rest density, `stiffness` and `exponent` the parameters of the equation of state, `mu` the viscosity
+    and `gamma` the surface tension.
+    """
+
+    rho: qd.Tensor = field(float)
+    stiffness: qd.Tensor = field(float)
+    exponent: qd.Tensor = field(float)
+    mu: qd.Tensor = field(float)
+    gamma: qd.Tensor = field(float)
+
+
+class SPHState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the SPH solver.
+
+    The substep runs on the copies of the particles sorted by hash grid cell, `particles_reordered` and
+    `particles_info_reordered`, which the particles take back at its end.
+    """
+
+    particles: SPHParticles
+    particles_reordered: SPHParticles = field(kind=DataKind.SCRATCH)
+    particles_info_reordered: SPHParticlesParams = field(shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
+    particles_render: ParticlesRender
+
+
+class SPHInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the SPH solver.
+
+    `support_radius` is the radius of the smoothing kernels, `particle_volume` the volume a particle stands for, and
+    `density0` the rest density the incompressibility solves of divergence-free smoothed particle hydrodynamics (DFSPH)
+    target.
+    """
+
+    particles: SPHParticlesParams
+    boundary: CubeBoundaryBox
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float, shape=())
+    particle_size: qd.Tensor = field(float, shape=())
+    particle_volume: qd.Tensor = field(float, shape=())
+    support_radius: qd.Tensor = field(float, shape=())
+    density0: qd.Tensor = field(float, shape=())
+
+
+# =========================================== SFSolver ===========================================
+
+
+# Sizes of the stable fluid: the cells along each axis of its grid, and its jets
+SF_GRID = Size("sf_grid")
+JETS = Size("jets")
+
+
+class SFState(Data, kind=DataKind.STATE, shape=(SF_GRID, SF_GRID, SF_GRID)):
+    """
+    Runtime state of the stable fluid, one value per cell of its grid.
+
+    `smoke` holds the concentration of the smoke of each jet. `pressure` holds the two buffers the Jacobi iterations of
+    the pressure projection alternate between, the first one keeping the pressure of the last substep as warm start.
+    """
+
+    vel: qd.Tensor = field((float, 3))
+    vel_advected: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    div: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    pressure: qd.Tensor = field(float, shape=(2, SF_GRID, SF_GRID, SF_GRID))
+    smoke: qd.Tensor = field((float, JETS))
+
+
+class SFInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """Model parameters of the stable fluid: the jets inject their smoke at speed `inlet_s`, which `decay` fades."""
+
+    substep_dt: qd.Tensor = field(float)
+    inlet_s: qd.Tensor = field(float)
+    decay: qd.Tensor = field(float)
+
+
+# =========================================== MPMSolver ===========================================
+
+
+# The frames of a step the differentiable MPM and FEM solvers keep, and the cells of the grid of the material point
+# method (MPM) solver along each axis
+FRAMES = Size("frames")
+GRID_X = Size("grid_x")
+GRID_Y = Size("grid_y")
+GRID_Z = Size("grid_z")
+# The scratch of the sparse reset of the grid, without gradient alone (see MPMGrid)
+SPARSE_GRID_RESET = Label("sparse_grid_reset")
+# The thin rigid geoms between the particles and the cells of their stencil (see MPMCPIC)
+CPIC = Label("cpic")
+
+
+class MPMParticles(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):
+    """
+    Runtime state of the material point method (MPM) particles, one value per frame of a step, particle and environment.
+
+    `C` is the affine velocity field, `F` the deformation gradient, `Jp` the plastic volume ratio and `actu` the
+    actuation of the muscles. `F_tmp` is the deformation gradient advected over the substep, before the plasticity of
+    the material applies, and `U`, `S`, `V` its singular value decomposition.
+    """
+
+    pos: qd.Tensor = field((float, 3), grad=True)
+    vel: qd.Tensor = field((float, 3), grad=True)
+    C: qd.Tensor = field((float, (3, 3)), grad=True)
+    F: qd.Tensor = field((float, (3, 3)), grad=True)
+    F_tmp: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
+    U: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
+    V: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
+    S: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
+    actu: qd.Tensor = field(float, grad=True)
+    Jp: qd.Tensor = field(float, grad=True)
+    is_active: qd.Tensor = field(bool)
+
+
+class MPMParticlesParams(Data, kind=DataKind.INFO, shape=(PARTICLES,)):
+    """
+    Model parameters of the material point method (MPM) particles, one value per particle.
+
+    `default_Jp` is the plastic volume ratio a particle takes back when its position is set, and `is_free` whether it
+    moves or acts as a boundary condition of the grid.
+    """
+
+    material_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    mass: qd.Tensor = field(float, kind=DataKind.CONSTANT)
+    default_Jp: qd.Tensor = field(float, kind=DataKind.CONSTANT)
+    is_free: qd.Tensor = field(bool)
+    muscle_group: qd.Tensor = field(int)
+    muscle_direction: qd.Tensor = field((float, 3))
+
+
+class MPMGrid(Data, kind=DataKind.SCRATCH, shape=(FRAMES - 1, GRID_X, GRID_Y, GRID_Z, ENVS)):
+    """
+    The background grid of the material point method (MPM), one value per frame of a step, cell and environment.
+
+    `vel_in` holds the momentum the particles scatter, and `vel_out` the velocity they gather back once the grid is
+    updated. Without gradient, the grid of a substep is zeroed right after use (the backward pass reads the grid of
+    every substep back), the cells to zero being listed once across the environments: `dirty_flag` marks a listed cell,
+    and `dirty_list` holds the flat indices of the `dirty_count` listed cells, at most one per cell of the grid.
+    """
+
+    mass: qd.Tensor = field(float, grad=True)
+    vel_in: qd.Tensor = field((float, 3), grad=True)
+    vel_out: qd.Tensor = field((float, 3), grad=True)
+    dirty_flag: qd.Tensor = field(int, shape=(GRID_X, GRID_Y, GRID_Z), labels=SPARSE_GRID_RESET)
+    dirty_list: qd.Tensor = field(int, shape=(GRID_X * GRID_Y * GRID_Z,), labels=SPARSE_GRID_RESET)
+    dirty_count: qd.Tensor = field(int, shape=(1,), labels=SPARSE_GRID_RESET)
+
+
+class MPMCPIC(Data, kind=DataKind.STATE):
+    """
+    The thin rigid geoms separating each particle from the cells of its stencil, for Compatible Particle-In-Cell (CPIC).
+
+    `rigid_normal` is the last outward normal of each geom seen by each particle, and `cells_geom_idx` the geom
+    separating each particle from each cell of its stencil, -1 for none.
+    """
+
+    rigid_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, GEOMS, ENVS), labels=CPIC)
+    cells_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH, labels=CPIC)
+
+
+class MPMState(Data, kind=DataKind.STATE):
+    """Runtime state of the material point method (MPM) solver."""
+
+    particles: MPMParticles
+    grid: MPMGrid
+    cpic: MPMCPIC
+    particles_render: ParticlesRender
+    vverts_render: VVertsRender
+    # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
+
+
+class MPMParticleConstraintsInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
+    """
+    The critically damped springs pulling particles toward targets, one per particle and environment.
+
+    A particle attached to a link (`link_idx` other than -1) follows the point `link_local_pos` of the frame of the
+    link, the others the fixed point `target_pos`.
+    """
+
+    is_constrained: qd.Tensor = field(bool)
+    target_pos: qd.Tensor = field((float, 3))
+    stiffness: qd.Tensor = field(float)
+    link_idx: qd.Tensor = field(int)
+    link_local_pos: qd.Tensor = field((float, 3))
+
+
+class MPMInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the material point method (MPM) solver.
+
+    The grid spans the cells from `grid_offset` on, of size `dx`. `particle_volume` is the volume a particle stands
+    for, scaled up by `particle_volume_scale` for numerical robustness, which the masses exchanged with the other
+    solvers divide out.
+    """
+
+    particles: MPMParticlesParams
+    vverts: VVertsSupport
+    boundary: CubeBoundaryBox
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float, shape=())
+    dx: qd.Tensor = field(float, shape=())
+    inv_dx: qd.Tensor = field(float, shape=())
+    grid_offset: qd.Tensor = field((int, 3), shape=())
+    particle_volume: qd.Tensor = field(float, shape=())
+    particle_volume_scale: qd.Tensor = field(float, shape=())
+
+
+class MPMStaticConfig(StaticConfig):
+    # Whether the singular value decomposition of the deformation gradient is computed, which a material reading it
+    # and the backward pass require. Otherwise J is the determinant of the advected deformation gradient.
+    is_svd_needed: bool
+    # Whether the particles and the cells of their stencil are checked for a thin rigid geom between them (see MPMCPIC)
+    enable_CPIC: bool
+    # Whether the grid of every substep is kept for the backward pass, instead of being zeroed sparsely (see MPMGrid)
+    requires_grad: bool
+
+
+# =========================================== Fixed-order sums ===========================================
+
+
+# Most chunks the terms of the items of one environment split into for a fixed-order sum (see FixedOrderSums). It
+# bounds the serial sum over the partial sums that closes the sum, while leaving enough threads to the chunks for many
+# thousand items.
+SUM_MAX_CHUNKS = 256
+
+
+# The items of a fixed-order sum, its sums, and the chunks of items it sums apart (see FixedOrderSums)
+SUM_ITEMS = Size("sum_items")
+SUMS = Size("sums")
+SUM_CHUNKS = Size("sum_chunks")
+
+
+class FixedOrderSums(Data, kind=DataKind.SCRATCH):
+    """
+    The terms of fixed-order sums over the items of each environment, and their partial sums.
+
+    A sum runs in three steps, so that it is bitwise reproducible whatever the scheduling of the threads. Each item
+    writes its term of sum k into `terms[i_item, k, i_b]`, func_reduce_terms in genesis/utils/linalg.py sums the terms
+    over contiguous chunks of the items into `partials[i_chunk, k, i_b]`, and func_sum_chunks sums the partials of an
+    environment in order. Items no more numerous than SUM_MAX_CHUNKS are their own chunks.
+    """
+
+    terms: qd.Tensor = field(float, shape=(SUM_ITEMS, SUMS, ENVS))
+    partials: qd.Tensor = field(float, shape=(SUM_CHUNKS, SUMS, ENVS))
+
+    @staticmethod
+    def sizes(n_items: int, n_sums: int) -> dict[str, int]:
+        """Return the sizes of the sums over some items, under the name of their member (see 'sizes' in Data)."""
+        return dict(sum_items=n_items, sums=n_sums, sum_chunks=min(n_items, SUM_MAX_CHUNKS))
+
+
+# =========================================== FEMSolver ===========================================
+
+
+# Sizes of the FEM solver: the vertices and the elements, the frames of the element contributions of the explicit
+# solver (one per substep with gradients), the corners of the elements, and the surface triangles with their vertices
+# and elements, its states spanning the frames of a step (see FRAMES)
+VERTICES = Size("vertices")
+ELEMENTS = Size("elements")
+CORNER_FRAMES = Size("corner_frames")
+CORNERS = Size("corners")
+SURFACES = Size("surfaces")
+SURFACE_VERTICES = Size("surface_vertices")
+SURFACE_ELEMENTS = Size("surface_elements")
+
+
+class FloorBoundaryPlane(Data, kind=DataKind.CONSTANT, shape=()):
+    """The floor of the FEM solver, at a height and with a restitution (see FloorBoundary in boundaries.py)."""
+
+    height: qd.Tensor = field(float)
+    restitution: qd.Tensor = field(float)
+
+
+class FEMVerticesKinematics(Data, kind=DataKind.STATE, shape=(FRAMES, VERTICES, ENVS)):
+    """The position and velocity of the vertices, one per frame of the substeps of a step, vertex and environment."""
+
+    pos: qd.Tensor = field((float, 3), grad=True)
+    vel: qd.Tensor = field((float, 3), grad=True)
+
+
+class FEMElements(Data, kind=DataKind.CONSTANT, shape=(ELEMENTS,)):
+    """
+    Model parameters of the elements, one value per element.
+
+    `el2v` holds the four vertices of an element, `B` the inverse of its rest shape matrix, `V` its rest volume and
+    `mu`, `lam` its Lame parameters. The masses and volumes `*_scaled` are scaled up by `vol_scale` (see FEMInfo).
+    `material_idx` is the index of the material (see FEMMaterialDispatcher in fem_solver.py).
+    """
+
+    el2v: qd.Tensor = field((int, 4))
+    mu: qd.Tensor = field(float)
+    lam: qd.Tensor = field(float)
+    mass_scaled: qd.Tensor = field(float)
+    material_idx: qd.Tensor = field(int)
+    B: qd.Tensor = field((float, (3, 3)))
+    V: qd.Tensor = field(float)
+    V_scaled: qd.Tensor = field(float)
+    friction_mu: qd.Tensor = field(float)
+    muscle_group: qd.Tensor = field(int, kind=DataKind.INFO)
+    muscle_direction: qd.Tensor = field((float, 3), kind=DataKind.INFO)
+
+
+class FEMVerticesProperties(Data, kind=DataKind.CONSTANT, shape=(VERTICES,)):
+    """
+    Model parameters of the vertices.
+
+    `mass`, `mass_inv`, `mass_over_dt2` and `friction_mu` hold one value per vertex, the mass of a vertex lumping a
+    quarter of the mass of the elements it belongs to. `corner` lists the corners of the elements vertex after vertex,
+    each one encoded as i_e * 4 + i_corner in increasing order, the corners touching vertex i_v being
+    `corner[corner_start[i_v]:corner_start[i_v + 1]]`.
+    """
+
+    mass: qd.Tensor = field(float)
+    mass_inv: qd.Tensor = field(float)
+    mass_over_dt2: qd.Tensor = field(float)
+    friction_mu: qd.Tensor = field(float)
+    corner_start: qd.Tensor = field(int, shape=(VERTICES + 1,))
+    corner: qd.Tensor = field(int, shape=(CORNERS,))
+
+
+class FEMSurface(Data, kind=DataKind.CONSTANT):
+    """
+    The surface of the entities, which the other solvers couple with.
+
+    `tri2v` holds the vertices of each surface triangle and `tri2el` its element. `vertices_idx` lists the vertices of
+    the surface triangles, `vertices_mass` their lumped surface mass, and `elements_idx` the elements touching them.
+    """
+
+    tri2v: qd.Tensor = field((int, 3), shape=(SURFACES,))
+    tri2el: qd.Tensor = field(int, shape=(SURFACES,))
+    vertices_idx: qd.Tensor = field(int, shape=(SURFACE_VERTICES,))
+    vertices_mass: qd.Tensor = field(float, shape=(SURFACE_VERTICES,))
+    elements_idx: qd.Tensor = field(int, shape=(SURFACE_ELEMENTS,))
+
+
+class FEMVVerts(Data, kind=DataKind.CONSTANT):
+    """The visual vertices, each one drawn at the position of the simulated vertex `vert_idx`, and their faces."""
+
+    vert_idx: qd.Tensor = field(int, shape=(VVERTS,))
+    uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
+    vfaces_indices: qd.Tensor = field((int, 3), shape=(VFACES,))
+
+
+class FEMExplicitCorners(Data, kind=DataKind.SCRATCH, shape=(CORNER_FRAMES, ELEMENTS, 4, ENVS)):
+    """
+    The contribution of each element to each of its four vertices, for the explicit solver.
+
+    A vertex sums the contributions of its corners in the order of FEMVerticesProperties, so that the result does not
+    depend on the scheduling of the threads. With gradients, every substep of a step writes its own, which the
+    backward pass reads back.
+    """
+
+    force: qd.Tensor = field((float, 3), grad=True)
+    dv: qd.Tensor = field((float, 3), grad=True)
+
+
+class FEMImplicitCorners(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, 4, ENVS)):
+    """The contribution of each element to the force, the diagonal block of the Hessian and A * p of its vertices."""
+
+    force: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    Ap: qd.Tensor = field((float, 3))
+
+
+class FEMNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The scratch of the Newton solve of the implicit solver, its conjugate gradient and its line search.
+
+    Per element: the elastic `energy` density, its `gradient` with respect to the deformation gradient, the blocks
+    `hessian[i, j]` of its Hessian, and the `rotation` the linear corotated materials linearize around. Per vertex: the
+    `inertia` target, the `diag3x3` block of the Hessian and its inverse `prec`, the conjugate gradient vectors and the
+    position `x_prev` the line search starts from. Per environment: whether the conjugate gradient and the line search
+    are still running, and their scalars.
+
+    The Hessian of a material whose Hessian does not depend on the deformation is written once and read by every later
+    solve, hence its kind.
+    """
+
+    energy: qd.Tensor = field(float, shape=(ELEMENTS, ENVS))
+    gradient: qd.Tensor = field((float, (3, 3)), shape=(ELEMENTS, ENVS))
+    hessian: qd.Tensor = field((float, (3, 3)), shape=(3, 3, ELEMENTS, ENVS), kind=DataKind.STATE)
+    rotation: qd.Tensor = field((float, (3, 3)), shape=(ELEMENTS, ENVS))
+    inertia: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    prec: qd.Tensor = field((float, (3, 3)))
+    x: qd.Tensor = field((float, 3))
+    r: qd.Tensor = field((float, 3))
+    z: qd.Tensor = field((float, 3))
+    p: qd.Tensor = field((float, 3))
+    Ap: qd.Tensor = field((float, 3))
+    x_prev: qd.Tensor = field((float, 3))
+    is_pcg_active: qd.Tensor = field(bool, shape=(ENVS,))
+    is_linesearch_active: qd.Tensor = field(bool, shape=(ENVS,))
+    rTr: qd.Tensor = field(float, shape=(ENVS,))
+    rTz: qd.Tensor = field(float, shape=(ENVS,))
+    rTr_new: qd.Tensor = field(float, shape=(ENVS,))
+    rTz_new: qd.Tensor = field(float, shape=(ENVS,))
+    pTAp: qd.Tensor = field(float, shape=(ENVS,))
+    alpha: qd.Tensor = field(float, shape=(ENVS,))
+    beta: qd.Tensor = field(float, shape=(ENVS,))
+    prev_energy: qd.Tensor = field(float, shape=(ENVS,))
+    linesearch_energy: qd.Tensor = field(float, shape=(ENVS,))
+    step_size: qd.Tensor = field(float, shape=(ENVS,))
+    m: qd.Tensor = field(float, shape=(ENVS,))
+    corners: FEMImplicitCorners
+    sums_v: FixedOrderSums
+    sums_el: FixedOrderSums
+
+
+class FEMState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the FEM solver.
+
+    `vertices` and `actu`, the actuation of each element, hold one frame per substep of a step. `force` is the internal
+    force of each vertex, which the last substep computed.
+    """
+
+    vertices: FEMVerticesKinematics
+    actu: qd.Tensor = field(float, shape=(FRAMES, ELEMENTS, ENVS), grad=True)
+    force: qd.Tensor = field((float, 3), shape=(VERTICES, ENVS), kind=DataKind.DERIVED)
+    explicit_corners: FEMExplicitCorners
+    newton: FEMNewtonScratch = field(kind=DataKind.SCRATCH)
+    vverts_render: qd.Tensor = field((float, 3), shape=(VVERTS, ENVS), kind=DataKind.SCRATCH)
+
+
+class FEMVertexConstraintsInfo(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
+    """
+    The constraints of the vertices, one per vertex and environment.
+
+    A constrained vertex is held at `target_pos`, or pulled toward it by a critically damped spring of the given
+    stiffness when the constraint is soft. A vertex following the link `link_idx` (-1 for none) keeps the offset
+    `link_offset_pos` from it, rotated by the rotation of the link since `link_init_quat`.
+    """
+
+    is_constrained: qd.Tensor = field(bool)
+    target_pos: qd.Tensor = field((float, 3))
+    is_soft_constraint: qd.Tensor = field(bool)
+    stiffness: qd.Tensor = field(float)
+    link_idx: qd.Tensor = field(int)
+    link_offset_pos: qd.Tensor = field((float, 3))
+    link_init_quat: qd.Tensor = field((float, 4))
+
+
+class FEMInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """
+    Model parameters of the FEM solver.
+
+    `damping` damps the velocity of the explicit solver, and `damping_alpha`, `damping_beta` are the Rayleigh damping
+    coefficients of the implicit one, proportional to the mass and to the stiffness. `vol_scale` scales the volumes up
+    for numerical robustness, which the masses exchanged with the other solvers divide out.
+    """
+
+    elements: FEMElements
+    vertices: FEMVerticesProperties
+    surface: FEMSurface
+    vverts: FEMVVerts
+    boundary: FloorBoundaryPlane
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float)
+    damping: qd.Tensor = field(float)
+    damping_alpha: qd.Tensor = field(float)
+    damping_beta: qd.Tensor = field(float)
+    pcg_threshold: qd.Tensor = field(float)
+    linesearch_c: qd.Tensor = field(float)
+    linesearch_tau: qd.Tensor = field(float)
+    vol_scale: qd.Tensor = field(float)
+    EPS: qd.Tensor = field(float)
+
+
+class FEMStaticConfig(StaticConfig):
+    # Whether the vertices of the implicit solver may be constrained, which drops their rows from its Newton solve
+    enable_vertex_constraints: bool
+    # Whether a material linearizes its energy around the rotation of the deformation gradient of each element
+    has_rotation: bool
+    # Whether every substep of a step keeps its own element contributions (see FEMExplicitCorners)
+    requires_grad: bool
+
+
+# =========================================== LegacyCoupler ===========================================
+
+
+# The particles of the position based dynamics (PBD) solver a rigid link carries (see LegacyCouplerInfo)
+RIGID_PBD = Label("rigid_pbd")
+
+
+class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT, shape=(PARTICLES, ENVS)):
+    """
+    Model parameters of the legacy coupler.
+
+    A material point method (MPM) cell exchanges momentum with the smoothed particle hydrodynamics (SPH) and position
+    based dynamics (PBD) particles of the cube of `mpm_sph_stencil_size` and `mpm_pbd_stencil_size` cells of their hash
+    grid around its lower corner. A PBD particle carried by the link `pbd_attach_link_idx` (-1 for none) stays at the
+    point `pbd_attach_local_pos` of the frame of the link.
+    """
+
+    mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
+    mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
+    pbd_attach_link_idx: qd.Tensor = field(int, kind=DataKind.INFO, labels=RIGID_PBD)
+    pbd_attach_local_pos: qd.Tensor = field((float, 3), kind=DataKind.INFO, labels=RIGID_PBD)
+    EPS: qd.Tensor = field(float, shape=())
+
+
+class LegacyCouplerStaticConfig(StaticConfig):
+    # The pairs of solvers coupled with each other
+    enable_rigid_mpm: bool
+    enable_rigid_sph: bool
+    enable_rigid_pbd: bool
+    enable_rigid_fem: bool
+    enable_mpm_sph: bool
+    enable_mpm_pbd: bool
+    enable_fem_mpm: bool
+    enable_fem_sph: bool
+
+
+# =========================================== HybridEntity ===========================================
+
+
+# The muscle groups of the soft part of a hybrid entity
+GROUPS = Size("groups")
+
+
+class HybridSoftPartInfo(Data, kind=DataKind.CONSTANT, shape=(GROUPS,)):
+    """
+    The binding of the particles of the soft part of a hybrid entity to the links of its rigid part.
+
+    The particles of each muscle group follow the geom `groups_geom_idx` of the link `groups_link_idx`. The rest
+    position `particles_init_pos` of each particle is expressed in the frame `groups_frame_pos`, `groups_frame_quat` of
+    its group.
+    """
+
+    groups_link_idx: qd.Tensor = field(int)
+    groups_geom_idx: qd.Tensor = field(int)
+    groups_frame_pos: qd.Tensor = field((float, 3))
+    groups_frame_quat: qd.Tensor = field((float, 4))
+    particles_init_pos: qd.Tensor = field((float, 3), shape=(PARTICLES,))
+
+
+# ======================================= SEGMENT SORT =======================================
+
+
+class SEGMENT_SORT_KIND(IntEnum):
+    """The sort ordering the keys of a segment sort.
+
+    See genesis.utils.sort.
+    """
+
+    # The device-wide radix sort of quadrants over every key of the set (GPU, large segments)
+    DEVICE_RADIX = 0
+    # The rank of each key among the keys of its segment (small segments)
+    RANK = 1
+    # A radix sort per segment, its chunks in parallel (CPU, large segments)
+    SEGMENT_RADIX = 2
+
+
+@qd.data_oriented
+class SegmentSortStaticConfig(StaticConfig):
+    """The compile-time shape of a sort of 64-bit keys per segment.
+
+    See genesis.utils.sort.
+    """
+
+    # The bits a sort must order, a multiple of 16 up to 64
+    end_bit: int
+    # Scan depth of the device-wide radix sort (see quadrants.algorithms.sort), 1 to 8
+    log256_max_n: int
+    # SEGMENT_SORT_KIND
+    sort_kind: int
+    # Whether each key carries a value the sort moves along
+    has_values: bool
+
+
+# Sizes of a sort per segment: its segments, its keys, the slots of the device-wide radix sort and the chunks of the
+# radix sort per segment
+SORT_SEGMENTS = Size("sort_segments")
+SORT_KEYS = Size("sort_keys")
+SORT_SLOTS = Size("sort_slots")
+SORT_CHUNKS = Size("sort_chunks")
+# The values moved along the keys, and the scratch of each sort (see SEGMENT_SORT_KIND)
+SORT_VALUES = Label("sort_values")
+DEVICE_RADIX_SORT = Label("device_radix_sort")
+SEGMENT_RADIX_SORT = Label("segment_radix_sort")
+
+
+class SegmentSortBuffer(Data, kind=DataKind.SCRATCH, shape=(SORT_KEYS,)):
+    """The keys of a sort per segment, their values, the segment bounds and the scratch of the sort.
+
+    See genesis.utils.sort. The first n_keys keys are sorted, segment i_s holding the keys from segments_start[i_s] to
+    segments_start[i_s + 1].
+    """
+
+    keys: qd.Tensor = field(qd.u64)
+    values: qd.Tensor = field(int, labels=SORT_VALUES)
+    keys_scratch: qd.Tensor = field(qd.u64)
+    values_scratch: qd.Tensor = field(int, labels=SORT_VALUES)
+    segments_start: qd.Tensor = field(int, shape=(SORT_SEGMENTS + 1,))
+    sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
+    sort_hist: qd.Tensor = field(int, shape=(SORT_SEGMENTS, SORT_CHUNKS, 256), labels=SEGMENT_RADIX_SORT)
+    n_keys: qd.Tensor = field(int, shape=())
+
+
 # =========================================== BVH ===========================================
 
 
-class BVH_SORT_KIND(IntEnum):
-    """The sort ordering the leaf keys of a set of BVH trees (see genesis.engine.bvh)."""
-
-    # The device-wide radix sort of quadrants over every key of the set (GPU, large trees)
-    DEVICE_RADIX = 0
-    # The rank of each leaf among the keys of its tree (small trees)
-    RANK = 1
-    # A radix sort per tree, its chunks in parallel (CPU, large trees)
-    PER_TREE_RADIX = 2
-
-
 class BVH_FIT_KIND(IntEnum):
-    """The bottom-up fit of the node boxes of a set of BVH trees (see genesis.engine.bvh)."""
+    """The bottom-up fit of the node boxes of a BVH set.
+
+    See genesis.engine.bvh.
+    """
 
     # One thread per leaf walking to the root, the arrival counters sequentially consistent (CPU)
     LEAF_WALK = 0
@@ -1592,43 +2389,34 @@ class BVH_FIT_KIND(IntEnum):
 
 @qd.data_oriented
 class BVHStaticConfig(StaticConfig):
-    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH) (see genesis.engine.bvh).
+    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
 
-    A leaf key packs the tree, the morton code and the leaf index in that order, so one flat sort orders every tree.
+    See genesis.engine.bvh. The leaf keys pack the tree, the morton code and the leaf index in that order, so one flat
+    sort orders every tree.
     """
 
     # The bits of a morton code, three interleaved coordinates of the same width
     morton_bits: int
-    # The bits a sort must order, a multiple of 16 up to 64
-    end_bit: int
-    # Scan depth of the device-wide radix sort (see quadrants.algorithms.sort), 1 to 8
-    log256_max_n: int
-    # BVH_SORT_KIND
-    sort_kind: int
+    # The sort of the leaf keys, one segment per tree
+    sort_config: SegmentSortStaticConfig
     # BVH_FIT_KIND
     fit_kind: int
 
 
-# Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree, the slots of its
-# device-wide radix sort, the chunks of its per-tree radix sort and the lanes of its extent reduction
+# Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree and the lanes of its
+# extent reduction
 BVH_TREES = Size("bvh_trees")
 BVH_LEAVES = Size("bvh_leaves")
-SORT_SLOTS = Size("sort_slots")
-SORT_CHUNKS = Size("sort_chunks")
 EXTENT_LANES = Size("extent_lanes")
-# The (tree, leaf, query) triplets a box query of a BVH holds
-QUERY_RESULTS = Size("query_results")
-# The scratch of each sort and fit (see BVH_SORT_KIND and BVH_FIT_KIND)
-DEVICE_RADIX_SORT = Label("device_radix_sort")
-PER_TREE_RADIX_SORT = Label("per_tree_radix_sort")
+# The scratch of the fit sweeping the nodes level by level (see BVH_FIT_KIND)
 BLOCK_SWEEP_FIT = Label("block_sweep_fit")
 
 
 class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
     """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
 
-    The n_leaves - 1 internal nodes come first, then the leaves, so node n_leaves - 1 + i holds the i-th sorted leaf,
-    whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
+    See genesis.engine.bvh for the build. The n_leaves - 1 internal nodes come first, then the leaves, so node
+    n_leaves - 1 + i holds the i-th sorted leaf, whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
     """
 
     nodes_left: qd.Tensor = field(int)
@@ -1639,22 +2427,26 @@ class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES
 
 
 class BVHLeaves(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, BVH_LEAVES)):
-    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH), written before a build."""
+    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh. The caller writes them before a build, and a box query tests them against a tree.
+    """
 
     aabbs_min: qd.Tensor = field((float, 3))
     aabbs_max: qd.Tensor = field((float, 3))
 
 
 class BVHState(Data, kind=DataKind.SCRATCH):
-    """The linear bounding volume hierarchies (LBVH) of a set of trees, built by genesis.engine.bvh."""
+    """The linear bounding volume hierarchies (LBVH) of a set of trees.
 
+    A build (see genesis.engine.bvh) takes the boxes of the leaves (see BVHLeaves) and produces the tree a traversal
+    reads (see BVHTreeState), with the sort of the leaf keys (one segment per tree), the parent of each node and the
+    scratch of the extent and the fit.
+    """
+
+    sort: SegmentSortBuffer
     tree: BVHTreeState
     leaves: BVHLeaves
-    leaves_keys: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
-    keys_scratch: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
-    sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
-    sort_hist: qd.Tensor = field(int, shape=(BVH_TREES, SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
-    n_keys: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT)
     nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
     nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
     fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)
@@ -1662,6 +2454,12 @@ class BVHState(Data, kind=DataKind.SCRATCH):
     lanes_max: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
     trees_min: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
     trees_max: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+
+
+# The (tree, leaf, query) triplets a box query holds, and the leaves and the items a query filter reads
+QUERY_RESULTS = Size("query_results")
+FILTER_LEAVES = Size("filter_leaves")
+FILTER_ITEMS = Size("filter_items")
 
 
 class BVHQueryResults(Data, kind=DataKind.SCRATCH):
@@ -1674,26 +2472,396 @@ class BVHQueryResults(Data, kind=DataKind.SCRATCH):
     count: qd.Tensor = field(int, shape=(1,))
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHQueryState:
-    """A box query of a set of trees: the leaves tested, the trees traversed and the pairs found.
+class BVHQueryFilter(Data, kind=DataKind.CONSTANT):
+    """
+    The data the filter of a box query reads to drop the pairs it finds (see func_bvh_query_aabb in genesis.engine.bvh).
 
-    Leaf i_q of tree i_t of 'leaves' is tested against tree i_t of 'tree' (see func_bvh_query_leaves in
-    genesis.engine.bvh). It holds arrays of other structs, apart from its results.
+    `leaves_map` holds up to four items of each leaf, and `pairs_table` what the filter reads of each pair of items. A
+    kernel taking the filter passes none of its buffers under another argument, so the filter owns them. Every filter
+    is of this one type, since the funcs of a query take the filter data by its declared type.
     """
 
-    leaves: BVHLeaves
-    tree: BVHTreeState
-    results: BVHQueryResults
+    leaves_map: qd.Tensor = field((int, 4), shape=(FILTER_LEAVES,))
+    pairs_table: qd.Tensor = field(int, shape=(FILTER_ITEMS, FILTER_ITEMS))
 
 
 # =========================================== SAPCoupler ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SAPContactQueriesState:
-    """The box queries of the SAP coupler, one per contact handler traversing a tree (see SAPCoupler._init_bvh)."""
+# Most FEM vertices a contact pair of the SAP coupler applies its impulse to, the vertices of two tetrahedra. The
+# kernels read it as the size of the vector of slots of a pair (`fem_slots_vert` in SAPContactPairs), since a module
+# global read in a kernel breaks its fast cache.
+SAP_N_FEM_SLOTS = 8
 
-    fem_self: BVHQueryState
-    rigid_tri: BVHQueryState
-    rigid_tet: BVHQueryState
+
+# Sizes of the SAP coupler, besides the vertices and the elements of the FEM solver (see VERTICES): the tetrahedral
+# volume of the rigid geoms, the equality constraints of every environment and their chunks, the contact pairs, those
+# applying impulses to rigid dofs, the contact handlers, those applying impulses to rigid dofs, the vertex slots the
+# pairs apply to, the chunks of the pairs of a handler, the candidates of a handler, and the rows of the marching
+# tetrahedra tables
+SAP_VOLUME_VERTS = Size("volume_verts")
+SAP_VOLUME_ELEMS = Size("volume_elems")
+SAP_EQUALITIES = Size("equality_constraints")
+SAP_EQUALITY_CHUNKS = Size("equality_chunks")
+SAP_PAIRS = Size("contact_pairs")
+SAP_RIGID_PAIRS = Size("rigid_contact_pairs")
+SAP_HANDLERS = Size("handlers")
+SAP_RIGID_HANDLERS = Size("rigid_handlers")
+SAP_ENTRIES = Size("entries")
+SAP_PAIR_CHUNKS = Size("pair_chunks")
+SAP_CANDIDATES = Size("handler_candidates")
+SAP_MARCHING_TETS_CASES = Size("marching_tets_cases")
+SAP_TET_EDGES = Size("tet_edges")
+
+
+class SAPContactQueries(Data, kind=DataKind.SCRATCH):
+    """
+    The box queries of the contact handlers of the SAP coupler traversing a tree of SAPState.
+
+    The leaves of the surface tets of the FEM entities serve both the self-contact query and the query of the rigid
+    triangles. The filter of the self-contact query maps each leaf to the vertices of its tet, and the filter of the
+    rigid tets maps each leaf to its geom in its first item, its table holding the collision pair of each pair of geoms,
+    -1 for none (see collision_pair_idx in ColliderInfo). The query of the rigid triangles keeps every pair, its filter
+    reading nothing.
+    """
+
+    fem_self_results: BVHQueryResults
+    rigid_tri_results: BVHQueryResults
+    rigid_tet_results: BVHQueryResults
+    fem_self_filter: BVHQueryFilter
+    rigid_tri_filter: BVHQueryFilter
+    rigid_tet_filter: BVHQueryFilter
+
+
+class SAPHydroelasticFEM(Data, kind=DataKind.CONSTANT):
+    """The pressure field of the FEM entities for hydroelastic contact, its value at each vertex and its gradient in
+    each element."""
+
+    pressure: qd.Tensor = field(float, shape=(VERTICES,))
+    pressure_gradient: qd.Tensor = field((float, 3), shape=(ELEMENTS, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPRigidVolume(Data, kind=DataKind.CONSTANT):
+    """
+    The tetrahedral volume meshes of the rigid geoms for hydroelastic contact, and their pressure field.
+
+    The vertices move with their geom in every environment from their rest position `verts_rest`, and so does the
+    gradient of the pressure field in each element from `pressure_gradient_rest`.
+    """
+
+    verts_rest: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_VERTS,))
+    verts: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_VERTS, ENVS), kind=DataKind.SCRATCH)
+    elems: qd.Tensor = field((int, 4), shape=(SAP_VOLUME_ELEMS,))
+    verts_geom_idx: qd.Tensor = field(int, shape=(SAP_VOLUME_VERTS,))
+    elems_geom_idx: qd.Tensor = field(int, shape=(SAP_VOLUME_ELEMS,))
+    pressure: qd.Tensor = field(float, shape=(SAP_VOLUME_VERTS,))
+    pressure_gradient_rest: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_ELEMS,))
+    pressure_gradient: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_ELEMS, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The unknowns of the SAP solve at the FEM vertices, and the scratch of its conjugate gradient and line search.
+
+    `v` is the velocity being solved for, `v_diff` its change from the free velocity, `gradient` the gradient of the
+    cost and `impulse` the contact impulse. `corners` holds the elastic contribution of each element to each of its
+    four vertices, which the vertices sum in a fixed order (see FEMVerticesProperties).
+    """
+
+    v: qd.Tensor = field((float, 3))
+    v_diff: qd.Tensor = field((float, 3))
+    gradient: qd.Tensor = field((float, 3))
+    impulse: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    prec: qd.Tensor = field((float, (3, 3)))
+    x: qd.Tensor = field((float, 3))
+    r: qd.Tensor = field((float, 3))
+    z: qd.Tensor = field((float, 3))
+    p: qd.Tensor = field((float, 3))
+    Ap: qd.Tensor = field((float, 3))
+    x_prev: qd.Tensor = field((float, 3))
+    dp: qd.Tensor = field((float, 3))
+    corners: qd.Tensor = field((float, 3), shape=(ELEMENTS, 4, ENVS))
+    sums_v: FixedOrderSums
+    sums_el: FixedOrderSums
+
+
+class SAPRigidDofs(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
+    """The unknowns of the SAP solve at the rigid dofs, and the scratch of its conjugate gradient and line search (see
+    SAPFEMVertices)."""
+
+    v: qd.Tensor = field(float)
+    v_diff: qd.Tensor = field(float)
+    mass_v_diff: qd.Tensor = field(float)
+    gradient: qd.Tensor = field(float)
+    impulse: qd.Tensor = field(float)
+    x: qd.Tensor = field(float)
+    r: qd.Tensor = field(float)
+    z: qd.Tensor = field(float)
+    p: qd.Tensor = field(float)
+    Ap: qd.Tensor = field(float)
+    x_prev: qd.Tensor = field(float)
+    dp: qd.Tensor = field(float)
+    sums: FixedOrderSums
+
+
+class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """
+    The scalars of the SAP solve of each environment: its Newton iterations, its conjugate gradient and its exact line
+    search.
+
+    The line search finds the root of the derivative of the cost along the search direction by safeguarded Newton
+    steps within the bracket [`alpha_min`, `alpha_max`], `f` being that derivative scaled by `dell_scale`, unless the
+    slope at the start is small enough for the full step (`is_full_step`).
+    """
+
+    is_active: qd.Tensor = field(bool)
+    is_pcg_active: qd.Tensor = field(bool)
+    is_linesearch_active: qd.Tensor = field(bool)
+    is_full_step: qd.Tensor = field(bool)
+    gradient_norm: qd.Tensor = field(float)
+    momentum_norm: qd.Tensor = field(float)
+    impulse_norm: qd.Tensor = field(float)
+    rTr: qd.Tensor = field(float)
+    rTz: qd.Tensor = field(float)
+    rTr_new: qd.Tensor = field(float)
+    rTz_new: qd.Tensor = field(float)
+    pTAp: qd.Tensor = field(float)
+    alpha: qd.Tensor = field(float)
+    beta: qd.Tensor = field(float)
+    energy_prev: qd.Tensor = field(float)
+    step_size: qd.Tensor = field(float)
+    m: qd.Tensor = field(float)
+    dell_dalpha: qd.Tensor = field(float)
+    d2ellA_dalpha2: qd.Tensor = field(float)
+    d2ell_dalpha2: qd.Tensor = field(float)
+    dell_scale: qd.Tensor = field(float)
+    alpha_min: qd.Tensor = field(float)
+    alpha_max: qd.Tensor = field(float)
+    alpha_tol: qd.Tensor = field(float)
+    f_lower: qd.Tensor = field(float)
+    f_upper: qd.Tensor = field(float)
+    f: qd.Tensor = field(float)
+    df: qd.Tensor = field(float)
+    minus_dalpha: qd.Tensor = field(float)
+    minus_dalpha_prev: qd.Tensor = field(float)
+
+
+class SAPEqualityConstraints(Data, kind=DataKind.CONSTANT, shape=(SAP_EQUALITIES,)):
+    """
+    The joint equality constraints of the rigid solver, which the SAP coupler regularizes and solves with the contacts.
+
+    The constraints are ordered by environment, those of environment i_b being from `batch_start[i_b]` to
+    `batch_start[i_b + 1]`. Each one ties the dof `dof1_idx` to the dof `dof2_idx`, its Jacobian row being `Jt`. The SAP
+    regularization of a constraint is `k`, `R` and `v_hat`, its impulse `gamma` and its Hessian `G`. `vec` holds the
+    impulse each constraint applies, and `partials` the partial sums over the chunks of the constraints of each
+    environment.
+    """
+
+    batch_idx: qd.Tensor = field(int)
+    dof1_idx: qd.Tensor = field(int)
+    dof2_idx: qd.Tensor = field(int)
+    batch_start: qd.Tensor = field(int, shape=(ENVS + 1,))
+    Jt: qd.Tensor = field(float, shape=(SAP_EQUALITIES, DOFS))
+    k: qd.Tensor = field(float)
+    R: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    R_inv: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    v_hat: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    gamma: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    G: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    dvc: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    vec: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    partials: qd.Tensor = field(float, shape=(SAP_EQUALITY_CHUNKS, 2, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(SAP_PAIRS,)):
+    """
+    The contact pairs every contact handler of the SAP coupler detects, which one generic solve handles.
+
+    Handler i_h owns the pairs from `handlers_offset[i_h]` to `handlers_offset[i_h] + handlers_capacity[i_h]`, the
+    first `handlers_n_pairs[i_h]` of which are detected, `handlers_is_overflow[i_h]` telling whether its candidates or
+    its box query overflowed. The handlers applying impulses to rigid dofs come first, so that their pairs alone take a
+    Jacobian `Jt` (see SAPContactsLayout). A pair applies its impulse to up to SAP_N_FEM_SLOTS FEM vertices
+    `fem_slots_vert` (-1 for an unused slot), with the weights `fem_slots_weight`, and to the chains of the links
+    `link_idx` (-1 for none), with the signs `link_sign`. A pair with a contact frame (`normal`, `tangent0`, `tangent1`)
+    solves in that frame, the others in the world frame.
+
+    The pairs are appended concurrently during the detection, in an order that changes from run to run. The key of a
+    pair identifies it uniquely among the pairs of its handler and environment, and `sort` orders the pairs by
+    environment, then by handler, then by key, as one segment per environment and handler. Every sum over the pairs,
+    whether into a scalar of an environment or into a vertex or a dof, runs in that order, chunk by chunk for each
+    handler (see SUM_MAX_CHUNKS), so that the result is bitwise reproducible. The slots applying to vertex i_v of
+    environment i_b, encoded as i_s * SAP_N_FEM_SLOTS + i_slot for the slot i_slot of the pair at the sorted position
+    i_s, are `vertices_entry[vertices_entry_start[i_v, i_b]:vertices_entry_start[i_v + 1, i_b]]` in increasing order.
+
+    The SAP regularization of a pair is `k`, `phi0`, `Rn`, `Rt`, `vn_hat`, `mu` and their derived values, its impulse
+    `gamma` and its Hessian `G` in its frame, and `dvc` the change of its velocity along the search direction. `vec` and
+    `mat` hold its impulse and its Hessian in the world frame, and `pairs_partials` and `dofs_partials` the partial sums
+    over the chunks of the sorted pairs of each handler and environment.
+    """
+
+    handler_idx: qd.Tensor = field(int)
+    batch_idx: qd.Tensor = field(int)
+    key: qd.Tensor = field(qd.u64)
+    has_frame: qd.Tensor = field(bool)
+    normal: qd.Tensor = field((float, 3))
+    tangent0: qd.Tensor = field((float, 3))
+    tangent1: qd.Tensor = field((float, 3))
+    contact_pos: qd.Tensor = field((float, 3))
+    fem_slots_vert: qd.Tensor = field((int, SAP_N_FEM_SLOTS))
+    fem_slots_weight: qd.Tensor = field((float, SAP_N_FEM_SLOTS))
+    link_idx: qd.Tensor = field((int, 2))
+    link_sign: qd.Tensor = field((float, 2))
+    k: qd.Tensor = field(float)
+    phi0: qd.Tensor = field(float)
+    Rn: qd.Tensor = field(float)
+    Rt: qd.Tensor = field(float)
+    Rn_inv: qd.Tensor = field(float)
+    Rt_inv: qd.Tensor = field(float)
+    vn_hat: qd.Tensor = field(float)
+    mu: qd.Tensor = field(float)
+    mu_hat: qd.Tensor = field(float)
+    mu_factor: qd.Tensor = field(float)
+    gamma: qd.Tensor = field((float, 3))
+    G: qd.Tensor = field((float, (3, 3)))
+    dvc: qd.Tensor = field((float, 3))
+    vec: qd.Tensor = field((float, 3))
+    mat: qd.Tensor = field((float, (3, 3)))
+    Jt: qd.Tensor = field((float, 3), shape=(SAP_RIGID_PAIRS, DOFS))
+    M_inv_Jt: qd.Tensor = field((float, 3), shape=(SAP_RIGID_PAIRS, DOFS))
+    handlers_n_pairs: qd.Tensor = field(int, shape=(SAP_HANDLERS,))
+    handlers_is_overflow: qd.Tensor = field(bool, shape=(SAP_HANDLERS,))
+    segments_n_pairs: qd.Tensor = field(int, shape=(SAP_HANDLERS * ENVS,))
+    sort: SegmentSortBuffer
+    vertices_n_entries: qd.Tensor = field(int, shape=(VERTICES, ENVS))
+    vertices_entry_start: qd.Tensor = field(int, shape=(VERTICES + 1, ENVS))
+    vertices_entry: qd.Tensor = field(int, shape=(SAP_ENTRIES,))
+    pairs_partials: qd.Tensor = field(float, shape=(SAP_PAIR_CHUNKS, 2, SAP_HANDLERS, ENVS))
+    dofs_partials: qd.Tensor = field(float, shape=(SAP_PAIR_CHUNKS, DOFS, SAP_RIGID_HANDLERS, ENVS))
+
+
+class SAPContactsLayout(Data, kind=DataKind.CONSTANT, shape=(SAP_HANDLERS,)):
+    """
+    The layout of the contact pairs of every handler of the SAP coupler (see SAPContactPairs).
+
+    `handlers_n_chunks` is the number of chunks the sorted pairs of a handler split into for the sums over them,
+    `handlers_rigid_rank` the rank of a handler among those applying impulses to rigid dofs (-1 for none), and
+    `key_bits` the bits of the keys of the pairs of a handler.
+    """
+
+    handlers_offset: qd.Tensor = field(int)
+    handlers_capacity: qd.Tensor = field(int)
+    handlers_n_chunks: qd.Tensor = field(int)
+    handlers_rigid_rank: qd.Tensor = field(int)
+    key_bits: qd.Tensor = field(int, shape=())
+
+
+class SAPTetPlaneCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """The tetrahedra crossing a plane, with the signed distance of their vertices to it and the code of the edges it
+    cuts (see the marching tetrahedra table of SAPInfo)."""
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx: qd.Tensor = field(int)
+    intersection_code: qd.Tensor = field(int)
+    distance: qd.Tensor = field((float, 4))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPTetTetCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """
+    The pairs of tetrahedra crossing their plane of equal pressure, with the normal of the plane, the signed distance of
+    the vertices of the first one to it and the code of the edges it cuts.
+    """
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx0: qd.Tensor = field(int)
+    elem_idx1: qd.Tensor = field(int)
+    intersection_code0: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3))
+    distance0: qd.Tensor = field((float, 4))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPTriTetCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """The pairs of a FEM tetrahedron and a rigid triangle crossing the plane of the triangle, of normal `normal`."""
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx: qd.Tensor = field(int)
+    face_idx: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPContactCandidates(Data, kind=DataKind.SCRATCH):
+    """The candidates of the contact handlers detecting their pairs in two passes, one member per handler."""
+
+    fem_floor_tet: SAPTetPlaneCandidates
+    fem_self_tet: SAPTetTetCandidates
+    rigid_floor_tet: SAPTetPlaneCandidates
+    rigid_fem_tri_tet: SAPTriTetCandidates
+    rigid_rigid_tet: SAPTetTetCandidates
+
+
+class SAPState(Data, kind=DataKind.SCRATCH):
+    """Runtime state of the SAP coupler, with the trees of the surface tets of the FEM entities, of the triangles and of
+    the tets of the rigid geoms its box queries traverse."""
+
+    fem_surface_tet_bvh: BVHState
+    rigid_tri_bvh: BVHState
+    rigid_tet_bvh: BVHState
+    fem: SAPFEMVertices
+    rigid: SAPRigidDofs
+    solver: SAPSolverScalars
+    hydroelastic_fem: SAPHydroelasticFEM
+    rigid_volume: SAPRigidVolume
+    equalities: SAPEqualityConstraints
+    pairs: SAPContactPairs
+    candidates: SAPContactCandidates
+    queries: SAPContactQueries
+
+
+class SAPInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """
+    Model parameters of the SAP coupler.
+
+    The SAP solve stops once the norm of the gradient of its cost falls below `convergence_atol` plus
+    `convergence_rtol` times the norm of the momentum or of the impulse. `taud`, `beta` and `sigma` set the
+    regularization of the contacts and of the constraints, and `hydroelastic_stiffness`, `point_contact_stiffness` and
+    `rigid_floor_vert_stiffness` the stiffness of the contacts of each model. A hydroelastic contact smaller than
+    `hydroelastic_eps` in area, stiffness or gap is dropped. The tables `marching_tets_edge_table` and `tet_edges` give
+    the edges a plane cuts in a tetrahedron from the sign of the distance of its vertices to it.
+    """
+
+    contacts: SAPContactsLayout
+    substep_dt: qd.Tensor = field(float)
+    convergence_atol: qd.Tensor = field(float)
+    convergence_rtol: qd.Tensor = field(float)
+    taud: qd.Tensor = field(float)
+    beta: qd.Tensor = field(float)
+    sigma: qd.Tensor = field(float)
+    pcg_threshold: qd.Tensor = field(float)
+    linesearch_ftol: qd.Tensor = field(float)
+    linesearch_max_step_size: qd.Tensor = field(float)
+    hydroelastic_stiffness: qd.Tensor = field(float)
+    point_contact_stiffness: qd.Tensor = field(float)
+    equality_stiffness: qd.Tensor = field(float)
+    rigid_floor_vert_stiffness: qd.Tensor = field(float)
+    hydroelastic_eps: qd.Tensor = field(float)
+    floor_height: qd.Tensor = field(float)
+    marching_tets_edge_table: qd.Tensor = field((int, 4), shape=(SAP_MARCHING_TETS_CASES,))
+    tet_edges: qd.Tensor = field((int, 2), shape=(SAP_TET_EDGES,))
+    EPS: qd.Tensor = field(float)
+
+
+class SAPStaticConfig(StaticConfig):
+    """The compile-time configuration of the kernels of the SAP coupler."""
+
+    # Whether the solve has FEM vertices, rigid dofs and equality constraints among its unknowns
+    has_fem: bool
+    has_rigid: bool
+    has_equalities: bool
+    # Whether some pairs apply their impulse to rigid dofs, through a rigid Jacobian
+    has_rigid_contacts: bool
+    # Whether the vertices of the FEM solver may be constrained, which drops them from the solve. The name matches the
+    # one of FEMStaticConfig, the FEM funcs the SAP kernels call reading it from either config.
+    enable_vertex_constraints: bool

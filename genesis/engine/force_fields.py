@@ -438,6 +438,19 @@ class Custom(ForceField):
 
 
 @qd.data_oriented
+class ForceFieldsDispatcher:
+    """
+    Hold the force fields acting on a solver, which its kernels take as one template argument.
+
+    The kernels iterate over `fields` at compile time. The dispatcher lives as long as its solver, so that the compiled
+    kernels stay cached against it.
+    """
+
+    def __init__(self):
+        self.fields: list[ForceField] = []
+
+
+@qd.data_oriented
 class PerlinNoiseField:
     """
     Perlin noise field for generating 3D noise.

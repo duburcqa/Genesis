@@ -688,12 +688,14 @@ class Raytracer:
 
         # MPM particles
         if self.sim.mpm_solver.is_active:
-            particles_all = self.sim.mpm_solver.particles_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
-            particles_vel_all = self.sim.mpm_solver.particles_render.vel.to_numpy()[:, self.rendered_envs_idx[0]]
-            active_all = self.sim.mpm_solver.particles_render.active.to_numpy().astype(bool)[
-                :, self.rendered_envs_idx[0]
-            ]
-            vverts_all = self.sim.mpm_solver.vverts_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
+            idx = self.rendered_envs_idx[0]
+            particles_render = self.sim.mpm_solver.mpm_state.particles_render
+            particles_all = miscu.qd_to_numpy(particles_render.pos, idx, keepdim=False, transpose=True)
+            particles_vel_all = miscu.qd_to_numpy(particles_render.vel, idx, keepdim=False, transpose=True)
+            active_all = miscu.qd_to_numpy(particles_render.is_active, idx, keepdim=False, transpose=True).astype(bool)
+            vverts_all = miscu.qd_to_numpy(
+                self.sim.mpm_solver.mpm_state.vverts_render.pos, idx, keepdim=False, transpose=True
+            )
 
             for mpm_entity in self.sim.mpm_solver.entities:
                 if mpm_entity.surface.vis_mode == "visual":
@@ -719,11 +721,11 @@ class Raytracer:
 
         # SPH particles
         if self.sim.sph_solver.is_active:
-            particles_all = self.sim.sph_solver.particles_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
-            particles_vel_all = self.sim.sph_solver.particles_render.vel.to_numpy()[:, self.rendered_envs_idx[0]]
-            active_all = self.sim.sph_solver.particles_render.active.to_numpy().astype(bool)[
-                :, self.rendered_envs_idx[0]
-            ]
+            idx = self.rendered_envs_idx[0]
+            particles_render = self.sim.sph_solver.sph_state.particles_render
+            particles_all = miscu.qd_to_numpy(particles_render.pos, idx, keepdim=False, transpose=True)
+            particles_vel_all = miscu.qd_to_numpy(particles_render.vel, idx, keepdim=False, transpose=True)
+            active_all = miscu.qd_to_numpy(particles_render.is_active, idx, keepdim=False, transpose=True).astype(bool)
 
             for sph_entity in self.sim.sph_solver.entities:
                 particles = particles_all[sph_entity.particle_start : sph_entity.particle_end][
@@ -739,10 +741,13 @@ class Raytracer:
         # PBD entities
         if self.sim.pbd_solver.is_active:
             idx = self.rendered_envs_idx[0]
-            particles_all = self.sim.pbd_solver.particles_render.pos.to_numpy()[:, idx]
-            particles_vel_all = self.sim.pbd_solver.particles_render.vel.to_numpy()[:, idx]
-            active_all = self.sim.pbd_solver.particles_render.active.to_numpy().astype(bool)[:, idx]
-            vverts_all = self.sim.pbd_solver.vverts_render.pos.to_numpy()[:, idx]
+            particles_render = self.sim.pbd_solver.pbd_state.particles_render
+            particles_all = miscu.qd_to_numpy(particles_render.pos, idx, keepdim=False, transpose=True)
+            particles_vel_all = miscu.qd_to_numpy(particles_render.vel, idx, keepdim=False, transpose=True)
+            active_all = miscu.qd_to_numpy(particles_render.is_active, idx, keepdim=False, transpose=True).astype(bool)
+            vverts_all = miscu.qd_to_numpy(
+                self.sim.pbd_solver.pbd_state.vverts_render.pos, idx, keepdim=False, transpose=True
+            )
 
             for pbd_entity in self.sim.pbd_solver.entities:
                 if pbd_entity.surface.vis_mode == "visual":

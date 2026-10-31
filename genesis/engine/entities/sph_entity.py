@@ -1,12 +1,9 @@
-import quadrants as qd
-
 import genesis as gs
 from genesis.engine.states.entities import SPHEntityState
 
 from .particle_entity import ParticleEntity
 
 
-@qd.data_oriented
 class SPHEntity(ParticleEntity):
     """
     SPH-based particle entity.
@@ -67,10 +64,8 @@ class SPHEntity(ParticleEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
-            self.active,
             self._particle_start,
-            self._n_particles,
+            self.active,
             self._material.rho,
             self._material.stiffness,
             self._material.exponent,

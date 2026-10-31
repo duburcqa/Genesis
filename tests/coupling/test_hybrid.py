@@ -41,6 +41,14 @@ def test_rigid_mpm_muscle(show_viewer):
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
+    # A material point method entity ahead of the soft part of the hybrid entity in the solver, far from the robot
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.15, 0.85, 0.1),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             file="urdf/simple/two_link_arm.urdf",
@@ -73,17 +81,21 @@ def test_rigid_mpm_muscle(show_viewer):
             friction=0.5,
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
     scene.reset()
+    # The soft part of the hybrid entity moves the same whether an unrelated entity is active or not
+    cube.set_active(gs.INACTIVE, envs_idx=1)
     for i in range(150):
         robot.control_dofs_velocity(np.array([2.0 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
         scene.step()
 
     ball_pos_delta = ball.get_pos() - torch.tensor(BALL_POS_INIT, dtype=gs.tc_float, device=gs.device)
     assert_allclose(ball_pos_delta[..., 0], 0.0, tol=1e-2)
-    assert ((0.02 < ball_pos_delta[1]) & (ball_pos_delta[1] < 0.05)).all()
+    assert ((0.02 < ball_pos_delta[..., 1]) & (ball_pos_delta[..., 1] < 0.05)).all()
     assert_allclose(ball_pos_delta[..., 2], 0.0, tol=1e-3)
+    soft_pos = robot.part_soft.get_particles_pos()
+    assert_allclose(soft_pos[0], soft_pos[1], tol=2e-5)
 
 
 @pytest.mark.required
@@ -367,7 +379,8 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
-def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
+@pytest.mark.parametrize("batch_links_info", [False, True])
+def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     BOX_POS = (0.0, 0.0, 0.1)
     BOX_HALFHEIGHT = 0.1
 
@@ -375,6 +388,9 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
         sim_options=gs.options.SimOptions(
             dt=1 / 60,
             substeps=2,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_links_info=batch_links_info,
         ),
         coupler_options=gs.options.SAPCouplerOptions(
             sap_convergence_atol=1e-10,

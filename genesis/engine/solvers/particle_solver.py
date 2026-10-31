@@ -1,6 +1,8 @@
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
 from genesis.engine.state_change import StateChange, mutates
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
@@ -11,8 +13,15 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     The accessors take global particle indices, given once for every environment or one row per environment (see
     '_sanitize_io_variables'), and the kernels of each solver read and write the state the particles hold between two
-    steps.
+    steps. A solver whose particles extend 'array_class.Particles' and 'array_class.ParticlesParams' assigns them to
+    '_particles' and '_particles_params' at build time, which the accessors then read and write.
     """
+
+    def __init__(self, scene, sim, options):
+        super().__init__(scene, sim, options)
+
+        self._particles: array_class.Particles | None = None
+        self._particles_params: array_class.ParticlesParams | None = None
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
@@ -86,25 +95,167 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self._kernel_get_particles_mass(particles_idx, envs_idx, masses)
         return masses[0] if self._scene.n_envs == 0 else masses
 
-    @qd.kernel
-    def add_vverts(
-        self,
-        vvert_start: int,
-        particle_start: int,
-        vverts: qd.types.ndarray(element_dim=1),
-        particles: qd.types.ndarray(element_dim=1),
-        P_invs: qd.types.ndarray(element_dim=2),
-        support_idxs_local: qd.types.ndarray(),
-    ):
-        """Bind the given vverts to their supporting particles, whose positions skin them for rendering."""
-        for i_vv_ in range(vverts.shape[0]):
-            i_vv = i_vv_ + vvert_start
-            v = vverts[i_vv_]
-            P_inv = P_invs[i_vv_]
-            i_p_last = support_idxs_local[i_vv_, self._n_vvert_supports - 1]
-            b = P_inv @ (v - particles[i_p_last])
-            for j in range(self._n_vvert_supports - 1):
-                self.vverts_info.support_weights[i_vv][j] = b[j]
-            self.vverts_info.support_weights[i_vv][self._n_vvert_supports - 1] = 1.0 - b.sum()
-            for j in range(self._n_vvert_supports):
-                self.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + particle_start
+    # The hooks of the accessors, which a solver overrides when its particles carry one frame per substep (MPM) or when
+    # a setter also resets a quantity of its own (SPH)
+    def _kernel_set_particles_pos(self, particles_idx, envs_idx, poss):
+        kernel_set_particles_pos(particles_idx, envs_idx, poss, self._particles)
+
+    def _kernel_get_particles_pos(self, particles_idx, envs_idx, poss):
+        kernel_get_particles_pos(particles_idx, envs_idx, poss, self._particles)
+
+    def _kernel_set_particles_vel(self, particles_idx, envs_idx, vels):
+        kernel_set_particles_vel(particles_idx, envs_idx, vels, self._particles)
+
+    def _kernel_get_particles_vel(self, particles_idx, envs_idx, vels):
+        kernel_get_particles_vel(particles_idx, envs_idx, vels, self._particles)
+
+    def _kernel_set_particles_active(self, particles_idx, envs_idx, actives):
+        kernel_set_particles_active(particles_idx, envs_idx, actives, self._particles)
+
+    def _kernel_get_particles_active(self, particles_idx, envs_idx, actives):
+        kernel_get_particles_active(particles_idx, envs_idx, actives, self._particles)
+
+    def _kernel_get_particles_mass(self, particles_idx, envs_idx, masses):
+        kernel_get_particles_mass(particles_idx, envs_idx, masses, self._particles_params)
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_vverts(
+    vvert_start: int,
+    particle_start: int,
+    vverts: qd.types.ndarray(element_dim=1),
+    particles: qd.types.ndarray(element_dim=1),
+    P_invs: qd.types.ndarray(element_dim=2),
+    support_idxs_local: qd.types.ndarray(),
+    vverts_support: array_class.VVertsSupport,
+):
+    """
+    Bind the given vverts to their supporting particles, whose positions skin them for rendering.
+
+    The weights of a vvert are its barycentric coordinates in the simplex of its support particles, `P_invs` mapping its
+    offset from the last support to the others.
+    """
+    n_supports = support_idxs_local.shape[1]
+    for i_vv_ in range(vverts.shape[0]):
+        i_vv = i_vv_ + vvert_start
+        v = vverts[i_vv_]
+        P_inv = P_invs[i_vv_]
+        i_p_last = support_idxs_local[i_vv_, n_supports - 1]
+        b = P_inv @ (v - particles[i_p_last])
+        for i_s in range(n_supports - 1):
+            vverts_support.support_weights[i_vv][i_s] = b[i_s]
+        vverts_support.support_weights[i_vv][n_supports - 1] = 1.0 - b.sum()
+        for i_s in range(n_supports):
+            vverts_support.support_idxs[i_vv][i_s] = support_idxs_local[i_vv_, i_s] + particle_start
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_pos(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    poss: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    """Set the position of some particles, at rest."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
+        if i_p >= 0:
+            particles.pos[i_p, i_b] = qd.Vector([poss[i_b_, i_p_, 0], poss[i_b_, i_p_, 1], poss[i_b_, i_p_, 2]])
+            particles.vel[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_pos(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    poss: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        for k in qd.static(range(3)):
+            poss[i_b_, i_p_, k] = particles.pos[i_p, i_b][k]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_vel(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vels: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            particles.vel[i_p, i_b] = qd.Vector([vels[i_b_, i_p_, 0], vels[i_b_, i_p_, 1], vels[i_b_, i_p_, 2]])
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_vel(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vels: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        for k in qd.static(range(3)):
+            vels[i_b_, i_p_, k] = particles.vel[i_p, i_b][k]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_active(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actives: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            particles.is_active[i_p, i_b] = actives[i_b_, i_p_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_active(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actives: qd.types.ndarray(),
+    particles: array_class.Particles,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        actives[i_b_, i_p_] = particles.is_active[i_p, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_mass(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    masses: qd.types.ndarray(),
+    particles_params: array_class.ParticlesParams,
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        masses[i_b_, i_p_] = particles_params.mass[i_p]
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_particles_render(particles: array_class.Particles, particles_render: array_class.ParticlesRender):
+    """Update the particles as drawn from their state."""
+    for i_p, i_b in qd.ndrange(particles.pos.shape[0], particles.pos.shape[1]):
+        if particles.is_active[i_p, i_b]:
+            particles_render.pos[i_p, i_b] = particles.pos[i_p, i_b]
+            particles_render.vel[i_p, i_b] = particles.vel[i_p, i_b]
+        else:
+            particles_render.pos[i_p, i_b] = gu.qd_nowhere()
+        particles_render.is_active[i_p, i_b] = particles.is_active[i_p, i_b]

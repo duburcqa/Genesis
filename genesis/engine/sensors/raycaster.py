@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.engine.bvh import BVHData, get_bvh_data
+import genesis.utils.array_class as array_class
+from genesis.engine.bvh import get_bvh_data
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
@@ -83,7 +84,7 @@ class BVHContext:
     env_bvh_idx: torch.Tensor | None = None
     # Static BVH allocations keyed by tree count: quadrants tensors live for the whole process, so replacing the
     # allocation on every regroup would leak GPU memory (e.g. per-episode randomize + reset).
-    bvh_by_n_trees: dict[int, BVHData] = field(default_factory=dict)
+    bvh_by_n_trees: dict[int, tuple[array_class.BVHState, array_class.BVHStaticConfig]] = field(default_factory=dict)
     # Global face index at each AABB slot, for a collision BVH over a compacted face subset (see
     # RaycastContext.activate for the static/dynamic face split); update() rewrites the sorted leaf payloads with it
     # after every build, so traversals read global faces directly. None when the BVH covers every face in order and
@@ -228,8 +229,8 @@ class RaycastContext(SharedSensorContext):
             return
         bvh = entry.bvh_by_n_trees.get(n_trees)
         if bvh is None:
-            bvh = get_bvh_data(n_trees, n_aabbs)
-            entry.bvh_by_n_trees[n_trees] = bvh
+            bvh_config, bvh_sizes, bvh_unused = get_bvh_data(n_trees, n_aabbs)
+            bvh = entry.bvh_by_n_trees[n_trees] = (array_class.BVHState(sizes=bvh_sizes, unused=bvh_unused), bvh_config)
         entry.bvh_state, entry.bvh_config = bvh
         entry.n_trees = n_trees
 
@@ -320,7 +321,7 @@ class RaycastContext(SharedSensorContext):
                         bvh = get_bvh_data(n_envs, n_faces if subset_faces_idx is None else subset_faces_idx.shape[0])
                         entry = BVHContext(
                             solver,
-                            bvh.state,
+                            array_class.BVHState(sizes=bvh.sizes, unused=bvh.unused),
                             bvh.config,
                             n_envs,
                             raycast_mask=None,
@@ -342,7 +343,8 @@ class RaycastContext(SharedSensorContext):
                     # A movable visual mesh rebuilds every step and may diverge per env: one tree per env.
                     bvh = get_bvh_data(n_envs, mask.shape[0])
                     env_tree_identity = torch.arange(n_envs, dtype=gs.tc_int, device=gs.device)
-                    entry = BVHContext(solver, bvh.state, bvh.config, n_envs, mask, env_bvh_idx=env_tree_identity)
+                    bvh_state = array_class.BVHState(sizes=bvh.sizes, unused=bvh.unused)
+                    entry = BVHContext(solver, bvh_state, bvh.config, n_envs, mask, env_bvh_idx=env_tree_identity)
                 self._bvh_contexts.append(entry)
 
         self.update()

@@ -2,8 +2,6 @@ import functools
 
 import torch
 
-import quadrants as qd
-
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import broadcast_tensor
@@ -21,7 +19,6 @@ def assert_muscle(method):
     return wrapper
 
 
-@qd.data_oriented
 class MPMEntity(ParticleEntity):
     """
     MPM-based particle entity.

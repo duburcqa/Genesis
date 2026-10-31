@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -9,17 +10,18 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.entities import MPMEntity
+from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
+from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.data import ArrayItem, DataKind, opt_in
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
 
-from .particle_solver import ParticleSolver
+from .particle_solver import ParticleSolver, kernel_add_vverts
+from .rigid.abd import func_collide_in_rigid_geom
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -27,6 +29,65 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
+class MPMMaterialDispatcher:
+    """
+    Dispatcher of the particles to the update of the deformation and the stress of their material.
+
+    The kernels take it as a template, which compiles one branch per distinct material of the scene, the index of a
+    material being its position in `materials`.
+    """
+
+    def __init__(self, materials: "list[MPM.Base]"):
+        self.materials = tuple(materials)
+
+    @qd.func
+    def update_F_S_Jp(
+        self,
+        i_mat: int,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+    ):
+        """Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
+
+        The particle is of the material `i_mat`, the other arguments being those of 'MPM.Base.update_F_S_Jp'.
+        """
+        F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
+        S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
+        Jp_new = gs.qd_float(1.0)
+        for j_mat in qd.static(range(len(self.materials))):
+            if i_mat == j_mat:
+                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp)
+        return F_new, S_new, Jp_new
+
+    @qd.func
+    def update_stress(
+        self,
+        i_mat: int,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
+        """Return the stress of a particle.
+
+        The particle is of the material `i_mat`, the other arguments being those of 'MPM.Base.update_stress'.
+        """
+        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for j_mat in qd.static(range(len(self.materials))):
+            if i_mat == j_mat:
+                stress = self.materials[j_mat].update_stress(U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+        return stress
+
+
 class MPMSolver(ParticleSolver):
     material_cls = MPM.Base
     has_frames = True
@@ -45,14 +106,11 @@ class MPMSolver(ParticleSolver):
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
         # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
-        opt_in(array_class.SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
-        self._constraints_initialized = False
+        opt_in(array_class.SDFInfo, cond=lambda: self.is_cpic_active)
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
-        # `_particle_volume_scale` is used to avoid potential numerical instability, as the actual `_particle_volume` may be very small.
-        # Note that the magnitude of `_particle_volume` doesn't affect MPM simulation itself, but it is used to compute particle
-        # mass. We need to account for this scale when handling coupling.
+        # The particle volume is scaled up for numerical robustness (see MPMInfo)
         self._particle_volume_real = float(self._particle_size**3)
         self._particle_volume_scale = 1e3
         self._particle_volume = self._particle_volume_real * self._particle_volume_scale
@@ -63,21 +121,25 @@ class MPMSolver(ParticleSolver):
         self._lower_bound_cell = np.round(self._grid_density * self._lower_bound).astype(gs.np_int)
         self._upper_bound_cell = np.round(self._grid_density * self._upper_bound).astype(gs.np_int)
         self._grid_res = self._upper_bound_cell - self._lower_bound_cell + 1  # +1 to include both corner
-        self._grid_offset = qd.Vector(self._lower_bound_cell)
         if np.prod(self._grid_res) > 1e9:
             gs.raise_exception(
                 "Grid size larger than 1e9 not supported by MPM solver. Please reduce 'grid_density', or set tighter "
                 "boundaries via 'lower_bound' / 'upper_bound'."
             )
 
-        # materials
-        self._materials = list()
-        self._materials_idx = list()
-        self._materials_update_F_S_Jp = list()
-        self._materials_update_stress = list()
+        # The distinct materials of the entities, the kernels dispatching each particle to the one its index names
+        self._materials: list[MPM.Base] = []
 
         # boundary
         self.setup_boundary()
+
+        self.mpm_state: array_class.MPMState | None = None
+        self.mpm_info: array_class.MPMInfo | None = None
+        self.mpm_static_config: array_class.MPMStaticConfig | None = None
+        self.particle_constraints_info: array_class.MPMParticleConstraintsInfo | None = None
+        self._material_dispatcher: MPMMaterialDispatcher | None = None
+        # The hybrid entities whose soft part the solver holds, which drive their particles after each substep
+        self._hybrid_entities: list[HybridEntity] = []
 
     def setup_boundary(self):
         # safety padding
@@ -86,132 +148,15 @@ class MPMSolver(ParticleSolver):
             lower=self._lower_bound + self.boundary_padding, upper=self._upper_bound - self.boundary_padding
         )
 
-    def init_particle_fields(self):
-        # dynamic particle state
-        struct_particle_state = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-            C=gs.qd_mat3,  # affine velocity field
-            F=gs.qd_mat3,  # deformation gradient
-            F_tmp=gs.qd_mat3,  # temp deformation gradient
-            U=gs.qd_mat3,  # SVD
-            V=gs.qd_mat3,  # SVD
-            S=gs.qd_mat3,  # SVD
-            actu=gs.qd_float,  # actuation
-            Jp=gs.qd_float,  # volume ratio
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(active=gs.qd_bool)
-
-        # static particle info
-        struct_particle_info = qd.types.struct(
-            material_idx=gs.qd_int,
-            mass=gs.qd_float,
-            default_Jp=gs.qd_float,
-            free=gs.qd_bool,
-            # for muscle
-            muscle_group=gs.qd_int,
-            muscle_direction=gs.qd_vec3,
-        )
-
-        # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
-
-        # construct fields
-        self.particles = struct_particle_state.field(
-            shape=(self.n_frames, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-        self.particles_ng = struct_particle_state_ng.field(
-            shape=(self.n_frames, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info = struct_particle_info.field(
-            shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_render = struct_particle_state_render.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-
-    def init_grid_fields(self):
-        grid_cell_state = qd.types.struct(
-            mass=gs.qd_float,  # mass
-            vel_in=gs.qd_vec3,  # input momentum/velocity
-            vel_out=gs.qd_vec3,  # output momentum/velocity
-        )
-        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so one frame per substep is enough.
-        # Particles still need one more, because g2p writes the next-frame state at [f+1].
-        # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
-        self.errno = qd.field(gs.qd_int, shape=(self._B,))
-        self.register_errors(
-            self.errno,
-            {
-                ErrorCode.INVALID_PARTICLE_NAN: (
-                    "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
-                ),
-            },
-        )
-
-        self.grid = grid_cell_state.field(
-            shape=(self.n_frames - 1, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-
-        # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
-        # p2g across all envs in the current substep; reset_dirty_cells zeroes those cells across all envs immediately
-        # after g2p, so the grid is always zero at the start of each substep and no per-substep state has to outlive a
-        # substep. grid_dirty_flag is a per-cell tristate (env-shared) that deduplicates appends: only the first env to
-        # touch a cell records it. List size is bounded by the total grid cell count because dedup ensures no more than
-        # that many unique entries.
-        # TODO: support sparse reset under requires_grad. Quadrants' differentiable framework needs the grid state at
-        # every intermediate substep for the backward pass, so we cannot eagerly wipe cells; revisit if checkpointing
-        # or selective grad masking becomes available.
-        if not self._sim.requires_grad:
-            self._grid_total = int(np.prod(self._grid_res))
-            self.grid_dirty_flag = qd.field(gs.qd_int, shape=self._grid_res)
-            self.grid_dirty_list = qd.field(gs.qd_int, shape=(self._grid_total,))
-            self.grid_dirty_count = qd.field(gs.qd_int, shape=(1,))
-
-    def init_vvert_fields(self):
-        struct_vvert_info = qd.types.struct(
-            support_idxs=qd.types.vector(self._n_vvert_supports, gs.qd_int),
-            support_weights=qd.types.vector(self._n_vvert_supports, gs.qd_float),
-        )
-        self.vverts_info = struct_vvert_info.field(shape=(max(1, self._n_vverts),), layout=qd.Layout.SOA)
-
-        struct_vvert_state_render = qd.types.struct(pos=gs.qd_vec3, active=gs.qd_bool)
-        self.vverts_render = struct_vvert_state_render.field(
-            shape=(max(1, self._n_vverts), self._B), layout=qd.Layout.SOA
-        )
-
-    def init_constraints(self):
-        """Lazy initialization of particle constraint fields."""
-        # Memory check: ensure index fits in int32
-        if self._n_particles * self._B * 3 > np.iinfo(np.int32).max:
-            gs.raise_exception(
-                f"Particle constraint shape (n_envs={self._B}, n_particles={self._n_particles}, 3) is too large. "
-                "Consider reducing n_envs or n_particles."
-            )
-
-        self._constraints_initialized = True
-
-        particle_constraint_info = qd.types.struct(
-            is_constrained=gs.qd_bool,  # whether particle is constrained
-            target_pos=gs.qd_vec3,  # target position for the constraint
-            stiffness=gs.qd_float,  # spring stiffness
-            link_idx=gs.qd_int,  # index of the rigid link (-1 if not linked)
-            link_local_pos=gs.qd_vec3,  # offset from link origin in link's local frame
-        )
-
-        # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
-        self.particle_constraints = particle_constraint_info.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.AOS
-        )
-
-        self.particle_constraints.is_constrained.fill(False)
-        self.particle_constraints.link_idx.fill(-1)
-
     def reset_grad(self):
-        self.particles.grad.fill(0.0)
-        self.grid.grad.fill(0.0)
+        # Every adjoint the backward pass writes accumulates, so a pass starts from zeros
+        if not self._sim.requires_grad:
+            return
+        qd_zero_grad(self.mpm_state.particles)
+        qd_zero_grad(self.mpm_state.grid)
+        # One flush for the zeroing batch, see qd_zero_grad in misc.py
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
 
     def build(self):
         super().build()
@@ -222,37 +167,83 @@ class MPMSolver(ParticleSolver):
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
 
-        self._coupler = self.sim._coupler
-
-        # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
-        # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
-        # p2g via qd.static. Forced True under requires_grad so the backward path stays exactly as upstream.
+        # The singular value decomposition always runs under requires_grad, its backward being registered with the
+        # kernel computing it (see MPMStaticConfig).
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
-        self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
+        is_svd_needed = self._sim.requires_grad or any([material.is_svd_needed for material in self._materials])
+
+        # The couplers take the data of the solver whether it holds entities or not, an inactive solver leaving its
+        # arrays unused
+        requires_grad = self._sim.requires_grad
+        unused = {None: True}
+        if self.is_active:
+            unused = {array_class.SPARSE_GRID_RESET: requires_grad, array_class.CPIC: not self.is_cpic_active}
+        grid_x, grid_y, grid_z = self._grid_res
+        self.mpm_state = array_class.MPMState(
+            sizes=dict(
+                frames=self.n_frames,
+                particles=self._n_particles,
+                envs=self._B,
+                grid_x=grid_x,
+                grid_y=grid_y,
+                grid_z=grid_z,
+                geoms=self.sim.rigid_solver.n_geoms_,
+                vverts=self._n_vverts,
+            ),
+            unused=unused,
+            requires_grad=requires_grad,
+        )
+        # The arrays of the model an inactive solver leaves unused, its boundary and constants staying
+        info_arrays = (array_class.MPMInfo.particles, array_class.MPMInfo.vverts, array_class.MPMInfo.gravity)
+        self.mpm_info = array_class.MPMInfo(
+            sizes=dict(
+                particles=self._n_particles, envs=self._B, vverts=self._n_vverts, vvert_supports=self._n_vvert_supports
+            ),
+            values=dict(
+                boundary=dict(
+                    lower=self.boundary.lower, upper=self.boundary.upper, restitution=self.boundary.restitution
+                ),
+                substep_dt=self.substep_dt,
+                dx=self.dx,
+                inv_dx=self.inv_dx,
+                grid_offset=self._lower_bound_cell,
+                particle_volume=self.particle_volume,
+                particle_volume_scale=self.particle_volume_scale,
+            ),
+            unused={info_arrays: not self.is_active},
+        )
+        self.mpm_static_config = array_class.MPMStaticConfig(
+            is_svd_needed=is_svd_needed, enable_CPIC=self.is_cpic_active, requires_grad=self._sim.requires_grad
+        )
+        self._material_dispatcher = MPMMaterialDispatcher(self._materials)
+        self._hybrid_entities = [
+            entity
+            for entity in self._sim.entities
+            if isinstance(entity, HybridEntity) and not entity.material.use_default_coupling
+        ]
+        self._build_gravity(self.mpm_info.gravity)
 
         if self.is_active:
-            if self._enable_CPIC and self._sim.requires_grad:
-                gs.raise_exception(
-                    "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
-                )
-
-            self.init_particle_fields()
-            self.init_grid_fields()
-            self.init_vvert_fields()
+            self.register_errors(
+                self.mpm_state.errno,
+                {
+                    array_class.ErrorCode.INVALID_PARTICLE_NAN: (
+                        "NaN detected in MPM states. Try reducing the time step size or adjusting simulation "
+                        "parameters."
+                    ),
+                },
+            )
 
             for entity in self._entities:
                 entity._add_to_solver()
 
-            # See: https://github.com/taichi-dev/taichi_elements/blob/d19678869a28b09a32ef415b162e35dc929b792d/engine/mpm_solver.py#L84
+            # Empirical bound on the substep of an explicit MPM integration, as a fraction of the cell size
             suggested_dt = 2e-2 * self._dx
             if self.substep_dt > suggested_dt:
                 gs.logger.warning(
                     f"Current `substep_dt` ({self.substep_dt:.6g}) is greater than suggested_dt ({suggested_dt:.6g}, "
                     "calculated based on `grid_density`). Simulation might be unstable."
                 )
-
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -261,6 +252,14 @@ class MPMSolver(ParticleSolver):
     @property
     def is_active(self):
         return self.n_particles > 0
+
+    @property
+    def is_cpic_active(self):
+        """Whether the particles check for thin rigid geoms between them and the cells of their stencil.
+
+        See MPMCPIC for Compatible Particle-In-Cell (CPIC).
+        """
+        return self._enable_CPIC and self.is_active and self.sim.rigid_solver.is_active
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -286,265 +285,25 @@ class MPMSolver(ParticleSolver):
         return entity
 
     def add_material(self, material):
-        # Register material update methods if and only if the provided material is not already registered
+        # A material equal to one already registered shares its index, and so the kernels it compiles into
         for material_i in self._materials:
             if material == material_i:
                 material.idx = material_i.idx
                 break
         else:
-            material.idx = len(self._materials_idx)
-            self._materials_idx.append(material.idx)
-            self._materials_update_F_S_Jp.append(material.update_F_S_Jp)
-            self._materials_update_stress.append(material.update_stress)
-        self._materials.append(material)
+            material.idx = len(self._materials)
+            self._materials.append(material)
 
-    @qd.func
-    def stencil_range(self):
-        return qd.ndrange(3, 3, 3)
+    def add_vverts(self, vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local):
+        kernel_add_vverts(
+            vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local, self.mpm_info.vverts
+        )
 
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- simulation -------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @qd.kernel
-    def compute_F_tmp(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-
-    @qd.kernel
-    def svd_grad(self, f: int):
-        """Reverse the singular value decomposition of a frame, consuming the adjoint of its factors like autodiff."""
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles.grad[f, i_p, i_b].F_tmp += backward_svd(
-                    self.particles.grad[f, i_p, i_b].U,
-                    self.particles.grad[f, i_p, i_b].S,
-                    self.particles.grad[f, i_p, i_b].V,
-                    self.particles[f, i_p, i_b].U,
-                    self.particles[f, i_p, i_b].S,
-                    self.particles[f, i_p, i_b].V,
-                )
-                self.particles.grad[f, i_p, i_b].U = qd.Matrix.zero(gs.qd_float, 3, 3)
-                self.particles.grad[f, i_p, i_b].S = qd.Matrix.zero(gs.qd_float, 3, 3)
-                self.particles.grad[f, i_p, i_b].V = qd.Matrix.zero(gs.qd_float, 3, 3)
-
-    # The decomposition is reversed in closed form, which autodiff cannot derive
-    @register_custom_backward(svd_grad)
-    @qd.kernel
-    def svd(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = qd.svd(
-                    self.particles[f, i_p, i_b].F_tmp, gs.qd_float
-                )
-
-    @qd.kernel
-    def compute_F_tmp_and_svd(self, f: qd.i32):
-        # Fused F_tmp + SVD: keeps F_tmp in register/local-memory for the SVD instead of round-tripping through global
-        # memory. Only used on the forward pass; the backward path continues to call compute_F_tmp / svd separately so
-        # their autodiff remains composed unchanged.
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-                self.particles[f, i_p, i_b].F_tmp = F_tmp
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = qd.svd(
-                    F_tmp, gs.qd_float
-                )
-
-    @qd.kernel
-    def compute_F_tmp_only(self, f: qd.i32):
-        # Fast path when no registered material needs U/V/S: compute F_tmp without SVD. p2g then derives J from
-        # det(F_tmp) directly. Only used on the forward pass.
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-
-    @qd.kernel
-    def p2g(
-        self,
-        f: qd.i32,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                # A. update F (deformation gradient), S (Sigma from SVD(F), essentially represents volume) and Jp
-                # (volume compression ratio) based on material type.
-                # det(F_tmp) == det(U S V^T) == det(S) for qd.svd (U, V are proper rotations), so when no material
-                # needs U/V/S we can read J directly from F_tmp and skip the SVD kernel. Predeclared outside the
-                # qd.static branch because quadrants scopes qd.static branches locally.
-                J = gs.qd_float(0.0)
-                if qd.static(self.needs_svd):
-                    J = self.particles[f, i_p, i_b].S.determinant()
-                else:
-                    J = self.particles[f, i_p, i_b].F_tmp.determinant()
-                F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-                S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-                Jp_new = gs.qd_float(1.0)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        F_new, S_new, Jp_new = self._materials_update_F_S_Jp[material_idx](
-                            J=J,
-                            F_tmp=self.particles[f, i_p, i_b].F_tmp,
-                            U=self.particles[f, i_p, i_b].U,
-                            S=self.particles[f, i_p, i_b].S,
-                            V=self.particles[f, i_p, i_b].V,
-                            Jp=self.particles[f, i_p, i_b].Jp,
-                        )
-                self.particles[f + 1, i_p, i_b].F = F_new
-                self.particles[f + 1, i_p, i_b].Jp = Jp_new
-                # The actuation holds over every substep of the step it is set at, and until it is set again
-                self.particles[f + 1, i_p, i_b].actu = self.particles[f, i_p, i_b].actu
-
-                # B. compute stress
-                # NOTE:
-                # 1. Here we pass in both F_tmp and the updated F_new because in the official Quadrants example, F_new is
-                # used for stress computation. However, although this works for both elastic and elasto-plastic
-                # materials, it is mathematically incorrect for liquid material with non-zero viscosity (mu). In the
-                # latter case, stress computation needs to be based on the F_tmp (deformation gradient before resetting
-                # to identity).
-                # 2. Jp is only used by Snow material, and it uses Jp from the previous frame, not the updated one.
-                stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        stress = self._materials_update_stress[material_idx](
-                            U=self.particles[f, i_p, i_b].U,
-                            S=S_new,
-                            V=self.particles[f, i_p, i_b].V,
-                            F_tmp=self.particles[f, i_p, i_b].F_tmp,
-                            F_new=F_new,
-                            J=J,
-                            Jp=self.particles[f, i_p, i_b].Jp,
-                            actu=self.particles[f, i_p, i_b].actu,
-                            m_dir=self.particles_info[i_p].muscle_direction,
-                        )
-                stress = (-self.substep_dt * self._particle_volume * 4 * self._inv_dx * self._inv_dx) * stress
-                affine = stress + self.particles_info[i_p].mass * self.particles[f, i_p, i_b].C
-
-                # C. project onto grid
-                base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
-                fx = self.particles[f, i_p, i_b].pos * self._inv_dx - base.cast(gs.qd_float)
-                w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-                for offset in qd.static(qd.grouped(self.stencil_range())):
-                    dpos = (offset.cast(gs.qd_float) - fx) * self._dx
-                    weight = gs.qd_float(1.0)
-                    for d in qd.static(range(3)):
-                        weight *= w[offset[d]][d]
-
-                    sep_geom_idx = -1
-                    if qd.static(self._enable_CPIC and self.sim.rigid_solver.is_active):
-                        # check if particle and cell center are at different side of any thin object
-                        cell_pos = (base + offset) * self._dx
-
-                        for i_g in range(self.sim.rigid_solver.n_geoms):
-                            if geoms_info.needs_coup[i_g]:
-                                sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
-                                sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-                                )
-
-                                if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g
-                                    sep_geom_idx = i_g
-                                    break
-                        self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b] = sep_geom_idx
-                    if sep_geom_idx == -1:
-                        cell_ijk = base - self._grid_offset + offset
-                        self.grid[f, cell_ijk, i_b].vel_in += weight * (
-                            self.particles_info[i_p].mass * self.particles[f, i_p, i_b].vel + affine @ dpos
-                        )
-                        mass_contrib = weight * self.particles_info[i_p].mass
-                        prev_mass = qd.atomic_add(self.grid[f, cell_ijk, i_b].mass, mass_contrib)
-                        # Sparse-reset bookkeeping runs forward-only: backward mode composes p2g through autodiff where
-                        # these atomics are meaningless. Per-env first-writer (prev_mass == 0) tries to claim the cell
-                        # in the env-shared dirty flag via atomic_or; only the very first env to touch this cell across
-                        # the whole batch then appends to the global list. List size is bounded by grid_total because
-                        # dedup ensures uniqueness.
-                        if qd.static(not self._sim.requires_grad):
-                            if prev_mass == gs.qd_float(0.0) and mass_contrib > gs.qd_float(0.0):
-                                was_dirty = qd.atomic_or(self.grid_dirty_flag[cell_ijk], gs.qd_int(1))
-                                if was_dirty == gs.qd_int(0):
-                                    slot_idx = qd.atomic_add(self.grid_dirty_count[0], 1)
-                                    flat = (cell_ijk[0] * self._grid_res[1] + cell_ijk[1]) * self._grid_res[2] + (
-                                        cell_ijk[2]
-                                    )
-                                    self.grid_dirty_list[slot_idx] = flat
-
-                    if not self.particles_info[i_p].free:  # non-free particles behave as boundary conditions
-                        self.grid[f, base - self._grid_offset + offset, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def g2p(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState, rigid_info: RigidInfo):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
-                fx = self.particles[f, i_p, i_b].pos * self._inv_dx - base.cast(gs.qd_float)
-                w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
-                new_vel = qd.Vector.zero(gs.qd_float, 3)
-                new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for offset in qd.static(qd.grouped(self.stencil_range())):
-                    dpos = offset.cast(gs.qd_float) - fx
-                    grid_vel = self.grid[f, base - self._grid_offset + offset, i_b].vel_out
-                    weight = gs.qd_float(1.0)
-                    for d in qd.static(range(3)):
-                        weight *= w[offset[d]][d]
-
-                    if qd.static(self._enable_CPIC and self.sim.rigid_solver.is_active):
-                        sep_geom_idx = self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b]
-                        if sep_geom_idx != -1:
-                            grid_vel = self.sim.coupler._func_collide_in_rigid_geom(
-                                self.particles[f, i_p, i_b].pos,
-                                self.particles[f, i_p, i_b].vel,
-                                self.particles_info[i_p].mass * weight / self._particle_volume_scale,
-                                self._coupler.mpm_rigid_normal[i_p, sep_geom_idx, i_b],
-                                1.0,
-                                sep_geom_idx,
-                                i_b,
-                                geoms_info=geoms_info,
-                                links_state=links_state,
-                                rigid_info=rigid_info,
-                            )
-
-                    new_vel += weight * grid_vel
-                    new_C += 4 * self._inv_dx * weight * grid_vel.outer_product(dpos)
-
-                # compute actual new_pos with new_vel
-                new_pos = self.particles[f, i_p, i_b].pos + self.substep_dt * new_vel
-
-                # impose boundary for safety, in case simulation explodes and tries to access illegal cell address
-                new_pos, new_vel = self.boundary.impose_pos_vel(new_pos, new_vel)
-
-                # advect to next frame
-                self.particles[f + 1, i_p, i_b].vel = new_vel
-                self.particles[f + 1, i_p, i_b].C = new_C
-                self.particles[f + 1, i_p, i_b].pos = new_pos
-            else:
-                self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
-                self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles[f + 1, i_p, i_b].C = self.particles[f, i_p, i_b].C
-                self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
-                self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
-
-            self.particles_ng[f + 1, i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
-
-    @no_grad
-    @qd.kernel
-    def _kernel_flag_non_finite_pos(self, f: int):
-        """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            pos = self.particles[f, i_p, i_b].pos
-            if not qd_isfinite(pos):
-                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_PARTICLE_NAN
+    def add_particles(self, f, active, particle_start, n_particles, material_idx, default_Jp, rho, pos):
+        """Add the particles of an entity at rest to the given frame, with the parameters of its material."""
+        kernel_add_particles(
+            f, particle_start, material_idx, n_particles, active, default_Jp, rho, pos, self.mpm_state, self.mpm_info
+        )
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -552,101 +311,65 @@ class MPMSolver(ParticleSolver):
 
     def substep_pre_coupling(self, f):
         if self._sim.requires_grad:
-            self.reset_grid_and_grad(f)
-            self.compute_F_tmp(f)
-            self.svd(f)
+            kernel_reset_grid_and_grad(f, self.mpm_state)
+            kernel_compute_F_tmp(f, self.mpm_state, self.mpm_info, compute_svd=False)
+            kernel_svd(f, self.mpm_state)
         else:
-            # Forward-only path: the grid is left zeroed by reset_dirty_cells at the end of the previous substep (and
-            # is zero-init on the first call), so no reset kernel is needed here.
-            if self.needs_svd:
-                self.compute_F_tmp_and_svd(f)
-            else:
-                # All registered materials ignore U/V/S; skip SVD entirely (e.g. scenes of only non-viscous Liquid
-                # and/or neohooken Elastic).
-                self.compute_F_tmp_only(f)
-        self.p2g(
+            # The grid is left zeroed by kernel_reset_dirty_cells at the end of the previous substep, and is zero
+            # initialized before the first one
+            kernel_compute_F_tmp(f, self.mpm_state, self.mpm_info, compute_svd=self.mpm_static_config.is_svd_needed)
+        rigid_solver = self.sim.rigid_solver
+        kernel_p2g(
             f,
-            self.sim.coupler.rigid_solver.dyn_state.geoms,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.collider_info.sdf,
-            self.sim.coupler.rigid_solver.collider.collider_config,
+            self.mpm_state,
+            rigid_solver.dyn_state.geoms,
+            self.mpm_info,
+            rigid_solver.dyn_info.geoms,
+            rigid_solver.rigid_info,
+            rigid_solver.collider.collider_info.sdf,
+            self.mpm_static_config,
+            rigid_solver.collider.collider_config,
+            self._material_dispatcher,
         )
 
     def substep_post_coupling(self, f):
-        self.g2p(
+        rigid_solver = self.sim.rigid_solver
+        kernel_g2p(
             f,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
+            self.mpm_state,
+            rigid_solver.dyn_state.links,
+            self.mpm_info,
+            rigid_solver.dyn_info.geoms,
+            rigid_solver.rigid_info,
+            self.mpm_static_config,
         )
 
-        # The particle constraints apply after g2p
-        if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
+        if self.particle_constraints_info is not None:
+            kernel_apply_particle_constraints(
+                f, self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints_info, self.mpm_info
+            )
 
-        # Eager sparse reset: zero only the cells p2g touched this substep, across all envs, then clear the global
-        # dirty count so the next substep starts fresh. The grid is no longer read after g2p / constraints, so it is
-        # safe to wipe here. Forward-only; backward composes p2g/g2p through autodiff and uses reset_grid_and_grad.
+        for entity in self._hybrid_entities:
+            entity.update_soft_part(f)
+
+        # The grid is read no more in this substep (see MPMGrid)
         if not self._sim.requires_grad:
-            self.reset_dirty_cells(f)
+            kernel_reset_dirty_cells(f, self.mpm_state)
             if gs.use_zerocopy:
-                grid_dirty_count = qd_to_torch(self.grid_dirty_count, copy=False)
-                grid_dirty_count.zero_()
+                dirty_count = qd_to_torch(self.mpm_state.grid.dirty_count, copy=False)
+                dirty_count.zero_()
                 # The next kernel reads the count (see qd_zero_grad in misc.py)
                 if gs.backend == gs.metal:
                     torch.mps.synchronize()
             else:
-                self.grid_dirty_count[0] = 0
+                self.mpm_state.grid.dirty_count.fill(0)
 
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim._cur_substep_global + 1) % self._substeps == 0:
-            self._kernel_flag_non_finite_pos(f + 1)
+            kernel_flag_non_finite_pos(f + 1, self.mpm_state, self._errno)
 
-    @qd.kernel
-    def copy_frame(self, source: qd.i32, target: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles[target, i_p, i_b].pos = self.particles[source, i_p, i_b].pos
-            self.particles[target, i_p, i_b].vel = self.particles[source, i_p, i_b].vel
-            self.particles[target, i_p, i_b].F = self.particles[source, i_p, i_b].F
-            self.particles[target, i_p, i_b].C = self.particles[source, i_p, i_b].C
-            self.particles[target, i_p, i_b].Jp = self.particles[source, i_p, i_b].Jp
-            self.particles[target, i_p, i_b].actu = self.particles[source, i_p, i_b].actu
-
-            self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
-
-    # The grid of the substep starts from zero, its adjoint included
-    @no_grad
-    @qd.kernel
-    def reset_grid_and_grad(self, f: qd.i32):
-        # Zero out the grid at frame f for *all* grid cells and *all* batch indices
-        for i, j, k, i_b in qd.ndrange(*self._grid_res, self._B):
-            self.grid[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-            self.grid[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-            self.grid[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
-
-            self.grid.grad[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-            self.grid.grad[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-            self.grid.grad[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def reset_dirty_cells(self, f: qd.i32):
-        # Zero the cells p2g touched this substep, across all envs, plus their dirty flags. The dirty list is shared
-        # across envs (deduplicated via grid_dirty_flag), so threads with slot >= grid_dirty_count idle. Only one thread
-        # per slot (i_b == 0) writes the flag back to zero so it can be reused next substep.
-        for slot, i_b in qd.ndrange(self._grid_total, self._B):
-            if slot < self.grid_dirty_count[0]:
-                flat = self.grid_dirty_list[slot]
-                k = flat % self._grid_res[2]
-                rem = flat // self._grid_res[2]
-                j = rem % self._grid_res[1]
-                i = rem // self._grid_res[1]
-                self.grid[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-                self.grid[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-                self.grid[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
-                if i_b == 0:
-                    self.grid_dirty_flag[i, j, k] = gs.qd_int(0)
+    def copy_frame(self, source, target):
+        kernel_copy_frame(source, target, self.mpm_state)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ gradient --------------------------------------
@@ -654,21 +377,16 @@ class MPMSolver(ParticleSolver):
 
     @property
     def is_differentiable(self) -> bool:
-        return not self._enable_CPIC
+        return not self.is_cpic_active
 
     @property
-    def data(self):
-        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
-        for name, field in (
-            ("particles.pos", self.particles.pos),
-            ("particles.vel", self.particles.vel),
-            ("particles.C", self.particles.C),
-            ("particles.F", self.particles.F),
-            ("particles.Jp", self.particles.Jp),
-            ("particles.actu", self.particles.actu),
-            ("particles_ng.active", self.particles_ng.active),
-        ):
-            yield ArrayItem(name, DataKind.STATE, field)
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        yield from iter_data(self, "mpm_static_config")
+        for name in ("mpm_state", "mpm_info"):
+            yield from iter_data(self, name)
+        # Allocated the first time a particle is attached (see 'set_particle_constraints')
+        if self.particle_constraints_info is not None:
+            yield from iter_data(self, "particle_constraints_info")
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -677,111 +395,34 @@ class MPMSolver(ParticleSolver):
     @mutates()
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
+            kernel_set_state(
+                f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active, self.mpm_state
+            )
+            # The thin rigid geoms the particles saw belong to the trajectory they leave (see MPMCPIC)
+            if self.is_cpic_active:
+                if envs_idx is None:
+                    self.mpm_state.cpic.rigid_normal.fill(0)
+                else:
+                    kernel_reset_cpic_rigid_normal(envs_idx, self.mpm_state)
             self.clear_errno(envs_idx)
-
-    @qd.kernel
-    def _kernel_set_state(
-        self,
-        f: qd.i32,
-        pos: qd.types.ndarray(),  # shape [B, n_particles, 3]
-        vel: qd.types.ndarray(),  # shape [B, n_particles, 3]
-        C: qd.types.ndarray(),  # shape [B, n_particles, 3, 3]
-        F: qd.types.ndarray(),  # shape [B, n_particles, 3, 3]
-        Jp: qd.types.ndarray(),  # shape [B, n_particles]
-        actu: qd.types.ndarray(),  # shape [B, n_particles]
-        active: qd.types.ndarray(),  # shape [B, n_particles]
-    ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            # Write pos, vel
-            for j in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[j] = pos[i_b, i_p, j]
-                self.particles[f, i_p, i_b].vel[j] = vel[i_b, i_p, j]
-                # Write C, F
-                for k in qd.static(range(3)):
-                    self.particles[f, i_p, i_b].C[j, k] = C[i_b, i_p, j, k]
-                    self.particles[f, i_p, i_b].F[j, k] = F[i_b, i_p, j, k]
-            # Write Jp, actu, active
-            self.particles[f, i_p, i_b].Jp = Jp[i_b, i_p]
-            self.particles[f, i_p, i_b].actu = actu[i_b, i_p]
-            self.particles_ng[f, i_p, i_b].active = active[i_b, i_p]
 
     def get_state(self, f):
         if not self.is_active:
             return None
 
+        particles = self.mpm_state.particles
         pos, vel, C, F, Jp = self._read_data(
-            (self.particles.pos, self.particles.vel, self.particles.C, self.particles.F, self.particles.Jp),
-            None,
-            None,
-            copy=True,
+            (particles.pos, particles.vel, particles.C, particles.F, particles.Jp), envs_idx=None, idx=None, copy=True
         )
         # The actuation and the activity are inputs of the step, which carry no gradient back
         actu, active = [
             qd_to_torch(field, row_mask=0, keepdim=False).movedim(1, 0).clone(memory_format=torch.contiguous_format)
-            for field in (self.particles.actu, self.particles_ng.active)
+            for field in (particles.actu, particles.is_active)
         ]
         return MPMSolverState(self._scene, pos, vel, C, F, Jp, actu, active)
 
     def update_render_fields(self):
-        self._kernel_update_render_fields(self.sim.cur_substep_local)
-
-    @qd.kernel
-    def _kernel_update_render_fields(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles_render[i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles_render[i_p, i_b].vel = self.particles[f, i_p, i_b].vel
-            else:
-                self.particles_render[i_p, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
-
-        for i_v, i_b in qd.ndrange(self._n_vverts, self._B):
-            vvert_pos = qd.Vector.zero(gs.qd_float, 3)
-            for j in range(self._n_vvert_supports):
-                vvert_pos += (
-                    self.particles[f, self.vverts_info.support_idxs[i_v][j], i_b].pos
-                    * self.vverts_info.support_weights[i_v][j]
-                )
-            self.vverts_render[i_v, i_b].pos = vvert_pos
-            self.vverts_render[i_v, i_b].active = self.particles_render[
-                self.vverts_info.support_idxs[i_v][0], i_b
-            ].active
-
-    @qd.kernel
-    def add_particles(
-        self,
-        f: qd.i32,
-        active: qd.i32,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        material_idx: qd.i32,
-        mat_default_Jp: qd.f32,
-        mat_rho: qd.f32,
-        pos: qd.types.ndarray(),  # shape [n_particles, 3]
-    ):
-        for i_p_ in range(n_particles):
-            i_p = i_p_ + particle_start
-
-            self.particles_info[i_p].material_idx = material_idx
-            self.particles_info[i_p].default_Jp = mat_default_Jp
-            self.particles_info[i_p].mass = self._particle_volume * mat_rho
-            self.particles_info[i_p].free = True
-            self.particles_info[i_p].muscle_group = 0
-            self.particles_info[i_p].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
-
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
-            i_p = i_p_ + particle_start
-
-            self.particles_ng[f, i_p, i_b].active = qd.cast(active, gs.qd_bool)
-            for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[i] = pos[i_p_, i]
-
-            self.particles[f, i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles[f, i_p, i_b].Jp = mat_default_Jp
-            self.particles[f, i_p, i_b].actu = gs.qd_float(0.0)
+        kernel_update_render_fields(self.sim.cur_substep_local, self.mpm_state, self.mpm_info)
 
     @gs.assert_built
     @mutates()
@@ -803,14 +444,14 @@ class MPMSolver(ParticleSolver):
         actus, particles_idx, envs_idx = self._sanitize_io_variables(
             actus, particles_idx, self.n_particles, "particles_idx", envs_idx, (n_groups,), batched_idx=True
         )
-        self._kernel_set_particles_actu(particles_idx, envs_idx, actus, n_groups)
+        kernel_set_particles_actu(particles_idx, envs_idx, actus, self.mpm_state, self.mpm_info)
 
     def get_particles_actu(self, particles_idx=None, envs_idx=None):
         """Get the actuation of some particles (see 'set_particles_actu')."""
         actus, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True
         )
-        self._kernel_get_particles_actu(particles_idx, envs_idx, actus)
+        kernel_get_particles_actu(particles_idx, envs_idx, actus, self.mpm_state)
         return actus[0] if self._scene.n_envs == 0 else actus
 
     @mutates(StateChange.MODEL)
@@ -819,14 +460,14 @@ class MPMSolver(ParticleSolver):
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             muscle_group, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        self._kernel_set_particles_muscle_group(particles_idx, muscle_group)
+        kernel_set_particles_muscle_group(particles_idx, muscle_group, self.mpm_info)
 
     def get_particles_muscle_group(self, particles_idx=None):
         """Get the muscle group of some particles (see 'set_particles_muscle_group')."""
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        self._kernel_get_particles_muscle_group(particles_idx, muscle_group)
+        kernel_get_particles_muscle_group(particles_idx, muscle_group, self.mpm_info)
         return muscle_group
 
     @mutates(StateChange.MODEL)
@@ -835,7 +476,7 @@ class MPMSolver(ParticleSolver):
         muscle_direction, particles_idx, _ = self._sanitize_io_variables(
             muscle_direction, particles_idx, self.n_particles, "particles_idx", element_shape=(3,), batched=False
         )
-        self._kernel_set_particles_muscle_direction(particles_idx, muscle_direction)
+        kernel_set_particles_muscle_direction(particles_idx, muscle_direction, self.mpm_info)
 
     @mutates(StateChange.MODEL)
     def set_particles_free(self, free, particles_idx=None):
@@ -843,158 +484,36 @@ class MPMSolver(ParticleSolver):
         free, particles_idx, _ = self._sanitize_io_variables(
             free, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        self._kernel_set_particles_free(particles_idx, free)
+        kernel_set_particles_free(particles_idx, free, self.mpm_info)
 
     def get_particles_free(self, particles_idx=None):
         """Get whether some particles move freely (see 'set_particles_free')."""
         free, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        self._kernel_get_particles_free(particles_idx, free)
+        kernel_get_particles_free(particles_idx, free, self.mpm_info)
         return free
 
-    @qd.kernel
-    def _kernel_set_particles_pos(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), poss: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index'). Between two steps, the
-            # state sits in frame 0 (see 'Solver.has_frames').
-            if i_p >= 0:
-                for i in qd.static(range(3)):
-                    self.particles[0, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
+    def _kernel_set_particles_pos(self, particles_idx, envs_idx, poss):
+        kernel_set_particles_pos(particles_idx, envs_idx, poss, self.mpm_state, self.mpm_info)
 
-                # Reset these attributes whenever overwriting particle positions manually
-                self.particles[0, i_p, i_b].vel.fill(0.0)
-                self.particles[0, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-                self.particles[0, i_p, i_b].C.fill(0.0)
-                self.particles[0, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
+    def _kernel_get_particles_pos(self, particles_idx, envs_idx, poss):
+        kernel_get_particles_pos(particles_idx, envs_idx, poss, self.mpm_state)
 
-    @qd.kernel
-    def _kernel_get_particles_pos(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), poss: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                poss[i_b_, i_p_, i] = self.particles[0, i_p, i_b].pos[i]
+    def _kernel_set_particles_vel(self, particles_idx, envs_idx, vels):
+        kernel_set_particles_vel(particles_idx, envs_idx, vels, self.mpm_state)
 
-    @qd.kernel
-    def _kernel_set_particles_vel(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vels: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                for i in qd.static(range(3)):
-                    self.particles[0, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
+    def _kernel_get_particles_vel(self, particles_idx, envs_idx, vels):
+        kernel_get_particles_vel(particles_idx, envs_idx, vels, self.mpm_state)
 
-    @qd.kernel
-    def _kernel_get_particles_vel(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vels: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                vels[i_b_, i_p_, i] = self.particles[0, i_p, i_b].vel[i]
+    def _kernel_set_particles_active(self, particles_idx, envs_idx, actives):
+        kernel_set_particles_active(particles_idx, envs_idx, actives, self.mpm_state)
 
-    @qd.kernel
-    def _kernel_set_particles_active(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actives: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                self.particles_ng[0, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+    def _kernel_get_particles_active(self, particles_idx, envs_idx, actives):
+        kernel_get_particles_active(particles_idx, envs_idx, actives, self.mpm_state)
 
-    @qd.kernel
-    def _kernel_get_particles_active(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actives: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            actives[i_b_, i_p_] = self.particles_ng[0, i_p, i_b].active
-
-    @qd.kernel
-    def _kernel_set_particles_actu(
-        self,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        actus: qd.types.ndarray(),  # shape [B, n_particles, n_groups]
-        n_groups: int,
-    ):
-        for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                if self.particles_info[i_p].muscle_group == i_g:
-                    self.particles[0, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
-
-    @qd.kernel
-    def _kernel_get_particles_actu(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actus: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            actus[i_b_, i_p_] = self.particles[0, i_p, i_b].actu
-
-    @qd.kernel
-    def _kernel_set_particles_muscle_group(self, particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray()):
-        for i_p_ in range(particles_idx.shape[0]):
-            i_p = particles_idx[i_p_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                self.particles_info[i_p].muscle_group = muscle_group[i_p_]
-
-    @qd.kernel
-    def _kernel_get_particles_muscle_group(self, particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray()):
-        for i_p_ in range(particles_idx.shape[0]):
-            i_p = particles_idx[i_p_]
-            muscle_group[i_p_] = self.particles_info[i_p].muscle_group
-
-    @qd.kernel
-    def _kernel_set_particles_muscle_direction(
-        self, particles_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray()
-    ):
-        for i_p_ in range(particles_idx.shape[0]):
-            i_p = particles_idx[i_p_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                for i in qd.static(range(3)):
-                    self.particles_info[i_p].muscle_direction[i] = muscle_direction[i_p_, i]
-
-    @qd.kernel
-    def _kernel_set_particles_free(self, particles_idx: qd.types.ndarray(), free: qd.types.ndarray()):
-        for i_p_ in range(particles_idx.shape[0]):
-            i_p = particles_idx[i_p_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                self.particles_info[i_p].free = free[i_p_]
-
-    @qd.kernel
-    def _kernel_get_particles_free(self, particles_idx: qd.types.ndarray(), free: qd.types.ndarray()):
-        for i_p_ in range(particles_idx.shape[0]):
-            i_p = particles_idx[i_p_]
-            free[i_p_] = self.particles_info[i_p].free
-
-    @qd.kernel
-    def _kernel_get_particles_mass(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), masses: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            masses[i_b_, i_p_] = self.particles_info[i_p].mass / self._particle_volume_scale
+    def _kernel_get_particles_mass(self, particles_idx, envs_idx, masses):
+        kernel_get_particles_mass(particles_idx, envs_idx, masses, self.mpm_info)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- particle constraints ------------------------------
@@ -1021,8 +540,18 @@ class MPMSolver(ParticleSolver):
         """
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
-        if not self._constraints_initialized:
-            self.init_constraints()
+        if self.particle_constraints_info is None:
+            # The flat index of a vector array fits in int32
+            if self._n_particles * self._B * 3 > np.iinfo(np.int32).max:
+                gs.raise_exception(
+                    f"Particle constraint shape (n_envs={self._B}, n_particles={self._n_particles}, 3) is too large. "
+                    "Consider reducing n_envs or n_particles."
+                )
+            # Allocated the first time a particle is attached, which most scenes never do
+            self.particle_constraints_info = array_class.MPMParticleConstraintsInfo(
+                sizes=dict(particles=self._n_particles, envs=self._B)
+            )
+            self.particle_constraints_info.link_idx.fill(-1)
         particles_mask = broadcast_tensor(
             particles_mask, gs.tc_bool, (self._B, -1), ("envs_idx", "particles_idx")
         ).contiguous()
@@ -1035,7 +564,16 @@ class MPMSolver(ParticleSolver):
             link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
         link_pos = broadcast_tensor(link_pos, gs.tc_float, (self._B, 3)).contiguous()
         link_quat = broadcast_tensor(link_quat, gs.tc_float, (self._B, 4)).contiguous()
-        self._kernel_set_particle_constraints(particles_start, link_idx, stiffness, particles_mask, link_pos, link_quat)
+        kernel_set_particle_constraints(
+            particles_start,
+            link_idx,
+            stiffness,
+            particles_mask,
+            link_pos,
+            link_quat,
+            self.mpm_state,
+            self.particle_constraints_info,
+        )
 
     @gs.assert_built
     @mutates(StateChange.MODEL)
@@ -1051,7 +589,7 @@ class MPMSolver(ParticleSolver):
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        if not self._constraints_initialized:
+        if self.particle_constraints_info is None:
             return
         n_particles = -1
         if particles_mask is None:
@@ -1062,79 +600,7 @@ class MPMSolver(ParticleSolver):
         ).contiguous()
         if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
             gs.raise_exception("The particle mask overruns the particles of the solver.")
-        self._kernel_remove_particle_constraints(particles_start, particles_mask)
-
-    @qd.kernel
-    def _kernel_set_particle_constraints(
-        self,
-        particles_start: int,
-        link_idx: int,
-        stiffness: float,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
-        link_pos: qd.types.ndarray(),  # shape [n_envs, 3]
-        link_quat: qd.types.ndarray(),  # shape [n_envs, 4]
-    ):
-        for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-            if particles_mask[i_b, i_p_]:
-                i_p = i_p_ + particles_start
-                # Get current particle position. Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
-                pos = self.particles[0, i_p, i_b].pos
-
-                # Get link transform
-                l_pos = qd.Vector([link_pos[i_b, 0], link_pos[i_b, 1], link_pos[i_b, 2]], dt=gs.qd_float)
-                l_quat = qd.Vector(
-                    [link_quat[i_b, 0], link_quat[i_b, 1], link_quat[i_b, 2], link_quat[i_b, 3]], dt=gs.qd_float
-                )
-
-                # Compute offset in link's local frame
-                local_pos = gu.qd_inv_transform_by_trans_quat(pos, l_pos, l_quat)
-
-                # Store constraint info
-                self.particle_constraints[i_p, i_b].is_constrained = True
-                self.particle_constraints[i_p, i_b].target_pos = pos  # initial target is current position
-                self.particle_constraints[i_p, i_b].stiffness = stiffness
-                self.particle_constraints[i_p, i_b].link_idx = link_idx
-                self.particle_constraints[i_p, i_b].link_local_pos = local_pos
-
-    @qd.kernel
-    def _kernel_remove_particle_constraints(
-        self,
-        particles_start: int,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
-    ):
-        for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-            if particles_mask[i_b, i_p_]:
-                i_p = i_p_ + particles_start
-                self.particle_constraints[i_p, i_b].is_constrained = False
-                self.particle_constraints[i_p, i_b].link_idx = -1
-
-    @qd.kernel
-    def apply_particle_constraints(self, f: qd.i32, links_state: LinksState):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particle_constraints[i_p, i_b].is_constrained:
-                # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
-                # reverse a field read back after it is overwritten in the same kernel.
-                target_pos = self.particle_constraints[i_p, i_b].target_pos
-                i_l = self.particle_constraints[i_p, i_b].link_idx
-                if i_l >= 0:
-                    link_pos = links_state.pos[i_l, i_b]
-                    link_quat = links_state.quat[i_l, i_b]
-                    local_pos = self.particle_constraints[i_p, i_b].link_local_pos
-                    target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
-
-                # Apply spring force to velocity
-                stiffness = self.particle_constraints[i_p, i_b].stiffness
-                mass = self.particles_info[i_p].mass / self._particle_volume_scale
-
-                pos = self.particles[f + 1, i_p, i_b].pos
-                vel = self.particles[f + 1, i_p, i_b].vel
-
-                pos_error = pos - target_pos
-                spring_force = -stiffness * pos_error
-                damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
-
-                # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
-                self.particles[f + 1, i_p, i_b].vel += self.substep_dt * (spring_force + damping_force) / mass
+        kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints_info)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1186,14 +652,6 @@ class MPMSolver(ParticleSolver):
         return self._lower_bound
 
     @property
-    def leaf_block_size(self):
-        raise DeprecationError("This property has been removed.")
-
-    @property
-    def use_sparse_grid(self):
-        return DeprecationError("This property has been removed.")
-
-    @property
     def dx(self):
         return self._dx
 
@@ -1230,39 +688,747 @@ class MPMSolver(ParticleSolver):
         return self._grid_res
 
     @property
-    def grid_offset(self):
-        return self._grid_offset
-
-    @property
     def enable_CPIC(self):
         return self._enable_CPIC
 
-    @property
-    def enable_particle_constraints(self):
-        return self._enable_particle_constraints
+
+# ------------------------------------------------------------------------------------
+# ------------------------------------- kernels --------------------------------------
+# ------------------------------------------------------------------------------------
 
 
 @qd.func
-def signmax(a, eps):
-    sign = qd.select(a >= 0, 1.0, -1.0)
-    return sign * qd.max(qd.abs(a), eps)
+def func_quadratic_bspline_stencil(pos: qd.types.vector(3), inv_dx: float):
+    """Return the quadratic B-spline stencil of the grid around a position.
+
+    The stencil spans the 3x3x3 cells from the returned lower cell on. The position lies at the returned offset from
+    that cell, in units of cells, and the weight of the cell at offset (i, j, k) from it is the product of the entries
+    (i, 0), (j, 1) and (k, 2) of the returned matrix.
+    """
+    base = qd.floor(pos * inv_dx - 0.5).cast(gs.qd_int)
+    fx = pos * inv_dx - base.cast(gs.qd_float)
+    w = qd.Matrix.rows([0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2])
+    return base, fx, w
+
+
+@qd.kernel(fastcache=True)
+def kernel_compute_F_tmp(
+    f: int, mpm_state: array_class.MPMState, mpm_info: array_class.MPMInfo, compute_svd: qd.template()
+):
+    """
+    Advect the deformation gradient of the active particles of a frame over the substep, then optionally decompose it.
+
+    The decomposition in the same kernel keeps the advected deformation gradient in registers. A pass recording
+    gradients decomposes it in kernel_svd instead, whose backward is registered with it.
+    """
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            F_tmp = (
+                qd.Matrix.identity(gs.qd_float, 3) + mpm_info.substep_dt[None] * mpm_state.particles.C[f, i_p, i_b]
+            ) @ mpm_state.particles.F[f, i_p, i_b]
+            mpm_state.particles.F_tmp[f, i_p, i_b] = F_tmp
+            if qd.static(compute_svd):
+                U, S, V = qd.svd(F_tmp, gs.qd_float)
+                mpm_state.particles.U[f, i_p, i_b] = U
+                mpm_state.particles.S[f, i_p, i_b] = S
+                mpm_state.particles.V[f, i_p, i_b] = V
+
+
+@qd.kernel(fastcache=True)
+def kernel_svd_grad(f: int, mpm_state: array_class.MPMState):
+    """Reverse the singular value decomposition of a frame, consuming the adjoint of its factors like autodiff."""
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            mpm_state.particles.F_tmp.grad[f, i_p, i_b] += func_backward_svd(
+                mpm_state.particles.U.grad[f, i_p, i_b],
+                mpm_state.particles.S.grad[f, i_p, i_b],
+                mpm_state.particles.V.grad[f, i_p, i_b],
+                mpm_state.particles.U[f, i_p, i_b],
+                mpm_state.particles.S[f, i_p, i_b],
+                mpm_state.particles.V[f, i_p, i_b],
+            )
+            mpm_state.particles.U.grad[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            mpm_state.particles.S.grad[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            mpm_state.particles.V.grad[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+
+# The decomposition is reversed in closed form, which autodiff cannot derive
+@register_custom_backward(kernel_svd_grad)
+@qd.kernel(fastcache=True)
+def kernel_svd(f: int, mpm_state: array_class.MPMState):
+    """Decompose the advected deformation gradient of the active particles of a frame into its singular values."""
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            U, S, V = qd.svd(mpm_state.particles.F_tmp[f, i_p, i_b], gs.qd_float)
+            mpm_state.particles.U[f, i_p, i_b] = U
+            mpm_state.particles.S[f, i_p, i_b] = S
+            mpm_state.particles.V[f, i_p, i_b] = V
+
+
+@qd.kernel
+def kernel_p2g(
+    f: int,
+    mpm_state: array_class.MPMState,
+    geoms_state: array_class.GeomsState,
+    mpm_info: array_class.MPMInfo,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
+    static_config: qd.template(),
+    collider_static_config: qd.template(),
+    material_dispatcher: qd.template(),
+):
+    """
+    Update the deformation of the active particles of a frame, then scatter their momentum and mass to the grid.
+
+    The material of each particle updates its deformation gradient and plastic volume ratio into the next frame and
+    gives its stress, which enters the momentum. With Compatible Particle-In-Cell (CPIC), a cell separated from a
+    particle by a thin rigid geom gets nothing from it (see MPMCPIC). Without gradient, the cells first touched are
+    listed for the sparse reset (see MPMGrid).
+    """
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            substep_dt = mpm_info.substep_dt[None]
+            dx = mpm_info.dx[None]
+            inv_dx = mpm_info.inv_dx[None]
+            grid_offset = mpm_info.grid_offset[None]
+
+            # The determinant of F_tmp equals that of S, since U and V of the singular value decomposition are proper
+            # rotations (see MPMStaticConfig). J is declared before the branches, which quadrants scopes locally.
+            J = gs.qd_float(0.0)
+            if qd.static(static_config.is_svd_needed):
+                J = mpm_state.particles.S[f, i_p, i_b].determinant()
+            else:
+                J = mpm_state.particles.F_tmp[f, i_p, i_b].determinant()
+            i_mat = mpm_info.particles.material_idx[i_p]
+            F_new, S_new, Jp_new = material_dispatcher.update_F_S_Jp(
+                i_mat,
+                J,
+                mpm_state.particles.F_tmp[f, i_p, i_b],
+                mpm_state.particles.U[f, i_p, i_b],
+                mpm_state.particles.S[f, i_p, i_b],
+                mpm_state.particles.V[f, i_p, i_b],
+                mpm_state.particles.Jp[f, i_p, i_b],
+            )
+            mpm_state.particles.F[f + 1, i_p, i_b] = F_new
+            mpm_state.particles.Jp[f + 1, i_p, i_b] = Jp_new
+            # The actuation holds over every substep of the step it is set at, and until it is set again
+            mpm_state.particles.actu[f + 1, i_p, i_b] = mpm_state.particles.actu[f, i_p, i_b]
+
+            # The stress takes both the advected deformation gradient and the one once plasticity applies: the elastic
+            # materials read the latter, while a viscous liquid reads the former, whose shear the plasticity removes.
+            # The plastic volume ratio is that of the frame the substep starts from.
+            stress = material_dispatcher.update_stress(
+                i_mat,
+                mpm_state.particles.U[f, i_p, i_b],
+                S_new,
+                mpm_state.particles.V[f, i_p, i_b],
+                mpm_state.particles.F_tmp[f, i_p, i_b],
+                F_new,
+                J,
+                mpm_state.particles.Jp[f, i_p, i_b],
+                mpm_state.particles.actu[f, i_p, i_b],
+                mpm_info.particles.muscle_direction[i_p],
+            )
+            stress = (-substep_dt * mpm_info.particle_volume[None] * 4 * inv_dx * inv_dx) * stress
+            affine = stress + mpm_info.particles.mass[i_p] * mpm_state.particles.C[f, i_p, i_b]
+
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
+            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                dpos = (offset.cast(gs.qd_float) - fx) * dx
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= w[offset[d], d]
+
+                i_g_sep = -1
+                if qd.static(static_config.enable_CPIC):
+                    cell_pos = (base + offset) * dx
+                    for i_g in range(mpm_state.cpic.rigid_normal.shape[1]):
+                        if i_g_sep == -1 and geoms_info.needs_coup[i_g]:
+                            sdf_normal_particle = mpm_state.cpic.rigid_normal[i_p, i_g, i_b]
+                            sdf_normal_cell = sdf.sdf_func_normal_world(
+                                i_g,
+                                i_b,
+                                cell_pos,
+                                geoms_state,
+                                geoms_info,
+                                rigid_info,
+                                sdf_info,
+                                collider_static_config,
+                            )
+                            # The particle and the cell lie on opposite sides of the geom
+                            if sdf_normal_particle.dot(sdf_normal_cell) < 0:
+                                i_g_sep = i_g
+                    mpm_state.cpic.cells_geom_idx[i_p, offset[0], offset[1], offset[2], i_b] = i_g_sep
+                cell_ijk = base - grid_offset + offset
+                if i_g_sep == -1:
+                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] += weight * (
+                        mpm_info.particles.mass[i_p] * mpm_state.particles.vel[f, i_p, i_b] + affine @ dpos
+                    )
+                    mass_contrib = weight * mpm_info.particles.mass[i_p]
+                    prev_mass = qd.atomic_add(
+                        mpm_state.grid.mass[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b], mass_contrib
+                    )
+                    # The first contribution of an env to a cell claims the cell in the dirty flag shared by the envs,
+                    # and the first env claiming it lists it (see MPMGrid). The masses are non-negative.
+                    if qd.static(not static_config.requires_grad):
+                        if prev_mass <= 0.0 and mass_contrib > 0.0:
+                            dirty_flag_prev = qd.atomic_or(
+                                mpm_state.grid.dirty_flag[cell_ijk[0], cell_ijk[1], cell_ijk[2]], gs.qd_int(1)
+                            )
+                            if dirty_flag_prev == 0:
+                                i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
+                                grid_res_y, grid_res_z = mpm_state.grid.mass.shape[2], mpm_state.grid.mass.shape[3]
+                                i_cell = (cell_ijk[0] * grid_res_y + cell_ijk[1]) * grid_res_z + cell_ijk[2]
+                                mpm_state.grid.dirty_list[i_slot] = i_cell
+
+                # The particles held in place act as boundary conditions of the grid
+                if not mpm_info.particles.is_free[i_p]:
+                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] = qd.Vector.zero(
+                        gs.qd_float, 3
+                    )
+
+
+@qd.kernel
+def kernel_g2p(
+    f: int,
+    mpm_state: array_class.MPMState,
+    links_state: array_class.LinksState,
+    mpm_info: array_class.MPMInfo,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    static_config: qd.template(),
+):
+    """
+    Gather the velocity of the grid back to the active particles of a frame and advect them into the next frame.
+
+    With Compatible Particle-In-Cell (CPIC), a cell separated from a particle by a thin rigid geom contributes the
+    velocity of the particle colliding with that geom instead (see MPMCPIC). The inactive particles carry their state
+    over to the next frame unchanged.
+    """
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            substep_dt = mpm_info.substep_dt[None]
+            inv_dx = mpm_info.inv_dx[None]
+            grid_offset = mpm_info.grid_offset[None]
+
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
+            new_vel = qd.Vector.zero(gs.qd_float, 3)
+            new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                dpos = offset.cast(gs.qd_float) - fx
+                cell_ijk = base - grid_offset + offset
+                grid_vel = mpm_state.grid.vel_out[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b]
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= w[offset[d], d]
+
+                if qd.static(static_config.enable_CPIC):
+                    i_g_sep = mpm_state.cpic.cells_geom_idx[i_p, offset[0], offset[1], offset[2], i_b]
+                    if i_g_sep != -1:
+                        grid_vel = func_collide_in_rigid_geom(
+                            i_g_sep,
+                            i_b,
+                            mpm_state.particles.pos[f, i_p, i_b],
+                            mpm_state.particles.vel[f, i_p, i_b],
+                            mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
+                            mpm_state.cpic.rigid_normal[i_p, i_g_sep, i_b],
+                            influence=1.0,
+                            links_state=links_state,
+                            geoms_info=geoms_info,
+                            rigid_info=rigid_info,
+                        )
+
+                new_vel += weight * grid_vel
+                new_C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
+
+            new_pos = mpm_state.particles.pos[f, i_p, i_b] + substep_dt * new_vel
+
+            # The boundary keeps an exploding simulation from reading cells out of the grid
+            new_pos, new_vel = func_impose_cube_boundary(new_pos, new_vel, mpm_info.boundary)
+
+            mpm_state.particles.vel[f + 1, i_p, i_b] = new_vel
+            mpm_state.particles.C[f + 1, i_p, i_b] = new_C
+            mpm_state.particles.pos[f + 1, i_p, i_b] = new_pos
+        else:
+            mpm_state.particles.vel[f + 1, i_p, i_b] = mpm_state.particles.vel[f, i_p, i_b]
+            mpm_state.particles.pos[f + 1, i_p, i_b] = mpm_state.particles.pos[f, i_p, i_b]
+            mpm_state.particles.C[f + 1, i_p, i_b] = mpm_state.particles.C[f, i_p, i_b]
+            mpm_state.particles.F[f + 1, i_p, i_b] = mpm_state.particles.F[f, i_p, i_b]
+            mpm_state.particles.Jp[f + 1, i_p, i_b] = mpm_state.particles.Jp[f, i_p, i_b]
+
+        mpm_state.particles.is_active[f + 1, i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
+
+
+@no_grad
+@qd.kernel(fastcache=True)
+def kernel_flag_non_finite_pos(f: int, mpm_state: array_class.MPMState, errno: qd.Tensor):
+    """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if not qd_isfinite(mpm_state.particles.pos[f, i_p, i_b]):
+            errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
+
+
+@qd.kernel(fastcache=True)
+def kernel_copy_frame(source: int, target: int, mpm_state: array_class.MPMState):
+    """Copy the state of the particles from one frame to another."""
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        mpm_state.particles.pos[target, i_p, i_b] = mpm_state.particles.pos[source, i_p, i_b]
+        mpm_state.particles.vel[target, i_p, i_b] = mpm_state.particles.vel[source, i_p, i_b]
+        mpm_state.particles.F[target, i_p, i_b] = mpm_state.particles.F[source, i_p, i_b]
+        mpm_state.particles.C[target, i_p, i_b] = mpm_state.particles.C[source, i_p, i_b]
+        mpm_state.particles.Jp[target, i_p, i_b] = mpm_state.particles.Jp[source, i_p, i_b]
+        mpm_state.particles.actu[target, i_p, i_b] = mpm_state.particles.actu[source, i_p, i_b]
+        mpm_state.particles.is_active[target, i_p, i_b] = mpm_state.particles.is_active[source, i_p, i_b]
+
+
+@no_grad
+@qd.kernel(fastcache=True)
+def kernel_reset_grid_and_grad(f: int, mpm_state: array_class.MPMState):
+    """Zero every cell of the grid of a frame for every environment, with its adjoint."""
+    for i_x, i_y, i_z, i_b in qd.ndrange(
+        mpm_state.grid.mass.shape[1],
+        mpm_state.grid.mass.shape[2],
+        mpm_state.grid.mass.shape[3],
+        mpm_state.grid.mass.shape[4],
+    ):
+        mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] = gs.qd_float(0.0)
+        mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+        mpm_state.grid.vel_in.grad[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        mpm_state.grid.mass.grad[f, i_x, i_y, i_z, i_b] = gs.qd_float(0.0)
+        mpm_state.grid.vel_out.grad[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel(fastcache=True)
+def kernel_reset_dirty_cells(f: int, mpm_state: array_class.MPMState):
+    """
+    Zero the cells of the grid of a frame that p2g touched, across all envs, along with their dirty flags.
+
+    The dirty list is shared across envs (see MPMGrid), so threads past the dirty count idle. The thread of the first
+    env alone zeroes the flag of its cell, for the next substep to list it again.
+    """
+    for i_slot, i_b in qd.ndrange(mpm_state.grid.dirty_list.shape[0], mpm_state.grid.mass.shape[4]):
+        if i_slot < mpm_state.grid.dirty_count[0]:
+            grid_res_y, grid_res_z = mpm_state.grid.mass.shape[2], mpm_state.grid.mass.shape[3]
+            i_cell = mpm_state.grid.dirty_list[i_slot]
+            i_z = i_cell % grid_res_z
+            i_xy = i_cell // grid_res_z
+            i_y = i_xy % grid_res_y
+            i_x = i_xy // grid_res_y
+            mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] = gs.qd_float(0.0)
+            mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            if i_b == 0:
+                mpm_state.grid.dirty_flag[i_x, i_y, i_z] = gs.qd_int(0)
+
+
+@qd.kernel(fastcache=True)
+def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: array_class.MPMState):
+    """Zero the normals of the thin rigid geoms seen by the particles of some environments (see MPMCPIC)."""
+    for i_p, i_g, i_b_ in qd.ndrange(
+        mpm_state.cpic.rigid_normal.shape[0], mpm_state.cpic.rigid_normal.shape[1], envs_idx.shape[0]
+    ):
+        i_b = envs_idx[i_b_]
+        mpm_state.cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_state(
+    f: int,
+    pos: qd.types.ndarray(),
+    vel: qd.types.ndarray(),
+    C: qd.types.ndarray(),
+    F: qd.types.ndarray(),
+    Jp: qd.types.ndarray(),
+    actu: qd.types.ndarray(),
+    active: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Write the state of every particle of every environment into a frame, from arrays of the environment first."""
+    for i_p, i_b in qd.ndrange(pos.shape[1], pos.shape[0]):
+        for j in qd.static(range(3)):
+            mpm_state.particles.pos[f, i_p, i_b][j] = pos[i_b, i_p, j]
+            mpm_state.particles.vel[f, i_p, i_b][j] = vel[i_b, i_p, j]
+            for k in qd.static(range(3)):
+                mpm_state.particles.C[f, i_p, i_b][j, k] = C[i_b, i_p, j, k]
+                mpm_state.particles.F[f, i_p, i_b][j, k] = F[i_b, i_p, j, k]
+        mpm_state.particles.Jp[f, i_p, i_b] = Jp[i_b, i_p]
+        mpm_state.particles.actu[f, i_p, i_b] = actu[i_b, i_p]
+        mpm_state.particles.is_active[f, i_p, i_b] = active[i_b, i_p]
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_render_fields(f: int, mpm_state: array_class.MPMState, mpm_info: array_class.MPMInfo):
+    """Copy the particles of a frame to their rendered state, and skin the visual vertices on them."""
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            mpm_state.particles_render.pos[i_p, i_b] = mpm_state.particles.pos[f, i_p, i_b]
+            mpm_state.particles_render.vel[i_p, i_b] = mpm_state.particles.vel[f, i_p, i_b]
+        else:
+            mpm_state.particles_render.pos[i_p, i_b] = gu.qd_nowhere()
+        mpm_state.particles_render.is_active[i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
+
+    for i_v, i_b in qd.ndrange(mpm_state.vverts_render.pos.shape[0], mpm_state.vverts_render.pos.shape[1]):
+        support_idxs = mpm_info.vverts.support_idxs[i_v]
+        support_weights = mpm_info.vverts.support_weights[i_v]
+        vvert_pos = qd.Vector.zero(gs.qd_float, 3)
+        for j in qd.static(range(support_idxs.n)):
+            i_p = support_idxs[j]
+            vvert_pos += mpm_state.particles.pos[f, i_p, i_b] * support_weights[j]
+        mpm_state.vverts_render.pos[i_v, i_b] = vvert_pos
+        i_p_first = support_idxs[0]
+        mpm_state.vverts_render.is_active[i_v, i_b] = mpm_state.particles_render.is_active[i_p_first, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_particles(
+    f: int,
+    particle_start: int,
+    material_idx: int,
+    n_particles: int,
+    active: bool,
+    default_Jp: float,
+    rho: float,
+    pos: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+):
+    """Add particles at rest to a frame, with the parameters of their material."""
+    for i_p_ in range(n_particles):
+        i_p = i_p_ + particle_start
+
+        mpm_info.particles.material_idx[i_p] = material_idx
+        mpm_info.particles.default_Jp[i_p] = default_Jp
+        mpm_info.particles.mass[i_p] = mpm_info.particle_volume[None] * rho
+        mpm_info.particles.is_free[i_p] = True
+        mpm_info.particles.muscle_group[i_p] = 0
+        mpm_info.particles.muscle_direction[i_p] = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+
+    for i_p_, i_b in qd.ndrange(n_particles, mpm_state.particles.pos.shape[2]):
+        i_p = i_p_ + particle_start
+
+        mpm_state.particles.is_active[f, i_p, i_b] = active
+        for i in qd.static(range(3)):
+            mpm_state.particles.pos[f, i_p, i_b][i] = pos[i_p_, i]
+
+        mpm_state.particles.vel[f, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        mpm_state.particles.F[f, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+        mpm_state.particles.C[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+        mpm_state.particles.Jp[f, i_p, i_b] = default_Jp
+        mpm_state.particles.actu[f, i_p, i_b] = gs.qd_float(0.0)
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_pos(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    poss: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+):
+    """Set the position of some particles between two steps, at rest and undeformed."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index'). Between two steps, the
+        # state sits in frame 0 (see 'Solver.has_frames').
+        if i_p >= 0:
+            for i in qd.static(range(3)):
+                mpm_state.particles.pos[0, i_p, i_b][i] = poss[i_b_, i_p_, i]
+
+            # Reset these attributes whenever overwriting particle positions manually
+            mpm_state.particles.vel[0, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            mpm_state.particles.F[0, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+            mpm_state.particles.C[0, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            mpm_state.particles.Jp[0, i_p, i_b] = mpm_info.particles.default_Jp[i_p]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_pos(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    poss: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Get the position of some particles between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        for i in qd.static(range(3)):
+            poss[i_b_, i_p_, i] = mpm_state.particles.pos[0, i_p, i_b][i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_vel(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vels: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Set the velocity of some particles between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            for i in qd.static(range(3)):
+                mpm_state.particles.vel[0, i_p, i_b][i] = vels[i_b_, i_p_, i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_vel(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vels: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Get the velocity of some particles between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        for i in qd.static(range(3)):
+            vels[i_b_, i_p_, i] = mpm_state.particles.vel[0, i_p, i_b][i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_active(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actives: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Set whether some particles take part in the simulation between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            mpm_state.particles.is_active[0, i_p, i_b] = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_active(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actives: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Get whether some particles take part in the simulation between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        actives[i_b_, i_p_] = mpm_state.particles.is_active[0, i_p, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_actu(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actus: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+):
+    """Set the actuation of some particles between two steps, each one taking that of its muscle group."""
+    for i_p_, i_mg, i_b_ in qd.ndrange(particles_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            if mpm_info.particles.muscle_group[i_p] == i_mg:
+                mpm_state.particles.actu[0, i_p, i_b] = actus[i_b_, i_p_, i_mg]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_actu(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actus: qd.types.ndarray(),
+    mpm_state: array_class.MPMState,
+):
+    """Get the actuation of some particles between two steps."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        actus[i_b_, i_p_] = mpm_state.particles.actu[0, i_p, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_muscle_group(
+    particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), mpm_info: array_class.MPMInfo
+):
+    """Set the muscle group of some particles."""
+    for i_p_ in range(particles_idx.shape[0]):
+        i_p = particles_idx[i_p_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            mpm_info.particles.muscle_group[i_p] = muscle_group[i_p_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_muscle_group(
+    particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), mpm_info: array_class.MPMInfo
+):
+    """Get the muscle group of some particles."""
+    for i_p_ in range(particles_idx.shape[0]):
+        i_p = particles_idx[i_p_]
+        muscle_group[i_p_] = mpm_info.particles.muscle_group[i_p]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_muscle_direction(
+    particles_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray(), mpm_info: array_class.MPMInfo
+):
+    """Set the direction of the muscle fibers of some particles."""
+    for i_p_ in range(particles_idx.shape[0]):
+        i_p = particles_idx[i_p_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            for i in qd.static(range(3)):
+                mpm_info.particles.muscle_direction[i_p][i] = muscle_direction[i_p_, i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_free(
+    particles_idx: qd.types.ndarray(), free: qd.types.ndarray(), mpm_info: array_class.MPMInfo
+):
+    """Set whether some particles move freely or act as boundary conditions of the grid."""
+    for i_p_ in range(particles_idx.shape[0]):
+        i_p = particles_idx[i_p_]
+        # See 'kernel_set_particles_pos'
+        if i_p >= 0:
+            mpm_info.particles.is_free[i_p] = free[i_p_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_free(
+    particles_idx: qd.types.ndarray(), free: qd.types.ndarray(), mpm_info: array_class.MPMInfo
+):
+    """Get whether some particles move freely."""
+    for i_p_ in range(particles_idx.shape[0]):
+        i_p = particles_idx[i_p_]
+        free[i_p_] = mpm_info.particles.is_free[i_p]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_particles_mass(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    masses: qd.types.ndarray(),
+    mpm_info: array_class.MPMInfo,
+):
+    """Get the physical mass of some particles, the volume scale divided out."""
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        masses[i_b_, i_p_] = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particle_constraints(
+    particles_start: int,
+    link_idx: int,
+    stiffness: float,
+    particles_mask: qd.types.ndarray(),
+    link_pos: qd.types.ndarray(element_dim=1),
+    link_quat: qd.types.ndarray(element_dim=1),
+    mpm_state: array_class.MPMState,
+    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
+):
+    """Attach the masked particles to a link, at the point of its frame where each one lies now."""
+    for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
+        if particles_mask[i_b, i_p_]:
+            i_p = i_p_ + particles_start
+            # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
+            pos = mpm_state.particles.pos[0, i_p, i_b]
+            local_pos = gu.qd_inv_transform_by_trans_quat(pos, link_pos[i_b], link_quat[i_b])
+
+            particle_constraints_info.is_constrained[i_p, i_b] = True
+            particle_constraints_info.target_pos[i_p, i_b] = pos
+            particle_constraints_info.stiffness[i_p, i_b] = stiffness
+            particle_constraints_info.link_idx[i_p, i_b] = link_idx
+            particle_constraints_info.link_local_pos[i_p, i_b] = local_pos
+
+
+@qd.kernel(fastcache=True)
+def kernel_remove_particle_constraints(
+    particles_start: int,
+    particles_mask: qd.types.ndarray(),
+    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
+):
+    """Detach the masked particles from the link they are attached to."""
+    for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
+        if particles_mask[i_b, i_p_]:
+            i_p = i_p_ + particles_start
+            particle_constraints_info.is_constrained[i_p, i_b] = False
+            particle_constraints_info.link_idx[i_p, i_b] = -1
+
+
+@qd.kernel(fastcache=True)
+def kernel_apply_particle_constraints(
+    f: int,
+    mpm_state: array_class.MPMState,
+    links_state: array_class.LinksState,
+    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
+    mpm_info: array_class.MPMInfo,
+):
+    """Pull the constrained particles of the next frame toward their target with a critically damped spring."""
+    for i_p, i_b in qd.ndrange(
+        particle_constraints_info.is_constrained.shape[0], particle_constraints_info.is_constrained.shape[1]
+    ):
+        if particle_constraints_info.is_constrained[i_p, i_b]:
+            # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
+            # reverse a field read back after it is overwritten in the same kernel.
+            target_pos = particle_constraints_info.target_pos[i_p, i_b]
+            i_l = particle_constraints_info.link_idx[i_p, i_b]
+            if i_l >= 0:
+                target_pos = gu.qd_transform_by_trans_quat(
+                    particle_constraints_info.link_local_pos[i_p, i_b],
+                    links_state.pos[i_l, i_b],
+                    links_state.quat[i_l, i_b],
+                )
+
+            stiffness = particle_constraints_info.stiffness[i_p, i_b]
+            mass = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
+
+            pos_error = mpm_state.particles.pos[f + 1, i_p, i_b] - target_pos
+            spring_force = -stiffness * pos_error
+            damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * mpm_state.particles.vel[f + 1, i_p, i_b]
+
+            # The velocity is incremented in place, which autodiff reverses, since it cannot reverse an overwrite of a
+            # field the same kernel reads
+            mpm_state.particles.vel[f + 1, i_p, i_b] += (
+                mpm_info.substep_dt[None] * (spring_force + damping_force) / mass
+            )
 
 
 @qd.func
-def backward_svd(grad_U, grad_S, grad_V, U, S, V):
-    # https://github.com/pytorch/pytorch/blob/ab0a04dc9c8b84d4a03412f1c21a6c4a2cefd36c/tools/autograd/templates/Functions.cpp
+def func_backward_svd(
+    grad_U: qd.types.matrix(3, 3),
+    grad_S: qd.types.matrix(3, 3),
+    grad_V: qd.types.matrix(3, 3),
+    U: qd.types.matrix(3, 3),
+    S: qd.types.matrix(3, 3),
+    V: qd.types.matrix(3, 3),
+):
+    """
+    Return the adjoint of a matrix from the adjoint of the factors of its singular value decomposition.
+
+    The decomposition is A = U S V^T, with S diagonal. The adjoint is that of the closed-form derivative of the
+    decomposition, F_ij = 1 / (s_j^2 - s_i^2) coupling the singular values s, its denominator kept away from zero.
+    """
     vt = V.transpose()
     ut = U.transpose()
     S_term = U @ grad_S @ vt
 
-    s = qd.Vector.zero(gs.qd_float, 3)
     s = qd.Vector([S[0, 0], S[1, 1], S[2, 2]]) ** 2
     F = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i, j in qd.static(qd.ndrange(3, 3)):
         if i == j:
             F[i, j] = 0.0
         else:
-            F[i, j] = 1.0 / signmax(s[j] - s[i], 1e-6)
+            s_diff = s[j] - s[i]
+            F[i, j] = 1.0 / (qd.select(s_diff >= 0, 1.0, -1.0) * qd.max(qd.abs(s_diff), 1e-6))
     u_term = U @ ((F * (ut @ grad_U - grad_U.transpose() @ U)) @ S) @ vt
     v_term = U @ (S @ ((F * (vt @ grad_V - grad_V.transpose() @ V)) @ vt))
     return u_term + v_term + S_term
