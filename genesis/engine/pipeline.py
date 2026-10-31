@@ -710,10 +710,6 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
     dependencies = []
     for name in inspect.signature(cls).parameters:
         hint, conditions = hints[name], ()
-        # A type alias stands for its value, its type parameters taking the arguments it is given
-        while isinstance(typing.get_origin(hint) or hint, typing.TypeAliasType):
-            alias = typing.get_origin(hint) or hint
-            hint = alias.__value__[typing.get_args(hint)] if typing.get_args(hint) else alias.__value__
         if typing.get_origin(hint) is typing.Annotated:
             metadata = hint.__metadata__
             hint = hint.__origin__
@@ -820,129 +816,103 @@ def assemble_systems(
     Create and build the Systems a scene calls for, then route their roles and return them.
 
     `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, and `context`
-    the other objects a dependency may name, such as the options of the scene. A registered System is created as soon as
-    every System it depends on exists, every struct it depends on is built, and every condition on them holds. A System
-    created on demand, such as an instance of a component template, exists once an existing System depends on it. A
-    System is built once the Systems it depends on are built and every System that could still use its API is decided,
-    so that every request they make of it in their constructor is in, except those conditioned on it, which are decided
-    once it is built. A dependency on a struct never delays the build of its owner. The stage of each role is then
-    routed into its slot, in the order of the Systems: those given, then those created in registration order. A System
-    that a mandatory dependency or a condition rules out is absent, and so is a System another one supersedes, the
-    reason being logged.
+    the other objects a dependency may name, such as the options of the scene.
+
+    A registered System is created once every System it depends on exists, every struct it depends on is built, and
+    every condition on them holds, and is absent once one of them never will, the reason being logged. A component
+    exists once an existing System depends on it (see '_is_component'). A System is built once the Systems it depends
+    on are built and every System that could still use it is decided, so that every request they make of it in their
+    constructor is in, those needing its build aside (its parts, its Data, a condition on it). Its extension points
+    then bind their kernel, and the stage of each role is routed into its slot, in the order of the Systems: those
+    given, then those created in registration order, then the components.
     """
     systems = list(systems)
     built_ids = {id(system) for system in systems_built}
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
     classes_pending += list(dict.fromkeys([cls for system in systems for cls in system.requires]))
+    dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
-    def decide(cls: type[System]) -> tuple[str, Any]:
-        """Return whether a pending class is created (with its arguments), absent (with why), or waits."""
-        for system in systems:
-            for superseded in type(system).supersedes:
-                if isinstance(superseded, type) and issubclass(cls, superseded):
-                    return "absent", f"superseded by {type(system).__name__}"
-        # A class waits at the first dependency still undecided, before requiring any component it may never use
+    def decide(cls: type[System]) -> "dict[str, Any] | str | None":
+        """Return the arguments of a pending class to create, why it is absent, or None while it waits."""
+        if any(
+            [issubclass(cls, item) for system in systems for item in type(system).supersedes if isinstance(item, type)]
+        ):
+            return "superseded"
+        # The values a dependency may take, and the classes that may still provide one: the pending classes, the
+        # Systems not built yet, and what they own
+        values = [
+            *systems,
+            *context,
+            *[
+                value
+                for system in systems
+                if id(system) in built_ids
+                for name, value in vars(system).items()
+                if name[0] != "_"
+            ],
+        ]
+        classes_coming = [
+            owned
+            for owner in (*classes_pending, *[type(system) for system in systems if id(system) not in built_ids])
+            for owned in (owner, *_get_owned(owner))
+        ]
         args = {}
-        for dependency in _get_dependencies(cls):
-            classes = dependency.classes
-            owners_unbuilt = [type(system) for system in systems if id(system) not in built_ids]
-            if all([isinstance(c, type) and issubclass(c, Data) for c in classes]):
-                candidates = [
-                    value
-                    for system in systems
-                    if id(system) in built_ids
-                    for name, value in vars(system).items()
-                    if not name.startswith("_") and isinstance(value, classes)
-                ]
-                may_come = any(
-                    [
-                        issubclass(owned, classes)
-                        for owner in (*owners_unbuilt, *classes_pending)
-                        for owned in _get_owned(owner)
-                    ]
-                )
-            elif all([isinstance(c, type) and issubclass(c, System) for c in classes]):
-                candidates = [system for system in systems if isinstance(system, classes)]
-                # A part joins once its owner is built
-                may_come = any(
-                    [
-                        issubclass(c, classes)
-                        for owner in (*classes_pending, *owners_unbuilt)
-                        for c in (owner, *_get_owned(owner))
-                    ]
-                )
-                if not candidates and not dependency.is_optional:
-                    for needed in classes:
-                        if _is_component(needed) and needed not in classes_pending:
-                            classes_pending.append(needed)
-                            may_come = True
-            else:
-                candidates = [value for value in context if isinstance(value, classes)]
-                may_come = False
-            unique = []
-            for candidate in candidates:
-                if all([candidate is not other for other in unique]):
-                    unique.append(candidate)
-            if len(unique) > 1:
-                raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {unique}.")
-            if not unique:
-                if may_come:
-                    return "wait", None
-                if dependency.is_optional:
-                    args[dependency.name] = None
-                    continue
-                return "absent", f"no {' or '.join([c.__name__ for c in classes])} for '{dependency.name}'"
-            value = unique[0]
-            if dependency.conditions:
-                # A condition on a System is read once that System is built
-                if isinstance(value, System) and id(value) not in built_ids:
-                    return "wait", None
-                if not all([condition.holds(value) for condition in dependency.conditions]):
-                    if dependency.is_optional:
-                        args[dependency.name] = None
-                        continue
-                    return "absent", f"a condition on '{dependency.name}' does not hold"
+        for dependency in dependencies_by_cls.setdefault(cls, _get_dependencies(cls)):
+            candidates = list({id(value): value for value in values if isinstance(value, dependency.classes)}.values())
+            if len(candidates) > 1:
+                raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
+            if not candidates:
+                components = [c for c in dependency.classes if not dependency.is_optional and _is_component(c)]
+                classes_pending.extend([c for c in components if c not in classes_pending])
+                # A class waits at the first dependency still undecided, before requiring a component it may not use
+                if components or any([issubclass(c, dependency.classes) for c in classes_coming]):
+                    return None
+                if not dependency.is_optional:
+                    return f"no {' or '.join([c.__name__ for c in dependency.classes])} for '{dependency.name}'"
+                args[dependency.name] = None
+                continue
+            (value,) = candidates
+            # A condition on a System is read once that System is built
+            if dependency.conditions and isinstance(value, System) and id(value) not in built_ids:
+                return None
+            if not all([condition.holds(value) for condition in dependency.conditions]):
+                if not dependency.is_optional:
+                    return f"a condition on '{dependency.name}' does not hold"
+                value = None
             args[dependency.name] = value
-        return "create", args
+        return args
 
     while True:
         classes_decided = list(classes_pending)
         is_progressing = False
         for cls in classes_decided:
-            status, value = decide(cls)
-            if status == "wait":
+            decision = decide(cls)
+            if decision is None:
                 continue
             classes_pending.remove(cls)
             is_progressing = True
-            if status == "absent":
-                gs.logger.debug(f"{cls.__name__} is absent: {value}.")
+            if isinstance(decision, str):
+                gs.logger.debug(f"{cls.__name__} is absent: {decision}.")
                 continue
-            system = cls(**value)
-            system._dependencies = tuple([arg for arg in value.values() if isinstance(arg, System)])
-            system._data_dependencies = {name: arg for name, arg in value.items() if isinstance(arg, Data)}
+            system = cls(**decision)
+            system._dependencies = tuple([arg for arg in decision.values() if isinstance(arg, System)])
+            system._data_dependencies = {name: arg for name, arg in decision.items() if isinstance(arg, Data)}
             systems.append(system)
-        for system in list(systems):
-            if id(system) in built_ids:
-                continue
-            # A pending class that needs what the build of the System provides, its parts or its Data, is decided after
-            # it
+        for system in [system for system in systems if id(system) not in built_ids]:
+            # A pending class needing what the build of the System provides is decided after it
             owned = tuple(_get_owned(type(system)))
-            users_pending = [
-                cls
-                for cls in classes_pending
-                if not any([issubclass(c, owned) for dependency in _get_dependencies(cls) for c in dependency.classes])
-            ]
-            is_ready = all([id(dependency) in built_ids for dependency in system._dependencies]) and not any(
+            is_used_pending = any(
                 [
                     issubclass(type(system), c)
-                    for cls in users_pending
-                    for dependency in _get_dependencies(cls)
+                    for cls in classes_pending
+                    if not any([issubclass(c, owned) for d in dependencies_by_cls.get(cls, ()) for c in d.classes])
+                    for dependency in dependencies_by_cls.get(cls, _get_dependencies(cls))
                     if not dependency.conditions
                     for c in dependency.classes
                     if issubclass(c, System)
                 ]
             )
-            if not is_ready:
+            if is_used_pending or not all([id(dependency) in built_ids for dependency in system._dependencies]):
                 continue
             with _scoped(system):
                 system.build()
@@ -954,7 +924,7 @@ def assemble_systems(
                     part._dependencies = (system, *part._dependencies)
                     systems.append(part)
                     built_ids.add(id(part))
-        # A class created on demand joins the pending ones while they are decided
+        # A component joins the pending classes while they are decided
         if not is_progressing and all([cls in classes_decided for cls in classes_pending]):
             break
     unbuilt = [type(system).__name__ for system in systems if id(system) not in built_ids]
@@ -964,48 +934,23 @@ def assemble_systems(
             "each waits for another one."
         )
 
-    # The Systems in an order that does not depend on when they were created: those the scene held and their parts, then
-    # the registered ones in registration order, then those created on demand in creation order (the sort is stable)
+    # The Systems in an order that does not depend on when they were created (the sort is stable)
     registration = {cls: i for i, cls in enumerate(_SYSTEM_CLASSES)}
-
-    def get_rank(system: System) -> tuple[int, int]:
-        if type(system) in registration:
-            return 1, registration[type(system)]
-        return (2 if _is_component(type(system)) else 0), 0
-
-    systems = sorted(systems, key=get_rank)
+    systems.sort(
+        key=lambda system: (
+            (1, registration[type(system)]) if type(system) in registration else (2 * _is_component(type(system)), 0)
+        )
+    )
     # The extension points a System declares bind their kernel to its Data, whether or not a role fills them. A role
     # holds the extension point it fills as its slot, which its owner alone declares.
     for system in systems:
-        for name in [
-            name
-            for base in type(system).__mro__
-            for name, value in vars(base).items()
-            if isinstance(value, Inline) and value.owner is base and value.name == name
-        ]:
-            with _scoped(system):
-                _get_declared(system, name).bind()
+        for base in type(system).__mro__:
+            for name, value in vars(base).items():
+                if isinstance(value, Inline) and value.owner is base and value.name == name:
+                    with _scoped(system):
+                        _get_declared(system, name).bind()
     _route_roles(systems)
     return systems
-
-
-def _get_owner(systems: Sequence[System], system: System, owner_cls: type) -> System | None:
-    """
-    Return the System of a class offering a slot to a System: the one it depends on, else the one of the scene.
-
-    A slot of a System the scene does not hold is None, the roles filling it and the stages moving it doing nothing.
-    """
-    owners = [dep for dep in (system, *system._dependencies) if isinstance(dep, owner_cls)] or [
-        other for other in systems if isinstance(other, owner_cls)
-    ]
-    if len(owners) > 1:
-        raise TypeError(f"{type(system).__name__} names a slot that {len(owners)} {owner_cls.__name__} offer.")
-    return owners[0] if owners else None
-
-
-def _get_declared(system: System, name: str) -> "Phase | Inline":
-    """Return the Phase or the extension point a System class declares under a name, that of the System itself."""
-    return vars(system).get(name) or inspect.getattr_static(system, name).__get__(system, type(system))
 
 
 def _route_roles(systems: Sequence[System]) -> None:
@@ -1054,3 +999,22 @@ def _route_roles(systems: Sequence[System]) -> None:
                 target = target.slots[slot.slot]
             with _scoped(system):
                 target.add(*_get_stages(system, role))
+
+
+def _get_owner(systems: Sequence[System], system: System, owner_cls: type) -> System | None:
+    """
+    Return the System of a class offering a slot to a System: the one it depends on, else the one of the scene.
+
+    A slot of a System the scene does not hold is None, the roles filling it and the stages moving it doing nothing.
+    """
+    owners = [dep for dep in (system, *system._dependencies) if isinstance(dep, owner_cls)] or [
+        other for other in systems if isinstance(other, owner_cls)
+    ]
+    if len(owners) > 1:
+        raise TypeError(f"{type(system).__name__} names a slot that {len(owners)} {owner_cls.__name__} offer.")
+    return owners[0] if owners else None
+
+
+def _get_declared(system: System, name: str) -> "Phase | Inline":
+    """Return the Phase or the extension point a System class declares under a name, that of the System itself."""
+    return vars(system).get(name) or inspect.getattr_static(system, name).__get__(system, type(system))
