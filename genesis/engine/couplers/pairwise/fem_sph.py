@@ -4,12 +4,11 @@ from typing import Annotated
 
 import quadrants as qd
 
-import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.geom import func_hash_grid_to_slot, func_hash_pos_to_grid
 
 from .fem_surface import FEMSurface, SurfaceCoupling
 
@@ -29,36 +28,31 @@ def func_fem_sph(
     Return the velocity of a surface vertex whose normal velocity is set to the mean velocity of the SPH particles of the
     cells of the hash grid around it, if any, the tangential velocity being left out.
     """
-    dx = sph_state.hash_grid.cell_size[None]
-    mass_fem_sv = mass / 4.0
-    base = func_hash_pos_to_grid(pos - 0.5 * dx, sph_state.hash_grid)
-
-    # SPH -> FEM
-    sph_vel = qd.Vector.zero(gs.qd_float, 3)
-    n_colliding_particles = 0
-    for offset in qd.grouped(qd.ndrange(2, 2, 2)):
-        slot_idx = func_hash_grid_to_slot(base + offset, sph_state.hash_grid)
-        slot_start = sph_state.hash_grid.slot_start[slot_idx, i_b]
-        for k in range(slot_start, slot_start + sph_state.hash_grid.slot_size[slot_idx, i_b]):
-            if qd.abs(pos - sph_state.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                sph_vel += sph_state.particles_reordered.vel[k, i_b]
-                n_colliding_particles += 1
-
+    half_size = 0.5 * sph_state.hash_grid.cell_size[None]
+    sph_vel, n_particles = func_get_particles_mean_vel(
+        i_b,
+        pos,
+        sph_state.hash_grid,
+        sph_state.particles_reordered.pos,
+        sph_state.particles_reordered.vel,
+        half_size=half_size,
+        n_cells=2,
+    )
     new_vel = vel
-    if n_colliding_particles > 0:
-        new_vel = (sph_vel / n_colliding_particles).dot(surface_normal) * surface_normal
-
-        # FEM -> SPH
-        delta_mv = mass_fem_sv * (new_vel - vel)
-        for offset in qd.grouped(qd.ndrange(2, 2, 2)):
-            slot_idx = func_hash_grid_to_slot(base + offset, sph_state.hash_grid)
-            slot_start = sph_state.hash_grid.slot_start[slot_idx, i_b]
-            for k in range(slot_start, slot_start + sph_state.hash_grid.slot_size[slot_idx, i_b]):
-                if qd.abs(pos - sph_state.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                    sph_state.particles_reordered.vel[k, i_b] = (
-                        sph_state.particles_reordered.vel[k, i_b]
-                        - delta_mv / sph_state.particles_info_reordered.mass[k, i_b]
-                    )
+    if n_particles > 0:
+        new_vel = sph_vel.dot(surface_normal) * surface_normal
+        func_add_particles_momentum(
+            i_b,
+            pos,
+            0.25 * mass * (vel - new_vel),
+            sph_state.hash_grid,
+            sph_state.particles_reordered.pos,
+            sph_state.particles_reordered.vel,
+            sph_state.particles_info_reordered.mass,
+            sph_state.particles_reordered.is_active,
+            half_size=half_size,
+            n_cells=2,
+        )
     return new_vel
 
 

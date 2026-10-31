@@ -1,19 +1,14 @@
 import quadrants as qd
+
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    DiffContactInput,
-    DynInfo,
-    DynState,
-    GJKState,
-    GeomsInitAABB,
-    RigidInfo,
-)
-from . import gjk as GJK, contact, epa
+
+from . import contact, epa, gjk
+from .gjk import GJK
 
 
+@GJK.api
 @qd.func
 def func_gjk_contact(
     i_ga: int,
@@ -68,7 +63,7 @@ def func_gjk_contact(
     EPS = rigid_info.EPS[None]
 
     # Clear the cache to prepare for this GJK-EPA run.
-    GJK.clear_cache(i_b, gjk_state)
+    gjk.clear_cache(i_b, gjk_state)
 
     gjk_state.n_diff_contact_input[i_b] = 0
 
@@ -116,7 +111,7 @@ def func_gjk_contact(
                 gb_pos_local, gb_quat_local, default_contact_pos, gu.qd_inv_quat(qrot)
             )
 
-        gjk_flag = GJK.func_safe_gjk(
+        gjk_flag = gjk.func_safe_gjk(
             i_ga,
             i_gb,
             i_b,
@@ -134,7 +129,7 @@ def func_gjk_contact(
             collider_config,
         )
 
-        if gjk_flag == GJK.GJK_RETURN_CODE.INTERSECT:
+        if gjk_flag == gjk.GJK_RETURN_CODE.INTERSECT:
             # Initialize polytope
             gjk_state.polytope.nverts[i_b] = 0
             gjk_state.polytope.nfaces[i_b] = 0
@@ -385,7 +380,7 @@ def func_extended_epa(
     tolerance = gjk_info.tolerance[None]
     i_f_nearest = gs.qd_int(-1)
 
-    discrete = GJK.func_is_discrete_geoms(i_ga, i_gb, dyn_info)
+    discrete = gjk.func_is_discrete_geoms(i_ga, i_gb, dyn_info)
     if discrete:
         # If the objects are discrete, we do not use tolerance.
         tolerance = rigid_info.EPS[None]
@@ -485,7 +480,7 @@ def func_extended_epa(
             break
 
         # Attach the new faces
-        attach_flag = GJK.RETURN_CODE.SUCCESS
+        attach_flag = gjk.RETURN_CODE.SUCCESS
         for i in range(nedges):
             # Face id of the current face to attach
             i_f0 = nfaces + i
@@ -518,7 +513,7 @@ def func_extended_epa(
                 gjk_state,
                 gjk_info,
             )
-            if attach_flag != GJK.RETURN_CODE.SUCCESS:
+            if attach_flag != gjk.RETURN_CODE.SUCCESS:
                 # Unrecoverable numerical issue
                 break
 
@@ -528,7 +523,7 @@ def func_extended_epa(
             gjk_state.polytope_faces.map_idx[i_b, i_f0] = nfaces_map
             gjk_state.polytope.nfaces_map[i_b] += 1
 
-        if attach_flag != GJK.RETURN_CODE.SUCCESS:
+        if attach_flag != gjk.RETURN_CODE.SUCCESS:
             i_f_nearest = -1
             break
 
@@ -550,7 +545,7 @@ def func_extended_epa(
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
         flag = epa.func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, gjk_info)
-        if flag == GJK.RETURN_CODE.SUCCESS:
+        if flag == gjk.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
         else:
@@ -641,7 +636,7 @@ def func_add_diff_contact_input(
         normal = -normal
 
     ### Compute the support point along the face normal.
-    obj1, obj2, localpos1, localpos2, id1, id2, mink = GJK.func_support(
+    obj1, obj2, localpos1, localpos2, id1, id2, mink = gjk.func_support(
         i_ga,
         i_gb,
         i_b,

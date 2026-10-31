@@ -33,16 +33,19 @@ _WRITTEN_PATHS_CACHE = OwnedCache()
 
 # FIXME: quadrants#1001 - Quadrants exposes no write set of a kernel, so it is derived from the source here, which
 # duplicates the analysis of its frontend and counts both branches of a static condition.
-def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tuple[str, ...]]:
+def get_written_paths(
+    fn: Callable, owner: object | None = None, opaque: frozenset[Callable] = frozenset()
+) -> frozenset[tuple[str, ...]]:
     """
     Return the paths of the parameters of a kernel or a func that it may write.
 
     A path is the name of a parameter followed by the struct fields reaching the array, such as
     `("dyn_state", "dofs", "vel")`. A write is an assignment to an element, an augmented assignment, the first argument
-    of an atomic operation or a `fill`, in the function itself or in a func it calls with the array as argument. `owner`
-    is the object the first parameter of a method is bound to, through which it reaches the funcs of other objects.
+    of an atomic operation or a `fill`, in the function itself or in a func it calls with the array as argument, the
+    funcs in `opaque` aside. `owner` is the object the first parameter of a method is bound to, through which it reaches
+    the funcs of other objects.
     """
-    cache_key = (fn, id(owner))
+    cache_key = (fn, id(owner), opaque)
     paths_cached = _WRITTEN_PATHS_CACHE.find(cache_key)
     if paths_cached is not None:
         return paths_cached
@@ -98,7 +101,7 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
                 paths_written |= _resolve(node.func.value, aliases)
             else:
                 callee = _find_callee(node.func, fn, funcs, owner_name, owner)
-                if callee is None:
+                if callee is None or callee.fn in opaque:
                     continue
                 # The arrays the func writes through its parameters, bound to the arguments of the call and, for a
                 # method, to the object it is bound to
@@ -112,7 +115,7 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
                     for keyword in node.keywords
                     if keyword.arg is not None
                 ]
-                callee_paths_written = get_written_paths(callee.fn, callee.owner)
+                callee_paths_written = get_written_paths(callee.fn, callee.owner, opaque)
                 for callee_param, arg_paths in bindings:
                     for callee_path in callee_paths_written:
                         if callee_path[0] == callee_param:

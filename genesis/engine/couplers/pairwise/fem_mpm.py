@@ -7,7 +7,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.mpm_solver import MPMSolver, func_quadratic_bspline_stencil
+from genesis.engine.solvers.mpm_solver import MPMSolver, func_add_grid_vel, func_quadratic_bspline_stencil
 from genesis.options.solvers import LegacyCouplerOptions
 
 from .fem_surface import FEMSurface, SurfaceCoupling
@@ -59,7 +59,7 @@ def func_fem_mpm(
                 delta_mpm_vel_at_cell = (vel * mpm_weight - mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b]) * (
                     mpm_grid_mass / mass_fem_sv
                 )
-                mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] += delta_mpm_vel_at_cell
+                func_add_grid_vel(f, i_x, i_y, i_z, i_b, delta_mpm_vel_at_cell, mpm_state)
                 new_vel -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
 
     # MPM -> FEM

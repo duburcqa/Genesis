@@ -64,8 +64,12 @@ _SYSTEM_CLASSES: list[type["System"]] = []
 # Every System class by name, which resolves the dependencies a module names as strings to break an import cycle
 _SYSTEM_CLASSES_BY_NAME: dict[str, type["System"]] = {}
 
-# The System whose stages are being added, which they bind the Data of (see '_get_scope')
+# The System whose stages are being added, which they bind the Data of, and the System offering the slot they fill
+# (see '_get_scope')
 _scope_system: "System | None" = None
+_scope_slot_owner: "System | None" = None
+# The funcs and kernels of the API of every System class, by their Python function (see 'System.api')
+_API_FUNCS: dict[Callable, type["System"]] = {}
 
 
 class System:
@@ -80,7 +84,7 @@ class System:
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
-    # The slots the roles of other Systems, or the stages of other slots, move to while this System exists (see 'RoleOf')
+    # The slots the roles of other Systems, or the stages of other slots, move to while this System exists (see RoleOf)
     relocations: ClassVar[dict["RoleOf | Phase", "SlotRef | Phase"]] = {}
     # The Systems, roles of Systems, or stages their owner adds to a slot, absent while this System exists
     supersedes: ClassVar["tuple[type[System] | RoleOf | Phase, ...]"] = ()
@@ -123,6 +127,19 @@ class System:
             namespace = {"template_args": dict(zip(params, args)), "__module__": cls.__module__}
             cls._template_instances[args] = type(name, (cls,), namespace)
         return cls._template_instances[args]
+
+    @classmethod
+    def api(cls, *funcs: QuadrantsCallable) -> QuadrantsCallable:
+        """
+        Declare funcs or kernels the API of the System class, `@GJK.api` above `@qd.func`, and return the first one.
+
+        A stage writes the Data of the System adding it and of the System offering the slot it fills, each with the
+        System owning it as a part and the parts of that owner. It changes the Data of any other System through the API
+        of that System alone, which writes it unchecked: the funcs of the API it calls, or a kernel of the API it runs.
+        """
+        for func in funcs:
+            _API_FUNCS[func.fn] = cls
+        return funcs[0]
 
     def build(self) -> None:
         """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
@@ -442,7 +459,7 @@ class Phase:
 
     def add(self, *stages: Callable) -> None:
         """Append stages, binding their arguments to the Data of the System they belong to and of its dependencies."""
-        scope, read_only_ids = _get_scope()
+        scope, writable_ids = _get_scope()
         for stage in stages:
             if isinstance(stage, (Phase, Inline)):
                 self.items.append((stage, ()))
@@ -458,7 +475,7 @@ class Phase:
                 args.append(_bind(scope, name))
             if isinstance(stage, (QuadrantsCallable, BoundQuadrantsCallable)):
                 owner = stage.instance if isinstance(stage, BoundQuadrantsCallable) else None
-                _check_read_only(stage.fn, owner, names, args, read_only_ids)
+                _check_writes(stage.fn, owner, names, args, writable_ids)
             # A func, whose loops run in parallel at the top level of a kernel, runs through the kernel generated around
             # it
             if isinstance(stage, QuadrantsCallable) and not stage._is_wrapped_kernel:
@@ -589,17 +606,19 @@ class Inline:
 
     def bind(self) -> None:
         """Bind the parameters of the kernel to the Data of the System declaring the extension point, once built."""
-        scope, _ = _get_scope()
-        self._args = tuple([_bind(scope, name) for name in inspect.signature(self.kernel.fn).parameters])
+        scope, writable_ids = _get_scope()
+        names = list(inspect.signature(self.kernel.fn).parameters)
+        self._args = tuple([_bind(scope, name) for name in names])
+        _check_writes(self.kernel.fn, None, names, self._args, writable_ids)
 
     def add(self, *funcs: Callable) -> None:
         """Append funcs, binding their Data parameters to the Data of the System composing and of its dependencies."""
-        scope, read_only_ids = _get_scope()
+        scope, writable_ids = _get_scope()
         n_handed = len(inspect.signature(self.hook).parameters)
         for func in funcs:
             names = list(inspect.signature(func.fn).parameters)[n_handed:]
             args = tuple([_bind(scope, name) for name in names])
-            _check_read_only(func.fn, None, names, args, read_only_ids)
+            _check_writes(func.fn, None, names, args, writable_ids)
             self.items.append((func, args))
         self._launch = None
 
@@ -678,14 +697,19 @@ class Inline:
         kernel(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
 
 
-def _check_read_only(
-    fn: Callable, owner: object | None, names: Sequence[str], args: Sequence[Any], read_only_ids: set[int]
+def _check_writes(
+    fn: Callable, owner: object | None, names: Sequence[str], args: Sequence[Any], writable_ids: set[int]
 ) -> None:
-    """Refuse a kernel or a func writing a struct that its System depends on as Data alone (see 'get_dependencies')."""
-    written_names = {path[0] for path in get_written_paths(fn, owner)}
+    """Refuse a kernel or a func writing Data of another System than through its API (see 'System.api')."""
+    if fn in _API_FUNCS:
+        return
+    written_names = {path[0] for path in get_written_paths(fn, owner, frozenset(_API_FUNCS))}
     for name, arg in zip(names, args):
-        if id(arg) in read_only_ids and name in written_names:
-            raise TypeError(f"'{fn.__qualname__}' writes '{name}', which its System depends on as Data, read-only.")
+        if name in written_names and not isinstance(arg, CallArg) and id(arg) not in writable_ids:
+            raise TypeError(
+                f"'{fn.__qualname__}' writes '{name}', which {type(_scope_system).__name__} changes through the API of "
+                "its owner alone."
+            )
 
 
 def _bind(scope: dict[str, list[Any]], name: str) -> Any:
@@ -739,7 +763,7 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
 
 def _is_component(cls: type) -> bool:
     """
-    Return whether a System class is a component: playing no role, registered and owned by none, it is created on demand.
+    Return whether a System class is a component: playing no role, registered and owned by none, created on demand.
 
     A component exists while some System depends on it, and is built once every System that could use it is decided.
     """
@@ -775,24 +799,25 @@ def _get_owned(cls: type) -> list[type]:
 
 
 @contextlib.contextmanager
-def _scoped(system: System) -> Iterator[None]:
+def _scoped(system: System, slot_owner: System | None = None) -> Iterator[None]:
     """Bind the stages added within the block to the Data of the System and of what it depends on (see '_get_scope')."""
-    global _scope_system
+    global _scope_system, _scope_slot_owner
 
-    _scope_system = system
+    _scope_system, _scope_slot_owner = system, slot_owner
     try:
         yield
     finally:
-        _scope_system = None
+        _scope_system, _scope_slot_owner = None, None
 
 
 def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
     """
-    Return the Data the stages being added bind by name, and the identities of those they may read alone.
+    Return the Data the stages being added bind by name, and the identities of those they may write.
 
     The scope holds the public attributes of the System, of the Systems it depends on, and of their parts, as they are
-    when a stage is added, and the structs it depends on as Data under the name of their parameter, read-only unless it
-    reaches them otherwise.
+    when a stage is added, and the structs it depends on as Data under the name of their parameter. The stages write
+    the Data of the System and of the System offering their slot, each with its owner when it is a part and the parts
+    of either (see 'System.api').
     """
     system = _scope_system
     assert system is not None, "A stage is added within the scope of its System (see 'assemble_systems')."
@@ -802,13 +827,19 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
             for name, value in vars(owner).items():
                 if not name.startswith("_") and all([value is not other for other in scope.get(name, ())]):
                     scope.setdefault(name, []).append(value)
-    writable_ids = {id(value) for values in scope.values() for value in values}
-    read_only_ids = set()
     for name, struct in system._data_dependencies.items():
-        if id(struct) not in writable_ids:
+        if all([struct is not other for other in scope.get(name, ())]):
             scope.setdefault(name, []).append(struct)
-            read_only_ids.add(id(struct))
-    return scope, read_only_ids
+    units = [unit for unit in (system, _scope_slot_owner) if unit is not None]
+    owners = [dep for unit in units for dep in unit._dependencies if any([part is unit for part in dep.get_parts()])]
+    writable_ids = {
+        id(value)
+        for unit_owner in (*units, *owners)
+        for unit_system in (unit_owner, *unit_owner.get_parts())
+        for name, value in vars(unit_system).items()
+        if not name.startswith("_")
+    }
+    return scope, writable_ids
 
 
 def assemble_systems(
@@ -1005,7 +1036,7 @@ def _route_roles(systems: Sequence[System]) -> None:
             target = _get_declared(owner, slot.attr)
             if slot.slot is not None:
                 target = target.slots[slot.slot]
-            with _scoped(system):
+            with _scoped(system, owner):
                 target.add(*_get_stages(system, role))
 
 

@@ -1307,6 +1307,15 @@ def func_backward_svd(
     return u_term + v_term + S_term
 
 
+@MPMSolver.api
+@qd.func
+def func_add_grid_vel(
+    f: int, i_x: int, i_y: int, i_z: int, i_b: int, vel: qd.types.vector(3), mpm_state: array_class.MPMState
+):
+    """Add a velocity to the velocity a cell of the grid gives back to the particles."""
+    mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] += vel
+
+
 class CellSeparation(System):
     """A System adding the separation of the particles of a cell to the transfer from the particles to the grid."""
 

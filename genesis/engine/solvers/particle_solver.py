@@ -259,3 +259,76 @@ def kernel_update_particles_render(particles: array_class.Particles, particles_r
         else:
             particles_render.pos[i_p, i_b] = gu.qd_nowhere()
         particles_render.is_active[i_p, i_b] = particles.is_active[i_p, i_b]
+
+
+# FIXME: quadrants#1036 - a func parameter accepts no subclass of its dataclass annotation, so the funcs shared by the
+# solvers take the arrays of their particles one by one rather than their common base `Particles`.
+@qd.func
+def func_get_particles_mean_vel(
+    i_b: int,
+    pos: qd.types.vector(3),
+    hash_grid: array_class.SpatialHashGrid,
+    particles_pos: qd.Tensor,
+    particles_vel: qd.Tensor,
+    half_size: float,
+    n_cells: int,
+):
+    """
+    Return the mean velocity of the sorted particles of a solver within a cube around a position, and their count.
+
+    The cube is centered at `pos` with half side `half_size`. The particles are searched for among the cells of the hash
+    grid of the solver, `n_cells` along each axis from the one holding the lowest corner of the cube.
+    """
+    base = gu.func_hash_pos_to_grid(pos - half_size, hash_grid)
+    vel_sum = qd.Vector.zero(gs.qd_float, 3)
+    n_particles = 0
+    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
+        i_s = gu.func_hash_grid_to_slot(base + offset, hash_grid)
+        i_p_start = hash_grid.slot_start[i_s, i_b]
+        for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
+            if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size:
+                vel_sum += particles_vel[i_p, i_b]
+                n_particles += 1
+    return vel_sum / qd.max(n_particles, 1), n_particles
+
+
+@ParticleSolver.api
+@qd.func
+def func_add_particles_momentum(
+    i_b: int,
+    pos: qd.types.vector(3),
+    momentum: qd.types.vector(3),
+    hash_grid: array_class.SpatialHashGrid,
+    particles_pos: qd.Tensor,
+    particles_vel: qd.Tensor,
+    particles_mass: qd.Tensor,
+    particles_is_moved: qd.Tensor,
+    half_size: float,
+    n_cells: int,
+):
+    """
+    Add a momentum to each sorted particle of a solver within a cube around a position (see func_get_particles_mean_vel).
+
+    Each particle that `particles_is_moved` selects gains the velocity `momentum` over its mass.
+    """
+    base = gu.func_hash_pos_to_grid(pos - half_size, hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
+        i_s = gu.func_hash_grid_to_slot(base + offset, hash_grid)
+        i_p_start = hash_grid.slot_start[i_s, i_b]
+        for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
+            if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size and particles_is_moved[i_p, i_b]:
+                particles_vel[i_p, i_b] = particles_vel[i_p, i_b] + momentum / particles_mass[i_p, i_b]
+
+
+@ParticleSolver.api
+@qd.func
+def func_set_particle_pos(i_p: int, i_b: int, pos: qd.types.vector(3), particles_pos: qd.Tensor):
+    """Set the position of a sorted particle of a solver."""
+    particles_pos[i_p, i_b] = pos
+
+
+@ParticleSolver.api
+@qd.func
+def func_set_particle_vel(i_p: int, i_b: int, vel: qd.types.vector(3), particles_vel: qd.Tensor):
+    """Set the velocity of a sorted particle of a solver."""
+    particles_vel[i_p, i_b] = vel

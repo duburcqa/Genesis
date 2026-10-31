@@ -8,6 +8,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.engine.pipeline as pipeline
 from genesis.engine.pipeline import System, assemble_systems, register_system
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Integration
 from genesis.utils.array_class import DynState
 from genesis.utils.data import V
@@ -17,7 +18,7 @@ from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.required
-def test_data_dependency_is_read_only(request, show_viewer):
+def test_data_written_by_owner_alone(request, show_viewer):
     @qd.kernel
     def kernel_record_altitude(dyn_state: DynState, altitude: qd.Tensor):
         for i_b in range(dyn_state.links.pos.shape[1]):
@@ -46,7 +47,13 @@ def test_data_dependency_is_read_only(request, show_viewer):
         def __init__(self, dyn_state: DynState) -> None:
             pass
 
-    for system_cls, is_refused in ((AltitudeRecorder, False), (Lifter, True)):
+    class SolverLifter(Integration):
+        substep_post_coupling = kernel_lift
+
+        def __init__(self, rigid_solver: RigidSolver) -> None:
+            pass
+
+    for system_cls, is_refused in ((AltitudeRecorder, False), (Lifter, True), (SolverLifter, True)):
         # Registered alongside the built-in Systems, which the first scene of a process registers as it imports them
         register_system(system_cls)
         request.addfinalizer(functools.partial(pipeline._SYSTEM_CLASSES.remove, system_cls))

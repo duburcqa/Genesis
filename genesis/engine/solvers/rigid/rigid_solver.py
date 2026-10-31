@@ -96,6 +96,8 @@ from .abd.forward_dynamics import (
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
     kernel_update_acc,
+    update_qacc_from_qvel_delta,
+    update_qvel,
 )
 from .abd.forward_kinematics import (
     func_forward_velocity,
@@ -3326,6 +3328,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         if self.is_built:
             return self._equalities
         return gs.List(equality for entity in self._entities for equality in entity.equalities)
+
+
+# The coupling forces other solvers apply to the links, and the velocity update of a contact solver taking over the
+# constraints (see RigidConstraints)
+RigidSolver.api(func_apply_coupling_force, update_qvel, update_qacc_from_qvel_delta)
 
 
 class RigidConstraints(System):

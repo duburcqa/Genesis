@@ -6,14 +6,13 @@ import numpy as np
 
 import quadrants as qd
 
-import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.mpm_solver import GridCoupling, MPMSolver
+from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import Data, DataKind, field
-from genesis.utils.geom import func_hash_grid_to_slot, func_hash_pos_to_grid
 
 
 class MPMSPHInfo(Data, kind=DataKind.CONSTANT):
@@ -44,35 +43,31 @@ def func_mpm_sph(
 
     The particles take the opposite of the momentum the cell gains, divided among them.
     """
-    dx = mpm_info.dx[None]
+    half_size = 0.5 * mpm_info.dx[None]
     stencil_size = mpm_sph_info.stencil_size[None]
-    base = func_hash_pos_to_grid(pos - 0.5 * dx, sph_state.hash_grid)
-
-    # SPH -> MPM
-    sph_vel = qd.Vector.zero(gs.qd_float, 3)
-    n_colliding_particles = 0
-    for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-        slot_idx = func_hash_grid_to_slot(base + offset, sph_state.hash_grid)
-        slot_start = sph_state.hash_grid.slot_start[slot_idx, i_b]
-        for i in range(slot_start, slot_start + sph_state.hash_grid.slot_size[slot_idx, i_b]):
-            if qd.abs(pos - sph_state.particles_reordered.pos[i, i_b]).max() < dx * 0.5:
-                sph_vel += sph_state.particles_reordered.vel[i, i_b]
-                n_colliding_particles += 1
-    if n_colliding_particles > 0:
-        vel_old = vel
-        vel = sph_vel / n_colliding_particles
-
-        # MPM -> SPH
-        delta_mv = mass * (vel - vel_old)
-        for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-            slot_idx = func_hash_grid_to_slot(base + offset, sph_state.hash_grid)
-            slot_start = sph_state.hash_grid.slot_start[slot_idx, i_b]
-            for i in range(slot_start, slot_start + sph_state.hash_grid.slot_size[slot_idx, i_b]):
-                if qd.abs(pos - sph_state.particles_reordered.pos[i, i_b]).max() < dx * 0.5:
-                    sph_state.particles_reordered.vel[i, i_b] = (
-                        sph_state.particles_reordered.vel[i, i_b]
-                        - delta_mv / sph_state.particles_info_reordered.mass[i, i_b]
-                    )
+    sph_vel, n_particles = func_get_particles_mean_vel(
+        i_b,
+        pos,
+        sph_state.hash_grid,
+        sph_state.particles_reordered.pos,
+        sph_state.particles_reordered.vel,
+        half_size=half_size,
+        n_cells=stencil_size,
+    )
+    if n_particles > 0:
+        func_add_particles_momentum(
+            i_b,
+            pos,
+            mass * (vel - sph_vel),
+            sph_state.hash_grid,
+            sph_state.particles_reordered.pos,
+            sph_state.particles_reordered.vel,
+            sph_state.particles_info_reordered.mass,
+            sph_state.particles_reordered.is_active,
+            half_size=half_size,
+            n_cells=stencil_size,
+        )
+        vel = sph_vel
     return vel
 
 

@@ -7,6 +7,7 @@ import quadrants as qd
 import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
 from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.particle_solver import func_set_particle_vel
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.solvers.sph_solver import SPHSolver
@@ -96,7 +97,7 @@ def kernel_sph_rigid(
         if sph_state.particles_reordered.is_active[i_p, i_b]:
             for i_g in range(dyn_info.geoms.needs_coup.shape[0]):
                 if dyn_info.geoms.needs_coup[i_g]:
-                    sph_state.particles_reordered.vel[i_p, i_b] = func_collide_with_rigid_geom_pressure(
+                    vel = func_collide_with_rigid_geom_pressure(
                         i_g,
                         i_b,
                         sph_state.particles_reordered.pos[i_p, i_b],
@@ -113,6 +114,7 @@ def kernel_sph_rigid(
                         rigid_config,
                         collider_config,
                     )
+                    func_set_particle_vel(i_p, i_b, vel, sph_state.particles_reordered.vel)
 
 
 @register_system

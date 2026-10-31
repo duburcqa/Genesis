@@ -464,6 +464,7 @@ def guess_geoms_center(
     return center_a, center_b
 
 
+@MPR.api
 @qd.func
 def func_mpr_contact_from_centers(
     i_ga: int,
@@ -742,6 +743,7 @@ def func_mpr_contact_from_centers(
     return is_col, normal, penetration, pos
 
 
+@MPR.api
 @qd.func
 def func_mpr_contact(
     i_ga: int,

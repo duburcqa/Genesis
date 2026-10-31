@@ -6,14 +6,13 @@ import numpy as np
 
 import quadrants as qd
 
-import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.mpm_solver import GridCoupling, MPMSolver
+from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.pbd_solver import PBDSolver
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import Data, DataKind, field
-from genesis.utils.geom import func_hash_grid_to_slot, func_hash_pos_to_grid
 
 
 class MPMPBDInfo(Data, kind=DataKind.CONSTANT):
@@ -44,36 +43,31 @@ def func_mpm_pbd(
 
     The free PBD particles take the opposite of the momentum the cell gains, divided among them.
     """
-    dx = mpm_info.dx[None]
+    half_size = 0.5 * mpm_info.dx[None]
     stencil_size = mpm_pbd_info.stencil_size[None]
-    base = func_hash_pos_to_grid(pos - 0.5 * dx, pbd_state.hash_grid)
-
-    # PBD -> MPM
-    pbd_vel = qd.Vector.zero(gs.qd_float, 3)
-    n_colliding_particles = 0
-    for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-        slot_idx = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
-        slot_start = pbd_state.hash_grid.slot_start[slot_idx, i_b]
-        for i in range(slot_start, slot_start + pbd_state.hash_grid.slot_size[slot_idx, i_b]):
-            if qd.abs(pos - pbd_state.particles_reordered.pos[i, i_b]).max() < dx * 0.5:
-                pbd_vel += pbd_state.particles_reordered.vel[i, i_b]
-                n_colliding_particles += 1
-    if n_colliding_particles > 0:
-        vel_old = vel
-        vel = pbd_vel / n_colliding_particles
-
-        # MPM -> PBD
-        delta_mv = mass * (vel - vel_old)
-        for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-            slot_idx = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
-            slot_start = pbd_state.hash_grid.slot_start[slot_idx, i_b]
-            for i in range(slot_start, slot_start + pbd_state.hash_grid.slot_size[slot_idx, i_b]):
-                if qd.abs(pos - pbd_state.particles_reordered.pos[i, i_b]).max() < dx * 0.5:
-                    if pbd_state.particles_reordered.free[i, i_b]:
-                        pbd_state.particles_reordered.vel[i, i_b] = (
-                            pbd_state.particles_reordered.vel[i, i_b]
-                            - delta_mv / pbd_state.particles_info_reordered.mass[i, i_b]
-                        )
+    pbd_vel, n_particles = func_get_particles_mean_vel(
+        i_b,
+        pos,
+        pbd_state.hash_grid,
+        pbd_state.particles_reordered.pos,
+        pbd_state.particles_reordered.vel,
+        half_size=half_size,
+        n_cells=stencil_size,
+    )
+    if n_particles > 0:
+        func_add_particles_momentum(
+            i_b,
+            pos,
+            mass * (vel - pbd_vel),
+            pbd_state.hash_grid,
+            pbd_state.particles_reordered.pos,
+            pbd_state.particles_reordered.vel,
+            pbd_state.particles_info_reordered.mass,
+            pbd_state.particles_reordered.free,
+            half_size=half_size,
+            n_cells=stencil_size,
+        )
+        vel = pbd_vel
     return vel
 
 

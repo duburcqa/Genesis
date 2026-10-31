@@ -136,6 +136,7 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
         )
 
 
+@GJK.api
 @qd.func
 def clear_cache(i_b: int, gjk_state: GJKState):
     """
@@ -149,6 +150,7 @@ def clear_cache(i_b: int, gjk_state: GJKState):
     gjk_state.last_searched_simplex_vertex_id[i_b] = 0
 
 
+@GJK.api
 @qd.func
 def func_gjk_contact(
     i_ga: int,
@@ -431,6 +433,7 @@ def func_gjk_contact(
     gjk_state.penetration[i_b] = 0.0 if n_contacts == 0 else gjk_state.penetration[i_b]
 
 
+@GJK.api
 @qd.func
 def func_gjk(
     i_ga: int,
