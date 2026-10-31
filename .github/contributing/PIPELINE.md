@@ -66,8 +66,8 @@ flowchart LR
 | **Dependency** | A typed parameter of a System's `__init__`. | `rigid_solver: RigidSolver`, `dyn_state: DynState` |
 | **Phase** | An ordered sequence of stages a System offers, split into **slots**. | `Step.substep`, `Collider.detection` |
 | **Role** | What a System does in a phase, which fixes its slot and its entry point. | `Narrowphase`, `Integration` |
-| **Stage** | A kernel or a method run in a slot. Consecutive kernels fuse into one launch. | `kernel_convex_vs_terrain` |
-| **Component** | A System offering an API and no role, created on demand. | `GJK`, `MPR`, `SDF`, `SupportField` |
+| **Stage** | A kernel, a func or a method run in a slot. Consecutive kernels and funcs fuse into one launch. | `func_narrow_phase_any_vs_terrain` |
+| **Component** | A System offering an API and no role, registered and owned by none, created on demand. | `GJK`, `MPR`, `SDF`, `SupportField` |
 | **API** | The funcs of a System that others call, the only code writing its state. | `@GJK.api func_gjk_contact` |
 | **Template** | A family of Systems sharing code, one class per argument tuple. | `GJK[LayoutT, CapabilityT]` |
 | **Extension point** | A placeholder inside a kernel where other Systems inline funcs. | `MPMSolver.grid_couplings` |
@@ -153,7 +153,7 @@ stateDiagram-v2
 
 - **Created** as soon as it can be decided: its System dependencies exist, its Data dependencies are built, its conditions are known. A class waits at its first undecided dependency, so it requires no component before it is known to exist.
 - **Built** once its dependencies are built and every class that could use it through its API has been created or ruled out, so every `reserve` is in. A class needing what the build provides (a part, its Data, a property read once built) is decided after it instead: the rigid solver builds without waiting for the narrowphases depending on its collider.
-- **On demand**: a component (`is_created_on_demand`) exists only while some existing System depends on it through its API.
+- **On demand**: a component, a System playing no role that nobody registers or owns, exists only while some existing System depends on it through its API.
 
 A contradiction between declarations (A reads B's Data, B serves A's API) is detected by the loop and raised with the cycle named.
 
@@ -208,8 +208,6 @@ A template is a family of Systems sharing their code, like a C++ class template:
 
 ```python
 class GJK[LayoutT: Layout, CapabilityT: Capability](System):
-    is_created_on_demand = True
-
     def reserve(self, n_workers: int) -> None: ...     # the Queued layout is sized by its users
     def build(self) -> None: ...                        # EPA arrays iff CapabilityT is WithEPA
 ```
@@ -531,7 +529,7 @@ For a new System, built-in or plugin:
 - [ ] Every dependency is a typed `__init__` parameter: the **Data** it only reads, the **System** whose API it calls.
 - [ ] Existence comes from dependencies and `Enabled` conditions alone. No `if` deciding whether the System does anything.
 - [ ] The Data it owns is declared as class annotations and allocated in `build`, sized exactly.
-- [ ] Each thing it runs is the entry point of a role. No stage wired by hand.
+- [ ] Each thing it runs is the entry point of a role (the name the role annotates). No stage wired by hand into the phase of another System.
 - [ ] Its kernels write only its own Data and go through the API of the Systems it depends on.
 - [ ] A component that several stages share in different modes is a template, its parameters the independent axes, never sizes.
 - [ ] A rearrangement of another System's roles is a declared `relocations` or `supersedes`, documented with why.
