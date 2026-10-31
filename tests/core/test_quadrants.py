@@ -13,7 +13,6 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.solvers.rigid.collider.collider import kernel_detection
 from genesis.engine.solvers.rigid.constraint.solver import linear_to_lower_tri
-from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
 from genesis.utils.misc import qd_to_numpy, qd_to_torch
 
 from ..utils.assertions import assert_allclose
@@ -211,7 +210,9 @@ def gs_num_envs_child(args: list[str]):
     scene.step()
     assert (qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts) > 0).all()
 
-    for kernel in (kernel_substep_dynamics, kernel_detection):
+    # The kernel fusing the dynamics of the substep, the first one it launches
+    kernel_dynamics = scene.rigid_solver.substep_phase.get_launches()[0].fn
+    for kernel in (kernel_dynamics, kernel_detection):
         assert kernel._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
         assert kernel._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
         assert kernel._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
@@ -273,7 +274,6 @@ def change_scene(args: list[str]):
 
     _initialize_genesis(backend=args.backend)
 
-    kernel_primal = kernel_substep_dynamics._primal
     for i_build in range(2):
         scene = gs.Scene(
             rigid_options=gs.options.RigidOptions(
@@ -315,6 +315,8 @@ def change_scene(args: list[str]):
         assert_allclose(z, 0.2, atol=1e-3)
 
         if i_build == 0:
+            # The kernel fusing the dynamics of the substep, the first one it launches, which every build shares
+            kernel_primal = scene.rigid_solver.substep_phase.get_launches()[0].fn._primal
             assert kernel_primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
             assert kernel_primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
             n_kernels = len(kernel_primal.materialized_kernels)

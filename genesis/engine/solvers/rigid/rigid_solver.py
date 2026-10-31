@@ -10,9 +10,10 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
-from genesis.engine.couplers import IPCCoupler, SAPCoupler
+from genesis.engine.couplers.base import Coupler
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
+from genesis.engine.pipeline import Phase, System
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.engine.step import Step
@@ -103,6 +104,8 @@ from .abd.forward_kinematics import (
     func_forward_velocity,
     func_update_cartesian_space,
     kernel_forward_kinematics_links_geoms,
+    kernel_update_forward_kinematics,
+    kernel_update_forward_kinematics_after_integration,
     kernel_masked_forward_kinematics_links_geoms,
     kernel_update_cartesian_space,
     kernel_update_verts_for_geoms,
@@ -132,12 +135,7 @@ from .constraint.backward import (
     kernel_manual_add_frictionloss_constraints_bw,
     kernel_manual_add_joint_limit_constraints_bw,
 )
-from .constraint.solver import (
-    func_add_equality_constraints,
-    func_add_inequality_constraints,
-    func_resolve_post,
-    func_solve_body,
-)
+from .constraint.solver import kernel_add_equality_constraints, kernel_add_inequality_constraints, kernel_resolve_post
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -284,7 +282,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.collider = None
         # The coupler solving the constraints of the rigid entities in place of the constraint solver, if any (see
         # 'compose')
-        self._sap_coupler: SAPCoupler | None = None
+        self._is_constraint_solved_by_coupler = False
         self.constraint_solver = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
@@ -1283,122 +1281,31 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self, f):
-        # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
-        # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
-        # autodiff of its kernel or by the backward given to it (see LaunchRecorder), where the forward pass fuses them.
+        """
+        Run a substep of the solver (see 'compose'), or its part before the couplings of a coupler solving them.
+
+        The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
+        updates the forward kinematics in full and places every geom, whose poses the reversal reads.
+        """
         is_recording = self._requires_grad and is_recording_launches()
-        is_forward_pos_updated, is_forward_vel_updated = self._is_forward_pos_updated, self._is_forward_vel_updated
-        if is_recording:
-            is_forward_pos_updated = is_forward_vel_updated = False
-
-        # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
-        if self._use_hibernation and len(self.sim.active_solvers) > 1:
-            kernel_wakeup_coupled_links(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-        # A differentiable scene has no SAP coupler, which a scene with 'requires_grad' refuses at build
-        if is_recording:
-            envs_idx = self._scene._sanitize_envs_idx(None)
-            self._update_forward_kinematics(envs_idx)
-            kernel_forward_dynamics_without_qacc(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                is_backward=False,
-            )
-            # The smooth acceleration and the constraint solve are reversed together, through the implicit function
-            # theorem, which spares reversing the factor of the mass matrix
-            with custom_backward(self._constraint_force_grad):
-                kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-                self._func_constraint_force()
-            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-            kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-            kernel_copy_next_to_curr_clear_coupling(
-                self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
-            )
-            if not self._enable_mujoco_compatibility:
-                self._update_forward_kinematics(envs_idx)
-        elif self._sap_coupler is not None or self._requires_grad:
-            # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
-            # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
-            # launches the substep kernels one by one.
-            kernel_step_1(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                is_forward_pos_updated,
-                is_forward_vel_updated,
-            )
-            if self._sap_coupler is not None:
-                update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
-            else:
-                self._func_constraint_force()
-                kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
-        else:
-            # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
-            # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
-            # graph of its own, the one Collider.detection launches, so that a scene compiles it once whether it steps
-            # or detects collisions alone. The work after the solve is captured as one graph.
-            collider = self.collider
-            constraint_solver = self.constraint_solver
-            collider._contact_data_cache.clear()
-            constraint_solver._eq_const_info_cache.clear()
-            kernel_substep_dynamics(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
-                not self._disable_constraint,
-            )
-            if self._enable_collision:
-                collider.detection()
-            if not self._disable_constraint:
-                kernel_substep_inequality(
-                    self.dyn_state,
-                    collider.collider_state,
-                    constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    collider.collider_config,
-                )
-                func_solve_body(
-                    self.dyn_state,
-                    constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    constraint_solver._n_iterations,
-                )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
-
-        if self._sap_coupler is None:
+        if self.collider is not None:
+            self.collider._contact_data_cache.clear()
+        self.substep_phase(**self._get_substep_values(is_recording))
+        if not self._is_constraint_solved_by_coupler:
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
             self._is_forward_vel_updated = not self._enable_mujoco_compatibility
+
+    def _get_substep_values(self, is_recording: bool) -> dict:
+        """Return the values of the call arguments of the stages of the substep."""
+        return dict(
+            is_forward_pos_updated=self._is_forward_pos_updated and not is_recording,
+            is_forward_vel_updated=self._is_forward_vel_updated and not is_recording,
+            force_update_all_geoms=is_recording,
+            is_backward=False,
+            noslip=self._options.noslip_iterations > 0,
+            errno=self._errno,
+            collider_static_config=None if self.collider is None else self.collider.collider_config,
+        )
 
     def _kernel_detect_collision(self):
         self.collider.clear()
@@ -1587,23 +1494,67 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
             )
 
-    def get_parts(self) -> "tuple[Collider, ...]":
-        """Return the collider, whose Data the couplings of the rigid geoms read (see 'Collider')."""
-        return () if self.collider is None else (self.collider,)
+    def get_parts(self) -> "tuple[System, ...]":
+        """Return the collider and the constraint solver, whose Data the couplings of the rigid geoms read."""
+        return tuple([part for part in (self.collider, self.constraint_solver) if part is not None])
 
-    def compose(self, step: Step, sap_coupler: SAPCoupler | None, ipc_coupler: IPCCoupler | None) -> None:
+    def compose(
+        self,
+        step: Step,
+        coupler: Coupler | None,
+        collider: Collider | None,
+        constraint_solver: ConstraintSolver | None,
+    ) -> None:
         """
-        Add the substep of the solver to the step, around the couplings of the coupler solving them at once, if any.
+        Compose the substep of the solver and add it to the step, around the couplings of the coupler solving them at
+        once, if any.
 
-        A SAP coupler solves the constraints of the rigid entities itself, between the dynamics of the substep and its
-        integration. An IPC coupler coupling rigid entities simulates them first, the substep running after it.
+        The substep is the dynamics, the constraint force and the integration. A coupler may solve the constraints of
+        the rigid entities itself, between the velocities of the dynamics and the integration, or simulate the rigid
+        entities first, the substep running after it (see 'Coupler'). The stages of the substep fuse into kernels
+        between the collision detection and the constraint solve, which run on the host, captured as graphs: the
+        compile time of a kernel grows faster than its size while one more graph replay costs next to nothing.
         """
-        self._sap_coupler = sap_coupler
-        if ipc_coupler is not None and ipc_coupler.has_any_rigid_coupling:
-            step.integrations.add(self.substep)
-        elif sap_coupler is not None:
+        self._is_constraint_solved_by_coupler = coupler is not None and coupler.is_solving_rigid_constraints
+        # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients fuses
+        # the stages into kernels captured as no graph
+        is_graph = not self._requires_grad
+        dynamics = Phase(is_graph=is_graph)
+        # Coupling forces from the previous coupling phase may target hibernated links, which only exist when another
+        # solver is active (see kernel_wakeup_coupled_links in abd/misc.py)
+        if self._use_hibernation and len(self.sim.active_solvers) > 1:
+            dynamics.add(kernel_wakeup_coupled_links)
+        dynamics.add(kernel_update_forward_kinematics, kernel_forward_dynamics_without_qacc)
+        # The smooth acceleration and the constraint solve are reversed together, through the implicit function
+        # theorem, which spares reversing the factor of the mass matrix
+        constraint_force = Phase(is_graph=is_graph, backward=self._constraint_force_grad)
+        constraint_force.add(kernel_compute_smooth_qacc)
+        # Position, velocity and acceleration must be consistent when computing the accelerations of the links, which
+        # is only possible right before the integration: the acceleration at the end of the substep is unknown, as it
+        # may change discontinuously under external forces and constraints. They are thus one substep behind.
+        integration = Phase(is_graph=is_graph)
+        integration.add(kernel_update_acc, kernel_integrate, kernel_copy_next_to_curr_clear_coupling)
+        if not self._enable_mujoco_compatibility:
+            integration.add(kernel_update_forward_kinematics_after_integration)
+
+        self.substep_phase = Phase(is_graph=is_graph)
+        if self._is_constraint_solved_by_coupler:
+            constraint_force.add(update_qvel)
+            self.substep_phase.add(dynamics, constraint_force)
+            self.integration_after_coupling = Phase(is_graph=is_graph)
+            self.integration_after_coupling.add(update_qacc_from_qvel_delta, integration)
             step.dynamics.add(self.substep)
             step.integrations.add(self.integrate_after_coupling)
+            return
+        if constraint_solver is not None and not self._disable_constraint:
+            constraint_force.add(kernel_add_equality_constraints)
+        if collider is not None and self._enable_collision:
+            constraint_force.add(collider.detection)
+        if constraint_solver is not None and not self._disable_constraint:
+            constraint_force.add(kernel_add_inequality_constraints, constraint_solver.solve, kernel_resolve_post)
+        self.substep_phase.add(dynamics, constraint_force, integration)
+        if coupler is not None and coupler.is_simulating_rigid_first:
+            step.integrations.add(self.substep)
         else:
             step.dynamics.add(self.substep)
 
@@ -1621,16 +1572,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
 
     def integrate_after_coupling(self, f: int) -> None:
-        """Integrate the velocities a SAP coupler solved the constraints of, the second half of a substep."""
-        update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-        kernel_step_2(
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            self._errno,
-        )
+        """Integrate the velocities a coupler solved the constraints of, the second half of a substep."""
+        self.integration_after_coupling(**self._get_substep_values(is_recording=False))
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -3402,148 +3345,3 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.is_built:
             return self._equalities
         return gs.List(equality for entity in self._entities for equality in entity.equalities)
-
-
-@qd.func
-def func_step_1(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
-    is_backward: qd.template(),
-):
-    if qd.static(not is_forward_pos_updated):
-        func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
-        )
-
-    if qd.static(not is_forward_vel_updated):
-        func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-
-    func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
-
-
-@qd.kernel(fastcache=True)
-def kernel_step_1(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
-):
-    """Run the first half of a substep on its own (see func_step_1)."""
-    func_step_1(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_forward_pos_updated,
-        is_forward_vel_updated,
-        is_backward=False,
-    )
-
-
-@qd.func
-def func_step_2(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
-):
-    # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
-    # would not corresponds to anyting physical. There is no other way than doing this right before integration,
-    # because the acceleration at the end of the step is unknown for now as it may change discontinuous between
-    # before and after integration under the effect of external forces and constraints. This means that
-    # acceleration data will be shifted one timestep in the past, but there isn't really any way around.
-    # A substep whose launches are recorded for its backward pass runs these steps as one launch each (see
-    # 'RigidSolver.substep').
-    func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
-    func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
-    func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
-    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
-    if qd.static(not rigid_config.enable_mujoco_compatibility):
-        func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=False
-        )
-        func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
-
-
-@qd.kernel(fastcache=True)
-def kernel_step_2(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
-):
-    """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_dynamics(
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
-    enable_constraint: qd.template(),
-):
-    """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
-
-    enable_constraint selects the assembly of the equality constraints.
-    """
-    func_step_1(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_forward_pos_updated,
-        is_forward_vel_updated,
-        is_backward=False,
-    )
-    if qd.static(enable_constraint):
-        func_add_equality_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_inequality(
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-):
-    """Assemble the inequality constraints of a substep, captured as one graph."""
-    func_add_inequality_constraints(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
-    )
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_post(
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    enable_constraint: qd.template(),
-    noslip: qd.template(),
-    errno: qd.Tensor,
-):
-    """Run the part of a substep that follows the constraint solve, captured as one graph.
-
-    It updates the accelerations and the contact forces from the solved constraint forces when enable_constraint is set
-    (see func_resolve_post for noslip), then integrates.
-    """
-    if qd.static(enable_constraint):
-        func_resolve_post(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
-        )
-    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)

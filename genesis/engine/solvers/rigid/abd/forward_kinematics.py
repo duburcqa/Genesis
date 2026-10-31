@@ -72,6 +72,52 @@ def reverse_forward_velocity(envs, dyn_state, dyn_info, rigid_info, rigid_config
     kernel_manual_forward_velocity_bw(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
+def reverse_forward_kinematics(dyn_state, dyn_info, rigid_info, rigid_config, *flags):
+    """Reverse an update of the forward kinematics by a stage of the substep (see reverse_cartesian_space)."""
+    reverse_cartesian_space(None, dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+@register_custom_backward(reverse_forward_kinematics)
+@qd.kernel(fastcache=True)
+def kernel_update_forward_kinematics(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_forward_pos_updated: qd.template(),
+    is_forward_vel_updated: qd.template(),
+    force_update_all_geoms: qd.template(),
+):
+    """
+    Update the Cartesian space and the velocities of the links from the state, unless already up to date.
+
+    A substep whose launches are recorded starts from a checkpoint holding no derived quantity, so it updates both and
+    places every geom (force_update_all_geoms), whose poses the reversal reads.
+    """
+    if qd.static(not is_forward_pos_updated):
+        func_update_cartesian_space(
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward=False
+        )
+    if qd.static(not is_forward_vel_updated):
+        func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+
+
+@register_custom_backward(reverse_forward_kinematics)
+@qd.kernel(fastcache=True)
+def kernel_update_forward_kinematics_after_integration(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    force_update_all_geoms: qd.template(),
+):
+    """Update the Cartesian space and the velocities of the links from the integrated state."""
+    func_update_cartesian_space(
+        dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward=False
+    )
+    func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+
+
 @register_custom_backward(reverse_cartesian_space)
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_links_geoms(

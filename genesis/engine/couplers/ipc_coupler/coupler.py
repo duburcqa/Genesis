@@ -12,11 +12,12 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
-from genesis.options.solvers import IPCCouplerOptions, RigidOptions
-from genesis.engine.pipeline import System
 from genesis.engine.step import Step
+from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
+
+from ..base import Coupler
 
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
@@ -91,7 +92,7 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
 
 
-class IPCCoupler(RBC, System):
+class IPCCoupler(RBC, Coupler):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -891,6 +892,10 @@ class IPCCoupler(RBC, System):
             external_articulation, or ipc_only).
         """
         return bool(self._coup_type_by_entity)
+
+    @property
+    def is_simulating_rigid_first(self) -> bool:
+        return self.has_any_rigid_coupling
 
     # ============================================================
     # Section 3: Helpers

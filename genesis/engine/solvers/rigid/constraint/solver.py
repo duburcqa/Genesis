@@ -10,6 +10,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
+from genesis.engine.pipeline import System
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import (
     func_hibernate_island_if_settled,
@@ -105,7 +106,7 @@ if TYPE_CHECKING:
 IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
 
 
-class ConstraintSolver:
+class ConstraintSolver(System):
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
         self._collider = rigid_solver.collider
@@ -351,6 +352,18 @@ class ConstraintSolver:
             self._solver.rigid_info,
             self._solver.rigid_config,
             self._collider.collider_config,
+        )
+
+    def solve(self):
+        """Solve the constraint forces, which invalidates the readback of the equality constraints."""
+        self._eq_const_info_cache.clear()
+        func_solve_body(
+            self._solver.dyn_state,
+            self.constraint_state,
+            self._solver.dyn_info,
+            self._solver.rigid_info,
+            self._solver.rigid_config,
+            self._n_iterations,
         )
 
     def resolve(self):

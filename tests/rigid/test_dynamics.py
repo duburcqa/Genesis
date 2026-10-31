@@ -8,8 +8,7 @@ from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
-from genesis.utils.array_class import RigidSimStaticConfig
+from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1216,10 +1215,10 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
         for selected in (1, 0):
             for tensor, value in zip(solve_inputs, inputs):
                 tensor.from_numpy(value)
-            constraint_solver.func_solve_body(*args)
+            func_solve_body(*args)
             accelerations.append(qd_to_numpy(constraint_state.qacc, copy=True))
 
-    monkeypatch.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_compared)
+    monkeypatch.setattr("genesis.engine.solvers.rigid.constraint.solver.func_solve_body", solve_compared)
 
     # Every box is pushed and twisted by a new random wrench each step, a fraction of what tips or slides it, so that no
     # solve starts from a warm start that already resolves it: resting boxes would leave both implementations returning
