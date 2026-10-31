@@ -1,3 +1,4 @@
+import collections
 import ctypes
 import dataclasses
 import datetime
@@ -1183,6 +1184,22 @@ def qd_zero_grad(value) -> None:
             )
     for attr_name in attr_names:
         qd_zero_grad(getattr(value, attr_name, None))
+
+
+# FIXME: quadrants#1039 - the fastcache key misses the members an item reads in its funcs, so the kernels looping over
+# such a tuple keep the fastcache disabled, compiling once per process.
+def make_static_tuple(items: Sequence[Any]) -> tuple:
+    """
+    Return the items as a tuple a kernel takes within a template argument and loops over at compile time.
+
+    The tuple is a data-oriented named tuple, which the fastcache of Quadrants hashes item by item where it refuses a
+    plain tuple.
+    """
+    # A subclass, whose instances have the '__dict__' Quadrants walks within a data-oriented argument
+    items_cls = type(
+        "StaticTuple", (collections.namedtuple("StaticTuple", [f"item_{i}" for i in range(len(items))]),), {}
+    )
+    return qd.data_oriented(items_cls)(*items)
 
 
 def get_own_annotations(cls: type) -> dict[str, Any]:

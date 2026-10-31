@@ -370,8 +370,10 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
         calls.append(f"    func_{i}({', '.join(names)})")
     lines += [f"{name_}_annotation = {source}" for name_, (_, source) in annotations.items()]
     signature = ", ".join([f"{name_}: {name_}_annotation" for name_ in annotations])
-    # Fastcache takes no object as argument
-    is_fastcached = not any([stage_.is_method for stage_ in stages])
+    # Fastcache takes no object as argument, and a kernel left out of it stays out once fused, funcs having no say
+    is_fastcached = all(
+        [not stage_.is_method and (stage_.kernel.is_pure or not stage_.kernel._is_wrapped_kernel) for stage_ in stages]
+    )
     decorator = f"@qd.kernel(graph={is_graph}, fastcache={is_fastcached})"
     lines += ["", "", decorator, f"def {name}({signature}):", *calls, ""]
     source = "\n".join(lines)
@@ -692,7 +694,7 @@ class Inline:
                 return node
 
         tree = ast.fix_missing_locations(ReplaceHook().visit(tree))
-        lines += ["", "", "@qd.kernel(fastcache=True)", ast.unparse(funcdef), ""]
+        lines += ["", "", f"@qd.kernel(fastcache={self.kernel.is_pure})", ast.unparse(funcdef), ""]
         kernel = load_generated("\n".join(lines), funcdef.name)
         return kernel, tuple(args_by_name.values())
 

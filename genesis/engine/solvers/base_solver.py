@@ -25,6 +25,7 @@ from genesis.utils.misc import (
     data_to_array,
     drop_repeated_index,
     indices_to_mask,
+    make_static_tuple,
     qd_add_grad,
     qd_from_torch,
     qd_to_numpy,
@@ -253,7 +254,8 @@ class Solver(RBC, Dynamics, Integration):
         self._errno_host_context: str | None = None
 
     def _add_force_field(self, force_field):
-        self.force_fields_dispatcher.fields.append(force_field)
+        dispatcher = self.force_fields_dispatcher
+        dispatcher.fields = make_static_tuple((*dispatcher.fields, force_field))
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""
@@ -687,7 +689,7 @@ class Solver(RBC, Dynamics, Integration):
         return len(self._entities)
 
     @property
-    def force_fields(self) -> list[ForceField]:
+    def force_fields(self) -> tuple[ForceField, ...]:
         return self.force_fields_dispatcher.fields
 
     def _repr_brief(self):

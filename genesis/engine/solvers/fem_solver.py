@@ -23,7 +23,7 @@ from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, ConfigItem, Data, DataItem, DataKind, Size, StaticConfig, field, iter_data
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums
-from genesis.utils.misc import broadcast_tensor, qd_to_torch, qd_zero_grad, tensor_to_array
+from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, qd_zero_grad, tensor_to_array
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -257,7 +257,7 @@ class FEMMaterialDispatcher:
     """
 
     def __init__(self, materials: "list[FEM.Base]"):
-        self.materials = tuple(materials)
+        self.materials = make_static_tuple(materials)
 
     @qd.func
     def update_stress(

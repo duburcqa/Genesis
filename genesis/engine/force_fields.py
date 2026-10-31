@@ -3,6 +3,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.repr_base import RBC
+from genesis.utils.misc import make_static_tuple
 
 
 @qd.data_oriented
@@ -447,7 +448,7 @@ class ForceFieldsDispatcher:
     """
 
     def __init__(self):
-        self.fields: list[ForceField] = []
+        self.fields: tuple[ForceField, ...] = make_static_tuple(())
 
 
 @qd.data_oriented
