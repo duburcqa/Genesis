@@ -28,7 +28,7 @@ import types
 import typing
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import quadrants as qd
 from quadrants.lang._quadrants_callable import BoundQuadrantsCallable, QuadrantsCallable
@@ -39,7 +39,7 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.grad.kernel_writes import get_written_paths
 from genesis.utils.cache import get_cache_dir
 from genesis.utils.data import CHECKPOINT_KINDS, ConfigItem, Data, DataItem, DataKind, fill_data
-from genesis.utils.misc import data_to_array
+from genesis.utils.misc import data_to_array, get_own_annotations
 
 # The type of the annotation of a compile-time parameter
 Template = type(qd.template())
@@ -64,8 +64,42 @@ class System:
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
+    # Whether the System is created when another one depends on it, rather than registered (see 'create_systems')
+    is_created_on_demand: bool = False
     # The Systems its constructor depends on, which its stages bind the Data of as those of its `compose` dependencies
     _dependencies: "tuple[System, ...]" = ()
+    # The instances of the template a System class is, by their arguments (see '__class_getitem__')
+    _template_instances: ClassVar[dict[tuple[type, ...], type["System"]]] = {}
+    # The arguments of the template instance a System class is, by the type parameters of its template
+    template_args: ClassVar[dict[typing.TypeVar, type]] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._template_instances = {}
+
+    def __class_getitem__(cls, args: "type | tuple[type, ...]") -> "type[System]":
+        """
+        Return the System class instantiating the template for the given arguments, the same class for the same ones.
+
+        A template is a System class generic over type parameters (`class GJK(System, Generic[LayoutT, CapabilityT])`),
+        whose class attributes annotated without a value receive its arguments in order, such as `layout:
+        ClassVar[type[Layout]]`. Its instances are distinct System classes, which a scene holds side by side, each owning
+        the state its arguments call for, and which a dependency names apart. An instance that no scene registers is
+        created when a System depends on it (see 'create_systems').
+        """
+        args = args if isinstance(args, tuple) else (args,)
+        # An argument left to a type parameter of an enclosing template is substituted where it is resolved
+        if any([isinstance(arg, typing.TypeVar) for arg in args]):
+            return super().__class_getitem__(args)
+        names = [name for name in get_own_annotations(cls) if name not in cls.__dict__]
+        if len(args) != len(names):
+            raise TypeError(f"{cls.__name__}[...] takes the arguments {names}, got {len(args)}.")
+        if args not in cls._template_instances:
+            name = f"{cls.__name__}[{', '.join([arg.__name__ for arg in args])}]"
+            template_args = dict(zip(cls.__parameters__, args))
+            namespace = {**dict(zip(names, args)), "template_args": template_args, "__module__": cls.__module__}
+            cls._template_instances[args] = type(name, (cls,), namespace)
+        return cls._template_instances[args]
 
     @classmethod
     def create(cls, *args: Any, **kwargs: Any) -> "System | None":
@@ -515,6 +549,48 @@ def _bind(name: str) -> Any:
     return values[0] if values else CallArg(name)
 
 
+class OnlyIf(NamedTuple):
+    """
+    Make a dependency of a template exist in its instances taking the given argument alone (see 'System').
+
+    It annotates the parameter it conditions, `gjk: Annotated[GJK[Queued, WithoutEPA] | None, OnlyIf(Queued)]`, which
+    is a mandatory dependency of the instances taking `Queued` and absent from the others.
+    """
+
+    arg: type
+
+
+def _get_dependency_hints(fn: Callable) -> dict[str, tuple[tuple[type, ...], bool]]:
+    """Return the classes each parameter of a System class or bound method takes, and whether it is optional."""
+    owner = fn if isinstance(fn, type) else type(fn.__self__)
+    hints = typing.get_type_hints(fn.__init__ if isinstance(fn, type) else fn, include_extras=True)
+    dependency_hints = {}
+    for name in inspect.signature(fn).parameters:
+        hint, is_conditional = hints[name], False
+        if typing.get_origin(hint) is typing.Annotated:
+            conditions = [meta for meta in hint.__metadata__ if isinstance(meta, OnlyIf)]
+            hint = hint.__origin__
+            if conditions:
+                if not all([condition.arg in owner.template_args.values() for condition in conditions]):
+                    dependency_hints[name] = ((), True)
+                    continue
+                is_conditional = True
+        hint_args = typing.get_args(hint)
+        is_optional = isinstance(hint, types.UnionType) and type(None) in hint_args
+        classes = tuple([arg for arg in hint_args if arg is not type(None)]) if is_optional else (hint,)
+        # A template instance named with the type parameters of the owner takes the arguments the owner was given
+        classes = tuple(
+            [
+                typing.get_origin(cls)[tuple([owner.template_args.get(arg, arg) for arg in typing.get_args(cls)])]
+                if typing.get_origin(cls) is not None
+                else cls
+                for cls in classes
+            ]
+        )
+        dependency_hints[name] = (classes, is_optional and not is_conditional)
+    return dependency_hints
+
+
 def get_dependencies(fn: Callable, systems: Sequence[object]) -> dict[str, Any] | None:
     """
     Return the arguments of a System class or of a bound method of a System, None when a mandatory one is missing.
@@ -524,7 +600,6 @@ def get_dependencies(fn: Callable, systems: Sequence[object]) -> dict[str, Any] 
     depends on another System to use its API, which may change its state, and on a struct to read it alone. The Data of
     a System exists once it is built, so a struct is a dependency of `build` and `compose` alone.
     """
-    hints = typing.get_type_hints(fn.__init__ if isinstance(fn, type) else fn)
     structs = [
         value
         for system in systems
@@ -533,11 +608,10 @@ def get_dependencies(fn: Callable, systems: Sequence[object]) -> dict[str, Any] 
         if not name.startswith("_") and isinstance(value, Data)
     ]
     args = {}
-    for name in inspect.signature(fn).parameters:
-        hint = hints[name]
-        hint_args = typing.get_args(hint)
-        is_optional = isinstance(hint, types.UnionType) and type(None) in hint_args
-        classes = tuple([arg for arg in hint_args if arg is not type(None)]) if is_optional else (hint,)
+    for name, (classes, is_optional) in _get_dependency_hints(fn).items():
+        if not classes:
+            args[name] = None
+            continue
         candidates = structs if all([issubclass(cls, Data) for cls in classes]) else systems
         matches = []
         for candidate in candidates:
@@ -556,17 +630,23 @@ def create_systems(systems: Sequence[System], context: Sequence[object] = ()) ->
 
     `context` holds the other objects a dependency may name, such as the options of the scene. A registered System class
     is created once every System class its constructor depends on is settled, in registration order otherwise, and only
-    when every mandatory dependency exists (see register_system). They are created before the solvers allocate their
-    Data, so that a System opts in what it uses of another one.
+    when every mandatory dependency exists (see register_system). A System class created on demand, such as the instances
+    of a component template, is created when a System being created depends on it. They are created before the solvers
+    allocate their Data, so that a System opts in what it uses of another one.
     """
     systems_created: list[System] = []
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
     while classes_pending:
         for cls in classes_pending:
-            hints = typing.get_type_hints(cls.__init__)
-            classes_needed = [
-                arg for hint in hints.values() for arg in (typing.get_args(hint) or (hint,)) if isinstance(arg, type)
-            ]
+            dependency_hints = _get_dependency_hints(cls)
+            classes_needed = [needed for classes, _ in dependency_hints.values() for needed in classes]
+            # A mandatory dependency that nothing registers is created on demand
+            for classes, is_optional in dependency_hints.values():
+                for needed in () if is_optional else classes:
+                    is_demanded = issubclass(needed, System) and needed.is_created_on_demand
+                    is_present = any([isinstance(other, needed) for other in (*systems, *systems_created)])
+                    if is_demanded and needed not in classes_pending and not is_present:
+                        classes_pending.append(needed)
             if any([issubclass(other, needed) for other in classes_pending for needed in classes_needed]):
                 continue
             classes_pending.remove(cls)

@@ -1,10 +1,12 @@
+from typing import Annotated, ClassVar, Generic, TypeVar
+
 import pytest
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.engine.pipeline as pipeline
-from genesis.engine.pipeline import System
+from genesis.engine.pipeline import OnlyIf, System, create_systems
 from genesis.engine.step import Step
 from genesis.utils.array_class import DynState
 from genesis.utils.data import V
@@ -73,3 +75,40 @@ def test_data_dependency_is_read_only(monkeypatch, show_viewer):
         recorder = scene.sim.get_system(AltitudeRecorder)
         assert (box.get_pos()[:, 2] < 1.0).all()
         assert_allclose(qd_to_numpy(recorder.altitude), box.get_pos()[:, 2], tol=gs.EPS)
+
+
+def test_template_instances_are_distinct_systems(monkeypatch):
+    class Layout: ...
+
+    class PerEnv(Layout): ...
+
+    class Queued(Layout): ...
+
+    LayoutT = TypeVar("LayoutT", bound=Layout)
+
+    class Scratch(System, Generic[LayoutT]):
+        is_created_on_demand = True
+        layout: ClassVar[type[Layout]]
+
+    class Pass(System, Generic[LayoutT]):
+        layout: ClassVar[type[Layout]]
+
+        def __init__(
+            self, scratch: Scratch[LayoutT], overlap: Annotated[Scratch[Queued] | None, OnlyIf(Queued)]
+        ) -> None:
+            self.scratch, self.overlap = scratch, overlap
+
+    assert Scratch[Queued] is Scratch[Queued] and Scratch[Queued] is not Scratch[PerEnv]
+    assert Scratch[Queued].layout is Queued
+    with pytest.raises(TypeError, match="takes the arguments"):
+        Scratch[Queued, PerEnv]
+
+    monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Pass[PerEnv], Pass[Queued]])
+    systems = create_systems([])
+    systems_by_cls = {type(system): system for system in systems}
+    assert set(systems_by_cls) == {Scratch[PerEnv], Scratch[Queued], Pass[PerEnv], Pass[Queued]}
+    assert systems_by_cls[Pass[PerEnv]].scratch is systems_by_cls[Scratch[PerEnv]]
+    assert systems_by_cls[Pass[PerEnv]].overlap is None
+    assert (
+        systems_by_cls[Pass[Queued]].scratch is systems_by_cls[Pass[Queued]].overlap is systems_by_cls[Scratch[Queued]]
+    )
