@@ -13,6 +13,8 @@ import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
+from genesis.engine.pipeline import System
+from genesis.engine.step import Step
 from genesis.repr_base import RBC
 from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
 
@@ -89,7 +91,7 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
 
 
-class IPCCoupler(RBC):
+class IPCCoupler(RBC, System):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -807,6 +809,11 @@ class IPCCoupler(RBC):
     # ============================================================
     # Section 2: Core implementation
     # ============================================================
+
+    def compose(self, step: Step) -> None:
+        """Add the preprocessing of the coupler to the preparations of the step, and its coupling to the couplings."""
+        step.preparations.add(self.preprocess)
+        step.couplings.add(self.couple)
 
     def preprocess(self, f):
         """Preprocessing step before coupling"""

@@ -18,6 +18,8 @@ from genesis.engine.solvers.fem_solver import func_compute_element_mapping_matri
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.options.solvers import SAPCouplerOptions
+from genesis.engine.pipeline import System
+from genesis.engine.step import Step
 from genesis.repr_base import RBC
 from genesis.utils.array_class import FixedOrderSums, SAPState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch
@@ -116,7 +118,7 @@ class ContactMode(IntEnum):
     NO_CONTACT = 2
 
 
-class SAPCoupler(RBC):
+class SAPCoupler(RBC, System):
     """
     Couple the FEM and rigid solvers of a scene through the Semi-Analytic Primal (SAP) contact solver of Drake.
 
@@ -519,21 +521,26 @@ class SAPCoupler(RBC):
     # -------------------------------------- Main ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, i_step):
+    def compose(self, step: Step) -> None:
+        """Add the preprocessing of the coupler to the preparations of the step, and its coupling to the couplings."""
+        step.preparations.add(self.preprocess)
+        step.couplings.add(self.couple)
+
+    def preprocess(self, f):
         fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
         sap_state, sap_info = self.sap_state, self.sap_info
 
         # Pressure fields, the poses of the vertices of the rigid geoms, and the leaves of the tree of the surface tets
         # of the FEM entities, which the handlers share
         if self._is_fem_hydroelastic:
-            kernel_compute_fem_pressure_gradient(i_step, sap_state, fem_solver.fem_state, sap_info, fem_solver.fem_info)
+            kernel_compute_fem_pressure_gradient(f, sap_state, fem_solver.fem_state, sap_info, fem_solver.fem_info)
         if rigid_solver.is_active:
             kernel_update_all_verts(rigid_solver.dyn_state, rigid_solver.dyn_info, rigid_solver.rigid_config)
         if self._is_rigid_hydroelastic:
             kernel_update_rigid_volume(sap_state, rigid_solver.dyn_state.geoms, sap_info)
         if self._has_fem_surface_tet_tree:
             kernel_compute_fem_surface_tet_aabb(
-                i_step, self.sap_state.fem_surface_tet_bvh.leaves, fem_solver.fem_state, fem_solver.fem_info
+                f, self.sap_state.fem_surface_tet_bvh.leaves, fem_solver.fem_state, fem_solver.fem_info
             )
 
         # Contact detection, then the pairs in a fixed order, their Jacobian and their regularization
@@ -547,7 +554,7 @@ class SAPCoupler(RBC):
         else:
             kernel_reset_contacts(sap_state)
         for handler in self.contact_handlers:
-            handler.detect(i_step, self)
+            handler.detect(f, self)
         self._has_contact, is_overflow = kernel_sort_contacts(
             sap_state, sap_info, self.sap_static_config, self._pairs_sort_config
         )
@@ -581,7 +588,7 @@ class SAPCoupler(RBC):
             self.sap_static_config,
         )
 
-    def couple(self, i_step):
+    def couple(self, f):
         """
         Solve the SAP problem of the substep by Newton iterations on the velocities, then write the velocities back.
 
@@ -597,10 +604,10 @@ class SAPCoupler(RBC):
         dyn_state, dofs_state = rigid_solver.dyn_state, rigid_solver.dyn_state.dofs
         rigid_info, rigid_config = rigid_solver.rigid_info, rigid_solver.rigid_config
         vertex_constraints = fem_solver.newton_vertex_constraints
-        kernel_init_sap_solve(i_step, sap_state, fem_state, dofs_state, static_config)
+        kernel_init_sap_solve(f, sap_state, fem_state, dofs_state, static_config)
         for i_iter in range(self._n_sap_iterations):
             # The free motion part of the gradient, zero at the first iteration where the velocities are free
-            kernel_init_unconstrained_gradient_diag(i_step, sap_state, fem_state, dofs_state, fem_info, static_config)
+            kernel_init_unconstrained_gradient_diag(f, sap_state, fem_state, dofs_state, fem_info, static_config)
             if i_iter > 0:
                 kernel_compute_unconstrained_gradient(
                     vertex_constraints, sap_state, fem_state, sap_info, fem_info, rigid_info, static_config
@@ -629,7 +636,7 @@ class SAPCoupler(RBC):
 
             # The step size
             kernel_init_exact_linesearch(
-                i_step,
+                f,
                 vertex_constraints,
                 sap_state,
                 fem_state,
@@ -640,8 +647,8 @@ class SAPCoupler(RBC):
                 static_config,
             )
             for _ in range(self._n_linesearch_iterations):
-                kernel_one_exact_linesearch_iter(i_step, sap_state, fem_state, dofs_state, sap_info, static_config)
-        kernel_update_vel(i_step, sap_state, fem_state, dofs_state, static_config)
+                kernel_one_exact_linesearch_iter(f, sap_state, fem_state, dofs_state, sap_info, static_config)
+        kernel_update_vel(f, sap_state, fem_state, dofs_state, static_config)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- Properties -------------------------------------

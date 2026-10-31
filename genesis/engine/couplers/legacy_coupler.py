@@ -11,6 +11,8 @@ from genesis.engine.boundaries import func_impose_cube_boundary, func_impose_flo
 from genesis.engine.solvers.mpm_solver import func_quadratic_bspline_stencil
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.options.solvers import LegacyCouplerOptions
+from genesis.engine.pipeline import System
+from genesis.engine.step import Step
 from genesis.repr_base import RBC
 from genesis.utils.data import opt_in
 from genesis.utils.geom import (
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
 CLAMPED_INV_DT = 50.0
 
 
-class LegacyCoupler(RBC):
+class LegacyCoupler(RBC, System):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
@@ -106,6 +108,11 @@ class LegacyCoupler(RBC):
     # ------------------------------------------------------------------------------------
     # ------------------------------------ coupling --------------------------------------
     # ------------------------------------------------------------------------------------
+
+    def compose(self, step: Step) -> None:
+        """Add the preprocessing of the coupler to the preparations of the step, and its coupling to the couplings."""
+        step.preparations.add(self.preprocess)
+        step.couplings.add(self.couple)
 
     def preprocess(self, f):
         # The material point method (MPM) particles see the thin rigid geoms between them and the cells of their stencil

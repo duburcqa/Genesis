@@ -16,6 +16,7 @@ from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .pipeline import Engine
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -30,6 +31,7 @@ from .solvers import (
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
+from .step import Step
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
@@ -242,6 +244,9 @@ class Simulator(RBC):
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
         self._coupler.build()
+        # The solvers and the coupler compose the substep from their stages
+        self._engine = Engine([*self._active_solvers, self._coupler])
+        self._step_system = self._engine.find(Step)
 
         # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
         # coupler declares it for the couplings it activated at build.
@@ -496,20 +501,7 @@ class Simulator(RBC):
         self._steps.copy_(steps_start)
 
     def substep(self, f):
-        self._coupler.preprocess(f)
-        self.substep_pre_coupling(f)
-        self._coupler.couple(f)
-        self.substep_post_coupling(f)
-
-    # -------------- pre coupling --------------
-    def substep_pre_coupling(self, f):
-        for solver in self._active_solvers:
-            solver.substep_pre_coupling(f)
-
-    # -------------- post coupling --------------
-    def substep_post_coupling(self, f):
-        for solver in self._active_solvers:
-            solver.substep_post_coupling(f)
+        self._step_system.run(f=f)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
