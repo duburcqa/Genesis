@@ -495,7 +495,7 @@ class Simulator(RBC):
         self._steps.copy_(steps_start)
 
     def substep(self, f):
-        self._step_system.run(f=f, t=self.cur_t)
+        self._step_system.substep(f=f, t=self.cur_t)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

@@ -21,8 +21,8 @@ class Step(System):
         self.integrations = Phase()
         self.completions = Phase()
         self.observations = Phase()
+        # The phases of a substep run as one, whose launches are those of the stages alone (see Phase)
+        self.substep = Phase()
 
-    def run(self, f: int, t: float) -> None:
-        """Advance the scene by one substep, from the given frame and time."""
-        for phase in (self.preparations, self.dynamics, self.couplings, self.integrations):
-            phase(f=f, t=t)
+    def compose(self) -> None:
+        self.substep.add(self.preparations, self.dynamics, self.couplings, self.integrations)
