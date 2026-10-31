@@ -1195,7 +1195,8 @@ def make_static_tuple(items: Sequence[Any]) -> tuple:
     The tuple is a data-oriented named tuple, which the fastcache of Quadrants hashes item by item where it refuses a
     plain tuple.
     """
-    # A subclass, whose instances have the '__dict__' Quadrants walks within a data-oriented argument
+    # FIXME: quadrants#1040 - a named tuple within a data-oriented argument fails to compile without a '__dict__', so
+    # the tuple is a subclass carrying an empty one, which hides the ndarrays of its items from the walk of the arguments.
     items_cls = type(
         "StaticTuple", (collections.namedtuple("StaticTuple", [f"item_{i}" for i in range(len(items))]),), {}
     )
