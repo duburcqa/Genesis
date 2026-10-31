@@ -20,7 +20,7 @@ class FEMSurface(System):
     """
 
     def __init__(self, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
-        self.surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings)
+        self.surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings, run_without_funcs=False)
 
     def compose(self, step: Step, fem_solver: FEMSolver) -> None:
         self.surface_couplings.bind()

@@ -368,11 +368,15 @@ class Inline:
     the System declaring the extension point when it binds it (see 'bind'), and those that none provides are call
     arguments, given by name when it runs. A parameter of a func that the scope of its System leaves unbound takes the
     value the kernel binds to that name.
+
+    `run_without_funcs` false skips the kernel while no func is added, for a kernel doing nothing but hand the values
+    over: its writes of the values it read back would race on their adjoints in a parallel reverse pass.
     """
 
-    def __init__(self, kernel: QuadrantsCallable, hook: Callable) -> None:
+    def __init__(self, kernel: QuadrantsCallable, hook: Callable, *, run_without_funcs: bool = True) -> None:
         self.kernel = kernel
         self.hook = hook
+        self._is_run_without_funcs = run_without_funcs
         # The funcs added, in order, with the arguments of their Data parameters
         self.items: list[tuple[Callable, tuple[Any, ...]]] = []
         self._args: tuple[Any, ...] | None = None
@@ -466,6 +470,8 @@ class Inline:
 
     def __call__(self, **values: Any) -> None:
         """Run the kernel with the given values of its call arguments."""
+        if not self.items and not self._is_run_without_funcs:
+            return
         kernel, args = self.get_launch()
         kernel(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
 
