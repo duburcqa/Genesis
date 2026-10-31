@@ -24,7 +24,6 @@ from genesis.utils.data import (
     ConfigItem,
     DataItem,
     DataKind,
-    OptIns,
     ScalarItem,
     fill_data,
 )
@@ -213,8 +212,6 @@ class Solver(RBC, Dynamics, Integration):
         self._scene = scene
         self._options = options
         self._entities: list[Entity] = gs.List()
-        # The Data of the solver that other components opted in, which it passes to the structs it builds (see OptIns)
-        self.opt_ins = OptIns()
 
         # Whether the state of the solver tracks gradients, and the autograd graph of the simulator recording them
         self._requires_grad: bool = sim.options.requires_grad

@@ -34,6 +34,7 @@ def func_gjk_contact(
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -127,8 +128,8 @@ def func_gjk_contact(
             gjk_state,
             dyn_info,
             rigid_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -160,8 +161,8 @@ def func_gjk_contact(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -200,8 +201,8 @@ def func_gjk_contact(
                         collider_state,
                         gjk_state,
                         dyn_info,
-                        collider_info,
                         gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -242,8 +243,8 @@ def func_gjk_contact(
                     gjk_state,
                     dyn_info,
                     rigid_info,
-                    collider_info,
                     gjk_info,
+                    support_field_info,
                     rigid_config,
                     collider_config,
                 )
@@ -263,8 +264,8 @@ def func_gjk_contact(
                     collider_state,
                     gjk_state,
                     dyn_info,
-                    collider_info,
                     gjk_info,
+                    support_field_info,
                     rigid_config,
                     collider_config,
                 )
@@ -368,8 +369,8 @@ def func_extended_epa(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -427,8 +428,8 @@ def func_extended_epa(
             collider_state,
             gjk_state,
             dyn_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -578,8 +579,8 @@ def func_add_diff_contact_input(
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -652,8 +653,8 @@ def func_add_diff_contact_input(
         collider_state,
         gjk_state,
         dyn_info,
-        collider_info,
         gjk_info,
+        support_field_info,
         rigid_config,
         collider_config,
         shrink_sphere=False,

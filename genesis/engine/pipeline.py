@@ -123,6 +123,11 @@ class System:
         return ()
 
     @property
+    def requires(self) -> "tuple[type[System], ...]":
+        """The components a System the scene holds already uses beyond its constructor, created on demand for it."""
+        return ()
+
+    @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         """Yield every array and static config the System holds, named by the attributes reaching it (see iter_data)."""
         return iter(())
@@ -818,6 +823,7 @@ def assemble_systems(
     systems = list(systems)
     built_ids = {id(system) for system in systems_built}
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
+    classes_pending += list(dict.fromkeys([cls for system in systems for cls in system.requires]))
 
     def decide(cls: type[System]) -> tuple[str, Any]:
         """Return whether a pending class is created (with its arguments), absent (with why), or waits."""
@@ -825,7 +831,7 @@ def assemble_systems(
             for superseded in type(system).supersedes:
                 if isinstance(superseded, type) and issubclass(cls, superseded):
                     return "absent", f"superseded by {type(system).__name__}"
-        # A class waits at the first dependency still undecided, before demanding any component it may never use
+        # A class waits at the first dependency still undecided, before requiring any component it may never use
         args = {}
         for dependency in _get_dependencies(cls):
             if not dependency.classes:

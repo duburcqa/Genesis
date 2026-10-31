@@ -22,6 +22,7 @@ from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
 from genesis.utils.array_class import ENVS, GEOMS, PARTICLES
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import broadcast_tensor
+from genesis.utils.sdf import SDF
 
 from .rigid_contact import func_collide_with_rigid
 
@@ -48,7 +49,7 @@ def func_mpm_rigid(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """Return the velocity of a cell of the grid colliding with the coupled rigid geoms (see func_collide_with_rigid)."""
@@ -61,7 +62,7 @@ def func_mpm_rigid(
         dyn_state.links,
         dyn_info.geoms,
         rigid_info,
-        collider_info.sdf,
+        sdf_info,
         collider_config,
     )
 
@@ -78,7 +79,7 @@ def func_cpic_cell_separation(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ) -> int:
     """
@@ -92,7 +93,7 @@ def func_cpic_cell_separation(
         for i_g in range(rigid_mpm_cpic.rigid_normal.shape[1]):
             if i_g_sep == -1 and dyn_info.geoms.needs_coup[i_g]:
                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                    i_g, i_b, cell_pos, dyn_state.geoms, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+                    i_g, i_b, cell_pos, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info, collider_config
                 )
                 if rigid_mpm_cpic.rigid_normal[i_p, i_g, i_b].dot(sdf_normal_cell) < 0:
                     i_g_sep = i_g
@@ -146,7 +147,7 @@ def kernel_update_cpic_rigid_normal(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ):
     """Record the outward normal of every coupled rigid geom at the active material point method particles.
@@ -164,7 +165,7 @@ def kernel_update_cpic_rigid_normal(
                         dyn_state.geoms,
                         dyn_info.geoms,
                         rigid_info,
-                        collider_info.sdf,
+                        sdf_info,
                         collider_config,
                     )
                     # The normal of a geom a particle penetrates keeps the side the particle came from
@@ -192,10 +193,10 @@ class RigidMPM(GridCoupling):
         self,
         rigid_solver: RigidSolver,
         mpm_solver: MPMSolver,
+        sdf: SDF,
         options: Annotated[LegacyCouplerOptions, Enabled("rigid_mpm")],
     ) -> None:
-        # The cells collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
+        pass
 
 
 @register_system
@@ -218,6 +219,7 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
         rigid_mpm: RigidMPM,
         rigid_solver: RigidSolver,
         mpm_solver: MPMSolver,
+        sdf: SDF,
         options: Annotated[MPMOptions, Enabled("enable_CPIC")],
     ) -> None:
         self._mpm_solver = mpm_solver

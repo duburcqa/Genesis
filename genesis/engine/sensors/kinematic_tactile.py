@@ -55,9 +55,9 @@ def _func_query_contact_depth_penetration(
     probe_radius_gt: float,
     probe_radius_m: float,
     sensor_n_geoms: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    sdf_info: array_class.SDFInfo,
 ):
     """
     Max probe penetration from SDF over the sensor link's unique opposing geoms, dual-radius.
@@ -70,7 +70,7 @@ def _func_query_contact_depth_penetration(
         i_g = sensor_geoms_idx[i_b, i_s, i_g_]
         g_pos = dyn_state.geoms.pos[i_g, i_b]
         g_quat = dyn_state.geoms.quat[i_g, i_b]
-        sd = sdf.sdf_func_world_local(i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, collider_info.sdf)
+        sd = sdf.sdf_func_world_local(i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, sdf_info)
         pen_gt = probe_radius_gt - sd
         if pen_gt > max_pen_gt:
             max_pen_gt = pen_gt
@@ -194,7 +194,7 @@ def _func_query_contact_depth(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
     eps: float,
 ):
@@ -221,14 +221,14 @@ def _func_query_contact_depth(
         if func_point_in_geom_aabb(i_g, i_b, probe_pos, aabb_expansion, dyn_state):
             g_pos = dyn_state.geoms.pos[i_g, i_b]
             g_quat = dyn_state.geoms.quat[i_g, i_b]
-            sd = sdf.sdf_func_world_local(i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, collider_info.sdf)
+            sd = sdf.sdf_func_world_local(i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, sdf_info)
             pen_gt = probe_radius_gt - sd
             pen_m = probe_radius_m - sd
             # Compute the SDF normal at most once across both branches.
             need_normal = (pen_gt > max_pen_gt and pen_gt > eps) or (pen_m > max_pen_m and pen_m > eps)
             if need_normal:
                 normal = sdf.sdf_func_normal_world_local(
-                    i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+                    i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
                 )
                 contact_link = dyn_info.geoms.link_idx[i_g]
                 if pen_gt > max_pen_gt and pen_gt > eps:
@@ -319,7 +319,7 @@ def _kernel_kinematic_taxel(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
     eps: float,
     measured_equals_gt: int,
@@ -379,7 +379,7 @@ def _kernel_kinematic_taxel(
             dyn_state,
             dyn_info,
             rigid_info,
-            collider_info,
+            sdf_info,
             collider_config,
             eps,
         )
@@ -446,9 +446,9 @@ def _kernel_contact_depth_probe(
     sensor_n_geoms: qd.types.ndarray(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    sdf_info: array_class.SDFInfo,
     eps: float,
 ):
     total_n_probes = probe_positions_local.shape[0]
@@ -492,7 +492,7 @@ def _kernel_contact_depth_probe(
             sensor_n_geoms,
             dyn_state,
             dyn_info,
-            collider_info,
+            sdf_info,
         )
         max_penetration_m = max_penetration_m * probe_gains[i_b, i_p]  # gain on measured branch only
         cache_idx = sensor_cache_start[i_s] + i_p - sensor_probe_start[i_s]
@@ -1044,7 +1044,7 @@ class ContactDepthProbeSensor(
                 measured_cols_b,
                 solver.dyn_state,
                 solver.dyn_info,
-                solver.collider.collider_info,
+                shared_metadata.sdf_info,
                 eps=gs.EPS,
             )
         else:
@@ -1326,7 +1326,7 @@ class KinematicTaxelSensor(
                 solver.dyn_state,
                 solver.dyn_info,
                 solver.rigid_info,
-                solver.collider.collider_info,
+                shared_metadata.sdf_info,
                 solver.collider.collider_config,
                 gs.EPS,
                 measured_equals_gt,

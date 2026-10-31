@@ -179,9 +179,9 @@ def support_driver(
     direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    collider_state: ColliderState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -211,7 +211,7 @@ def support_driver(
             pos,
             quat,
             dyn_info,
-            collider_info,
+            support_field_info,
             exhaustive=qd.static(rigid_config.enable_mujoco_compatibility),
         )
 
@@ -228,9 +228,9 @@ def compute_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: ColliderState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -250,7 +250,7 @@ def compute_support(
             quat,
             collider_state,
             dyn_info,
-            collider_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -485,6 +485,7 @@ def func_mpr_contact_from_centers(
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     mpr_info: array_class.MPRInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -543,7 +544,7 @@ def func_mpr_contact_from_centers(
             quat_b,
             collider_state,
             dyn_info,
-            collider_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -762,6 +763,7 @@ def func_mpr_contact(
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     mpr_info: array_class.MPRInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -795,6 +797,7 @@ def func_mpr_contact(
         dyn_info,
         collider_info,
         mpr_info,
+        support_field_info,
         rigid_config,
         collider_config,
     )

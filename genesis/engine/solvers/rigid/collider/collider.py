@@ -34,7 +34,6 @@ from genesis.utils.misc import (
 )
 from genesis.utils.sdf import SDF
 
-from . import support_field
 from .broadphase import func_broad_phase
 from .constants import CCD_ALGORITHM_CODE, Layout, PerEnv, Queued, WithEPA, WithoutEPA
 from .contact import (
@@ -58,6 +57,7 @@ from .narrowphase import (
     func_narrowphase_contact0,
     func_narrowphase_multicontact,
 )
+from .support_field import SupportField
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
@@ -103,15 +103,6 @@ class Collider(System):
         self._n_terrain_threads = 1
         if self.collider_config.has_terrain and gs.backend != gs.cpu:
             self._n_terrain_threads = 2 * self.collider_config.gpu_cores
-
-        if self.collider_config.has_nonconvex_nonterrain:
-            self._solver.opt_ins.add(array_class.ColliderInfo.sdf)
-        if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
-            self._solver.opt_ins.add(array_class.ColliderInfo.support_field)
-
-        # Each narrowphase sub-component builds its part of the collider info (see ColliderInfo)
-        self.sdf = SDF(rigid_solver)
-        self._support_field = support_field.SupportField(rigid_solver)
 
         self._init_collision_fields()
 
@@ -387,16 +378,6 @@ class Collider(System):
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
-            opt_ins=self._solver.opt_ins,
-            # The info of the SDF and the support tables when built
-            binds={
-                name: info
-                for name, info in (
-                    ("sdf", self.sdf.sdf_info),
-                    ("support_field", self._support_field.support_field_info),
-                )
-                if info is not None
-            },
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
@@ -1140,6 +1121,7 @@ class ConvexConvexFirstContact(Narrowphase):
         rigid_solver: "RigidSolver",
         mpr: MPR[Queued],
         gjk: GJK[Queued, WithoutEPA],
+        support_field: SupportField,
     ) -> None:
         gpu_cores, n_envs = collider.collider_config.gpu_cores, rigid_solver._B
         n_threads = n_envs * ((gpu_cores + n_envs - 1) // n_envs)
@@ -1161,6 +1143,7 @@ class ConvexConvex[LayoutT: Layout](Narrowphase):
         rigid_solver: "RigidSolver",
         mpr: MPR[LayoutT],
         gjk: GJK[LayoutT, WithEPA],
+        support_field: SupportField,
     ) -> None:
         if self.template_args[LayoutT] is Queued:
             mpr.reserve(collider.collider_config.gpu_cores)
@@ -1200,6 +1183,7 @@ class ConvexTerrain(Narrowphase):
         collider: Annotated[Collider, Enabled("has_terrain_pairs")],
         rigid_solver: "RigidSolver",
         mpr: MPR[Queued],
+        support_field: SupportField,
     ) -> None:
         mpr.reserve(collider.n_terrain_threads)
 
@@ -1211,7 +1195,7 @@ class NonconvexNonconvex(Narrowphase):
     detect = func_narrow_phase_nonconvex_vs_nonterrain
 
     def __init__(
-        self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: "RigidSolver"
+        self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: "RigidSolver", sdf: SDF
     ) -> None:
         pass
 

@@ -166,8 +166,8 @@ def func_gjk_contact(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -212,8 +212,8 @@ def func_gjk_contact(
                 collider_state,
                 gjk_state,
                 dyn_info,
-                collider_info,
                 gjk_info,
+                support_field_info,
                 rigid_config,
                 collider_config,
                 shrink_sphere,
@@ -276,8 +276,8 @@ def func_gjk_contact(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -301,8 +301,8 @@ def func_gjk_contact(
                         collider_state,
                         gjk_state,
                         dyn_info,
-                        collider_info,
                         gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -324,8 +324,8 @@ def func_gjk_contact(
                         collider_state,
                         gjk_state,
                         dyn_info,
-                        collider_info,
                         gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -351,8 +351,8 @@ def func_gjk_contact(
             gjk_state,
             dyn_info,
             rigid_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -379,8 +379,8 @@ def func_gjk_contact(
                 gjk_state,
                 dyn_info,
                 rigid_info,
-                collider_info,
                 gjk_info,
+                support_field_info,
                 rigid_config,
                 collider_config,
             )
@@ -446,8 +446,8 @@ def func_gjk(
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -547,8 +547,8 @@ def func_gjk(
             collider_state,
             gjk_state,
             dyn_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
             shrink_sphere,
@@ -592,8 +592,8 @@ def func_gjk(
                 collider_state,
                 gjk_state,
                 dyn_info,
-                collider_info,
                 gjk_info,
+                support_field_info,
                 rigid_config,
                 collider_config,
             )
@@ -689,8 +689,8 @@ def func_gjk_intersect(
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -785,8 +785,8 @@ def func_gjk_intersect(
             collider_state,
             gjk_state,
             dyn_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
             shrink_sphere=False,
@@ -1172,8 +1172,8 @@ def func_safe_gjk(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -1283,8 +1283,8 @@ def func_safe_gjk(
             gjk_state,
             dyn_info,
             rigid_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -1612,8 +1612,8 @@ def func_safe_gjk_support(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -1676,8 +1676,8 @@ def func_safe_gjk_support(
                 collider_state,
                 gjk_state,
                 dyn_info,
-                collider_info,
                 gjk_info,
+                support_field_info,
                 rigid_config,
                 collider_config,
                 shrink_sphere=False,
@@ -1695,7 +1695,7 @@ def func_safe_gjk_support(
 
         if i == 0:
             # Only check support count for the original direction. If unique, we are done.
-            num_supports = func_count_support(i_ga, i_gb, quat_a, quat_b, n_dir, dyn_info, collider_info)
+            num_supports = func_count_support(i_ga, i_gb, quat_a, quat_b, n_dir, dyn_info, support_field_info)
             if num_supports > 1:
                 # Ambiguous support (e.g. flat face) - keep as baseline, try perturbed directions.
                 continue
@@ -1718,7 +1718,11 @@ def func_safe_gjk_support(
 
 @qd.func
 def count_support_driver(
-    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, collider_info: ColliderInfo
+    i_g: int,
+    d: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
 ):
     """
     Count the number of possible support points in the given direction,
@@ -1729,7 +1733,7 @@ def count_support_driver(
     if geom_type == gs.GEOM_TYPE.BOX:
         count = support_field._func_count_supports_box(d, quat)
     elif geom_type == gs.GEOM_TYPE.MESH:
-        count = support_field._func_count_supports_world(i_g, d, quat, collider_info)
+        count = support_field._func_count_supports_world(i_g, d, quat, support_field_info)
     return count
 
 
@@ -1740,8 +1744,8 @@ def func_count_support(
     quat_a: qd.types.vector(4),
     quat_b: qd.types.vector(4),
     dir: qd.types.vector(3),
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
 ):
     """
     Count the number of possible pairs of support points on the two objects
@@ -1750,7 +1754,11 @@ def func_count_support(
     count = 1
     for i in range(2):
         count *= count_support_driver(
-            i_ga if i == 0 else i_gb, dir if i == 0 else -dir, quat_a if i == 0 else quat_b, dyn_info, collider_info
+            i_ga if i == 0 else i_gb,
+            dir if i == 0 else -dir,
+            quat_a if i == 0 else quat_b,
+            dyn_info,
+            support_field_info,
         )
 
     return count

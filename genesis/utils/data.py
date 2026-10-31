@@ -235,9 +235,7 @@ class _FieldSpec(NamedTuple):
     grad: bool = False
     ndarray: bool = False
     lazy: bool = False
-    opt_in: bool = False
     oversize_hint: str = ""
-    is_required: bool = False
 
 
 def field(
@@ -249,7 +247,6 @@ def field(
     grad: bool = False,
     ndarray: bool = False,
     lazy: bool = False,
-    opt_in: bool = False,
     oversize_hint: str = "",
 ):
     """
@@ -262,66 +259,13 @@ def field(
     constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
     a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
     gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. A
-    `lazy` member is allocated when first read, from the sizes and the gradient requirement of its struct. An `opt_in`
-    array or member is unused until another component opts it in (see 'opt_in'). An array too large for a backend to
-    address raises at allocation, with `oversize_hint` appended to the message, for instance the options shrinking it.
+    `lazy` member is allocated when first read, from the sizes and the gradient requirement of its struct. An array too
+    large for a backend to address raises at allocation, with `oversize_hint` appended to the message, for instance the
+    options shrinking it.
     """
     labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
-    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy, opt_in, oversize_hint)
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy, oversize_hint)
     return dataclasses.field(metadata={_SPEC: spec})
-
-
-def requires(*, opt_in: bool = False):
-    """Declare a field holding a struct built and owned elsewhere, which the struct binds when built (see Data).
-
-    An `opt_in` requirement is unused until another component opts it in (see 'opt_in'): the struct then allocates the
-    0-d placeholders of the required struct itself when none is built, and raises when it is opted in.
-    """
-    return dataclasses.field(metadata={_SPEC: _FieldSpec(opt_in=opt_in, is_required=True)})
-
-
-class OptIns:
-    """
-    The fields and structs opted in among those a component owns, with the sizes of their arrays (see 'field').
-
-    A component using a struct that another component owns opts it in on the registry of the owner, which passes it to
-    the constructor of the struct (see Data). The scope of an opt-in is thus the owner the component depends on, and two
-    instances of a struct owned by distinct components are opted in apart.
-    """
-
-    def __init__(self):
-        # The sizes of each request, by the struct it starts from and its path
-        self._requests: dict[tuple[type, tuple[str, ...]], list[dict[str, Any]]] = {}
-        self._built: set[type] = set()
-
-    def add(self, target: "FieldRef | type[Data]", **sizes: Any) -> None:
-        """
-        Opt in a field declared `opt_in`, or a whole struct, before the owner builds it.
-
-        The target is a field by reference from the struct holding it, `add(ColliderInfo.sdf)`, with the sizes of its
-        arrays if any, added to those of its struct, or a struct class, which its builder checks with `in`. Opting in a
-        requirement (see 'requires') opts in the struct it requires as well.
-        """
-        root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
-        if root_cls in self._built:
-            raise TypeError(f"Opting in {target!r} comes too late: a {root_cls.__name__} is already built.")
-        self._requests.setdefault((root_cls, path), []).append(sizes)
-        if len(path) == 1 and path[0] in root_cls._requires:
-            required_cls = _resolve_type(root_cls._requires[path[0]], root_cls)
-            self._requests.setdefault((required_cls, ()), []).append({})
-
-    def __contains__(self, target: "FieldRef | type[Data]") -> bool:
-        root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
-        return path in self.get_sizes(root_cls)
-
-    def get_sizes(self, cls: type) -> dict[tuple[str, ...], dict[str, Any]]:
-        """Return the sizes of the opted-in fields of a struct, by path, the struct itself under the empty path."""
-        opted_in = {}
-        for (root_cls, path), requests in self._requests.items():
-            for sizes in requests if root_cls is cls else ():
-                if opted_in.setdefault(path, sizes) != sizes:
-                    raise TypeError(f"{cls.__name__}.{'.'.join(path)} is opted in with different sizes.")
-        return opted_in
 
 
 class _Node(NamedTuple):
@@ -343,17 +287,15 @@ class Data:
     """
     Base of the structs of solver data, which kernels take as arguments.
 
-    A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), its members as fields annotated with
-    another struct, and the structs it uses without owning them (see 'requires' and 'attach'). The class keywords `kind`
-    and `shape` set the defaults of its fields (see DataKind).
+    A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field') and its members as fields annotated with
+    another struct. The class keywords `kind` and `shape` set the defaults of its fields (see DataKind).
 
     The constructor allocates every array of the tree. `sizes` maps each size (see Size) to its value and `values` each
     constant to its value, either one also keyed by a field (see FieldRef) for the arrays of that field alone.
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
     `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
     environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
-    placeholder no kernel reads. `opt_ins` is the registry of the owner opting in fields (see OptIns), and `binds` maps
-    a field to the struct or array allocated elsewhere it holds, every required struct opted in among them.
+    placeholder no kernel reads. `binds` maps a field to the struct or array allocated elsewhere it holds.
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -361,9 +303,6 @@ class Data:
     _lazy: ClassVar[dict[str, type]] = {}
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
-    # The type of each struct the struct requires by its field, resolved once an instance is built
-    _requires: ClassVar[dict[str, type]] = {}
-    _is_sealed: ClassVar[bool] = False
 
     def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -371,7 +310,7 @@ class Data:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._lazy, cls._values_models, cls._requires = dict(cls._lazy), {}, {}
+        cls._lazy, cls._values_models = dict(cls._lazy), {}
         annotations = get_own_annotations(cls)
         lazy_names = [
             name
@@ -399,9 +338,6 @@ class Data:
         for data_field in dataclasses.fields(cls):
             # An instance shadows them with its arrays and members
             setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
-            spec = data_field.metadata.get(_SPEC, _FieldSpec())
-            if spec.is_required:
-                cls._requires[data_field.name] = data_field.type
 
     def __init__(
         self,
@@ -412,36 +348,11 @@ class Data:
         layout: "Mapping[Any, tuple[int, ...] | None] | tuple[int, ...] | None" = None,
         unused: Mapping[Any, bool] | bool | None = None,
         requires_grad: bool = False,
-        opt_ins: OptIns | None = None,
         binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
     ):
         cls = type(self)
         name = cls.__name__
-        # The first instance resolves the annotations of the required structs and checks them, its fields being final
-        if not cls._is_sealed:
-            cls._requires = {
-                field_name: _resolve_type(annotation, cls) for field_name, annotation in cls._requires.items()
-            }
-            for field_name, required_cls in cls._requires.items():
-                if not (isinstance(required_cls, type) and issubclass(required_cls, Data)):
-                    raise TypeError(f"{name}.{field_name}: a required field holds a struct.")
-            # Two fields bound to one struct would alias it, which Quadrants cannot detect
-            if len(set(cls._requires.values())) < len(cls._requires):
-                raise TypeError(f"{name}: a struct requires one struct per type.")
-            cls._is_sealed = True
-
-        # The fields opted in on the registry of the owner (see OptIns), the struct itself aside
-        opted_in = {path: sizes for path, sizes in (opt_ins or OptIns()).get_sizes(cls).items() if path}
-        if opt_ins is not None:
-            opt_ins._built.add(cls)
-        # The required structs are bound by the owner, an opt-in requirement opted in by nobody holding placeholders of
-        # its own, its arrays being unused as those of any opt-in field
         binds = {(key._path if isinstance(key, FieldRef) else (key,)): bound for key, bound in (binds or {}).items()}
-        for field_name, required_cls in cls._requires.items():
-            if (field_name,) not in binds:
-                if cls.__dataclass_fields__[field_name].metadata[_SPEC].opt_in and (field_name,) not in opted_in:
-                    continue
-                raise TypeError(f"{name}() takes no {required_cls.__name__} in 'binds'.")
 
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
         # fields each has left
@@ -477,10 +388,6 @@ class Data:
             if key_path not in paths:
                 raise TypeError(f"{name}() 'binds' names {'.'.join(key_path)}, which is no field of it.")
         sizes = _by_path(name, "sizes", sizes or {}, paths)
-        if unknown := sorted(opted_in.keys() - {node.path for node in nodes if node.spec.opt_in}):
-            raise TypeError(f"{name}() is opted in at {unknown}, which no field declares opt_in.")
-        for path, path_sizes in opted_in.items():
-            sizes.setdefault(path, {}).update(path_sizes)
         for entries in sizes.values():
             if unknown := sorted(entries.keys() - _size_names(cls)):
                 raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
@@ -529,13 +436,6 @@ class Data:
                         raise TypeError(f"{name}() sets both 'env_first' and 'layout' of {'.'.join(leaf.path)}.")
                     selected_depths[leaf.path] = depth
                     properties[leaf.path][table_name] = value
-
-        # An opt-in field nobody opted in is unused
-        for node in nodes:
-            if node.spec.opt_in and node.path not in opted_in:
-                for leaf in leaves:
-                    if leaf.path[: len(node.path)] == node.path:
-                        properties[leaf.path]["unused"] = True
 
         constants = [leaf for leaf in leaves if leaf.is_constant]
         unused_paths = frozenset([leaf.path for leaf in constants if properties[leaf.path].get("unused")])
@@ -641,7 +541,7 @@ def _data_fields(cls: type) -> tuple[dataclasses.Field, ...]:
 
 
 def _size_names(cls: type) -> frozenset[str]:
-    """Return the names of the sizes of a struct tree, its lazy members included and its required structs excluded."""
+    """Return the names of the sizes of a struct tree, its lazy members included."""
     if "_tree_size_names" not in cls.__dict__:
         size_names, dims, holders = set(), [], [cls]
         while holders:
@@ -649,8 +549,6 @@ def _size_names(cls: type) -> frozenset[str]:
             dims += holder._shape or ()
             holders += [_resolve_type(lazy_type, holder) for lazy_type in holder._lazy.values()]
             for data_field in _data_fields(holder):
-                if data_field.name in holder._requires:
-                    continue
                 if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
                     holders.append(data_field.type)
                 spec = data_field.metadata.get(_SPEC, _FieldSpec())

@@ -70,8 +70,8 @@ def support_driver(
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -103,11 +103,11 @@ def support_driver(
             v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, gjk_info)
         else:
             v, v_, vid = support_field._func_support_world(
-                i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=True
+                i_g, direction, pos, quat, dyn_info, support_field_info, exhaustive=True
             )
     else:
         v, v_, vid = support_field._func_support_world(
-            i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=False
+            i_g, direction, pos, quat, dyn_info, support_field_info, exhaustive=False
         )
     return v, v_, vid
 
@@ -125,8 +125,8 @@ def func_support(
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
     gjk_info: array_class.GJKInfo,
+    support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -162,8 +162,8 @@ def func_support(
             collider_state,
             gjk_state,
             dyn_info,
-            collider_info,
             gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
             shrink_sphere,

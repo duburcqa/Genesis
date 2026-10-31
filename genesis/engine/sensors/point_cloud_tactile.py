@@ -827,9 +827,9 @@ def _func_elastomer_min_sdf_over_active_geoms(
     point_world: qd.types.vector(3),
     geom_n: int,
     geom_active_envs_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    sdf_info: array_class.SDFInfo,
 ) -> float:
     min_sdf = float(1.0e6)
     geom_end = geom_start + geom_n
@@ -852,7 +852,7 @@ def _func_elastomer_min_sdf_over_active_geoms(
             or point_world[2] > amax[2]
         ):
             continue
-        sd = sdf.sdf_func_world(i_g, i_b, point_world, dyn_state.geoms, dyn_info.geoms, collider_info.sdf)
+        sd = sdf.sdf_func_world(i_g, i_b, point_world, dyn_state.geoms, dyn_info.geoms, sdf_info)
         if sd < min_sdf:
             min_sdf = sd
     return min_sdf
@@ -1226,9 +1226,9 @@ def _kernel_elastomer_probe_depth(
     sensor_track_geom_n: qd.types.ndarray(),
     track_geom_active_envs_mask: qd.types.ndarray(),
     probe_depth_buf: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    sdf_info: array_class.SDFInfo,
 ):
     """Per-probe contact depth from track-geom SDF, parallel over (env, probe).
 
@@ -1259,7 +1259,7 @@ def _kernel_elastomer_probe_depth(
             track_geom_active_envs_mask,
             dyn_state,
             dyn_info,
-            collider_info,
+            sdf_info,
         )
 
         probe_depth_buf[i_b, i_p] = qd.max(gs.qd_float(0.0), -min_sdf)
@@ -1358,9 +1358,9 @@ def _kernel_elastomer_surface_state_bvh(
     surface_depth_buf: qd.types.ndarray(),
     surface_initialized_buf: qd.types.ndarray(),
     surface_candidate_buf: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    sdf_info: array_class.SDFInfo,
     aabb_margin: float,
     bvh_stack_size: qd.template(),
 ):
@@ -1473,7 +1473,7 @@ def _kernel_elastomer_surface_state_bvh(
                         elastomer_geom_active_envs_mask,
                         dyn_state,
                         dyn_info,
-                        collider_info,
+                        sdf_info,
                     )
 
                     surface_depth_buf[i_b, i_o] = qd.max(gs.qd_float(0.0), -min_sdf)
@@ -2254,7 +2254,7 @@ class ElastomerTaxelSensor(
                 shared_metadata.probe_depth_buf,
                 solver.dyn_state,
                 solver.dyn_info,
-                solver.collider.collider_info,
+                shared_metadata.sdf_info,
             )
         else:
             collision_bvh_contexts = shared_context.collision_bvh_contexts
@@ -2331,7 +2331,7 @@ class ElastomerTaxelSensor(
                     shared_metadata.surface_candidate_buf,
                     solver.dyn_state,
                     solver.dyn_info,
-                    solver.collider.collider_info,
+                    shared_metadata.sdf_info,
                     _ELASTOMER_QUERY_AABB_MARGIN,
                     BVH_STACK_SIZE,
                 )

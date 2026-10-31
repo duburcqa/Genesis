@@ -12,6 +12,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
+from genesis.utils.sdf import SDF
 
 if TYPE_CHECKING:
     from genesis.utils.ring_buffer import TensorRingBuffer
@@ -519,6 +520,8 @@ class ContactDepthQueryMetadataMixin:
 
     contact_depth_query: str | None = None
     sensor_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
+    # The signed distance fields (SDF) of the rigid geoms, which every query but the raycast one reads (see SDF)
+    sdf_info: "array_class.SDFInfo | None" = None
 
 
 def resolve_contact_depth_query(metadata: ContactDepthQueryMetadataMixin, mode: str | None, sensor_name: str) -> None:
@@ -552,17 +555,18 @@ class ContactDepthQuerySensorMixin:
     ``_options.contact_depth_query``, and a ``_shared_context`` ``RaycastContext``.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Queried through signed distance fields unless raycast
-        if self._options.contact_depth_query != "raycast":
-            self._manager._sim.rigid_solver.opt_ins.add(array_class.SDFInfo)
+    @property
+    def is_sdf_queried(self) -> bool:
+        """Whether the sensor queries the signed distance fields (SDF) of the rigid geoms, which the raycast one skips."""
+        return self._options.contact_depth_query != "raycast"
 
     def build(self):
         super().build()
         resolve_contact_depth_query(self._shared_metadata, self._options.contact_depth_query, type(self).__name__)
         if self._shared_metadata.contact_depth_query == "raycast":
             self._shared_context.activate()  # builds the BVH lazily, only on raycast opt-in
+        else:
+            self._shared_metadata.sdf_info = self._manager._sim.get_system(SDF).sdf_info
 
 
 # ============================ ViscoelasticHysteresis ============================

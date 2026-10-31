@@ -13,6 +13,7 @@ from genesis.engine.solvers.sph_solver import SPHSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.geom import func_cubic_kernel_plane_integral
+from genesis.utils.sdf import SDF
 
 
 @qd.func
@@ -83,7 +84,7 @@ def kernel_sph_rigid(
     sph_info: array_class.SPHInfo,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -108,7 +109,7 @@ def kernel_sph_rigid(
                         dyn_info.geoms,
                         dyn_info.links,
                         rigid_info,
-                        collider_info.sdf,
+                        sdf_info,
                         rigid_config,
                         collider_config,
                     )
@@ -124,7 +125,7 @@ class RigidSPH(Coupling):
         self,
         rigid_solver: RigidSolver,
         sph_solver: SPHSolver,
+        sdf: SDF,
         options: Annotated[LegacyCouplerOptions, Enabled("rigid_sph")],
     ) -> None:
-        # The particles collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
+        pass

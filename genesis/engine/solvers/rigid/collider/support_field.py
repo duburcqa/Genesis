@@ -1,4 +1,5 @@
 import math
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -7,13 +8,14 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-
+from genesis.engine.pipeline import System
+from genesis.utils.data import DataItem, iter_data
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
 
-class SupportField:
+class SupportField(System):
     """
     Support table of the geoms: for every cell of a grid of directions, the vertices supporting a direction of the cell.
 
@@ -32,25 +34,30 @@ class SupportField:
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
+    is_created_on_demand = True
+
     def __init__(self, rigid_solver: "RigidSolver") -> None:
-        """Build the support tables of the geoms into the support field info, for a scene opting it in."""
-        self.solver = rigid_solver
+        self._solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
         self.support_field_info: array_class.SupportFieldInfo | None = None
-        if array_class.SupportFieldInfo not in self.solver.opt_ins:
-            return
 
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "support_field_info")
+
+    def build(self) -> None:
+        """Build the support tables of the geoms into the support field info."""
         band_rows = self._support_res // 2
         n_geom_cells = 2 * self._support_res * band_rows
 
         # The table of a geom depends on its trimesh alone, so the geoms of one trimesh share one table (see
         # 'Mesh.tmesh_hash'), as the instances of an asset do.
-        geoms_table_idx = np.zeros((self.solver.n_geoms,), dtype=gs.np_int)
+        geoms_table_idx = np.zeros((self._solver.n_geoms,), dtype=gs.np_int)
         tables_idx_by_hash: dict[str, int] = {}
         tables_geom = []
-        for geom in self.solver.geoms:
+        for geom in self._solver.geoms:
             # The support of a terrain is read off the prism built from its height field, so its table would never be
             # read. Its vertex count (one per height field sample) would make it the costliest table to build.
             if geom.type == gs.GEOM_TYPE.TERRAIN:
@@ -64,7 +71,7 @@ class SupportField:
         n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
         self.support_field_info = array_class.SupportFieldInfo(
             sizes=dict(
-                geoms=self.solver.n_geoms,
+                geoms=self._solver.n_geoms,
                 support_cells=n_support_cells,
                 support_candidates=2 * n_support_cells + n_extras,
             ),
@@ -90,9 +97,9 @@ class SupportField:
                 [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
                 dtype=gs.np_int,
             ),
-            self.solver.dyn_info,
+            self._solver.dyn_info,
             self.support_field_info,
-            self.solver.rigid_config,
+            self._solver.rigid_config,
             n_geom_cells,
         )
 
@@ -150,8 +157,8 @@ def _func_support_world(
     d: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
     exhaustive: qd.template() = False,
 ):
     """Support position for a world direction.
@@ -170,13 +177,13 @@ def _func_support_world(
         v = gu.qd_transform_by_trans_quat(v_, pos, quat)
     else:
         d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
-        v_, vid = _func_support_mesh(i_g, d_mesh, dyn_info, collider_info)
+        v_, vid = _func_support_mesh(i_g, d_mesh, dyn_info, support_field_info)
         v = gu.qd_transform_by_trans_quat_fast(v_, pos, quat)
     return v, v_, vid
 
 
 @qd.func
-def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: ColliderInfo):
+def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo):
     """
     Cell of the support table of a geom that a mesh-frame direction falls in.
 
@@ -187,7 +194,7 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: Co
     of it pick the same vertex.
     """
     # Band of cells of each chart: see SupportField
-    support_res = collider_info.support_field.support_res[None]
+    support_res = support_field_info.support_res[None]
     band_start, band_rows = support_res // 4, support_res // 2
 
     i_chart = gs.qd_int(0)
@@ -215,37 +222,42 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: Co
     if i >= support_res:
         i = i - support_res
     j = gs.qd_int(qd.math.clamp(qd.math.floor(phi / math.pi * support_res) - band_start, 0, band_rows - 1))
-    return collider_info.support_field.support_cell_start[i_g] + (i_chart * support_res + i) * band_rows + j
+    return support_field_info.support_cell_start[i_g] + (i_chart * support_res + i) * band_rows + j
 
 
 @qd.func
-def _func_support_mesh(i_g: int, d_mesh: qd.types.vector(3), dyn_info: DynInfo, collider_info: ColliderInfo):
+def _func_support_mesh(
+    i_g: int,
+    d_mesh: qd.types.vector(3),
+    dyn_info: array_class.DynInfo,
+    support_field_info: array_class.SupportFieldInfo,
+):
     """Support vertex of a mesh-frame direction, the best of the candidates listed by the cell it falls in."""
     i_v_start = dyn_info.geoms.vert_start[i_g]
-    i_cell = _func_direction_cell(i_g, d_mesh, collider_info)
+    i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)
     # Record of the cell (see SupportField)
-    v = collider_info.support_field.support_v[2 * i_cell]
-    vid = collider_info.support_field.support_vid[2 * i_cell]
-    pos = collider_info.support_field.support_v[2 * i_cell + 1]
+    v = support_field_info.support_v[2 * i_cell]
+    vid = support_field_info.support_vid[2 * i_cell]
+    pos = support_field_info.support_v[2 * i_cell + 1]
     dot_max = v.dot(d_mesh)
     dot = pos.dot(d_mesh)
     if dot > dot_max:
         v = pos
         dot_max = dot
-        vid = collider_info.support_field.support_vid[2 * i_cell + 1]
+        vid = support_field_info.support_vid[2 * i_cell + 1]
     # The other candidates are read four at a time, so that the reads of a chunk issue together. The index is clamped to
     # the end of the list, which repeats its last candidate, unable to win twice.
-    i_s_start = collider_info.support_field.support_list_start[i_cell]
-    i_s_end = collider_info.support_field.support_list_start[i_cell + 1]
+    i_s_start = support_field_info.support_list_start[i_cell]
+    i_s_end = support_field_info.support_list_start[i_cell + 1]
     for i_chunk_ in range((i_s_end - i_s_start + 3) // 4):
         for i_k in qd.static(range(4)):
             i_s = qd.min(i_s_start + 4 * i_chunk_ + i_k, i_s_end - 1)
-            pos = collider_info.support_field.support_v[i_s]
+            pos = support_field_info.support_v[i_s]
             dot = pos.dot(d_mesh)
             if dot > dot_max:
                 v = pos
                 dot_max = dot
-                vid = collider_info.support_field.support_vid[i_s]
+                vid = support_field_info.support_vid[i_s]
 
     # The table numbers the vertices of its geom from zero (see SupportFieldInfo)
     return v, i_v_start + vid
@@ -400,32 +412,34 @@ def _func_support_box(
 
 
 @qd.func
-def _func_count_supports_world(i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), collider_info: ColliderInfo):
+def _func_count_supports_world(
+    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), support_field_info: array_class.SupportFieldInfo
+):
     """
     Count the number of valid support points for the given world direction.
     Only needs quat since counting doesn't depend on position.
     """
     d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
-    return _func_count_supports_mesh(i_g, d_mesh, collider_info)
+    return _func_count_supports_mesh(i_g, d_mesh, support_field_info)
 
 
 @qd.func
-def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), collider_info: ColliderInfo):
+def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo):
     """Count the vertices tied for the support of a mesh-frame direction, all of them listed by the cell holding it."""
-    i_cell = _func_direction_cell(i_g, d_mesh, collider_info)
-    dot_max = collider_info.support_field.support_v[2 * i_cell].dot(d_mesh)
+    i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)
+    dot_max = support_field_info.support_v[2 * i_cell].dot(d_mesh)
     count = gs.qd_int(1)
     # A cell with a single candidate holds it twice in its record (see SupportFieldInfo)
-    if collider_info.support_field.support_vid[2 * i_cell + 1] != collider_info.support_field.support_vid[2 * i_cell]:
-        dot = collider_info.support_field.support_v[2 * i_cell + 1].dot(d_mesh)
+    if support_field_info.support_vid[2 * i_cell + 1] != support_field_info.support_vid[2 * i_cell]:
+        dot = support_field_info.support_v[2 * i_cell + 1].dot(d_mesh)
         if dot > dot_max:
             dot_max = dot
         elif dot == dot_max:
             count += 1
-    i_s_start = collider_info.support_field.support_list_start[i_cell]
-    i_s_end = collider_info.support_field.support_list_start[i_cell + 1]
+    i_s_start = support_field_info.support_list_start[i_cell]
+    i_s_end = support_field_info.support_list_start[i_cell + 1]
     for i_s in range(i_s_start, i_s_end):
-        dot = collider_info.support_field.support_v[i_s].dot(d_mesh)
+        dot = support_field_info.support_v[i_s].dot(d_mesh)
         if dot > dot_max:
             count = 1
             dot_max = dot

@@ -135,7 +135,7 @@ flowchart TB
     end
     subgraph after ["after an owner builds: its properties"]
         B1["Collider pair analysis"] --> P1["has_terrain_pairs?"] --> N1["ConvexTerrain exists?"]
-        B1 --> P2["has_nonconvex_pairs?"] --> N2["NonconvexNonconvex exists?"] --> S1["SDF demanded"]
+        B1 --> P2["has_nonconvex_pairs?"] --> N2["NonconvexNonconvex exists?"] --> S1["SDF required"]
     end
 ```
 
@@ -151,7 +151,7 @@ stateDiagram-v2
     Absent --> [*]
 ```
 
-- **Created** as soon as it can be decided: its System dependencies exist, its Data dependencies are built, its conditions are known. A class waits at its first undecided dependency, so it demands no component before it is known to exist.
+- **Created** as soon as it can be decided: its System dependencies exist, its Data dependencies are built, its conditions are known. A class waits at its first undecided dependency, so it requires no component before it is known to exist.
 - **Built** once its dependencies are built and every class that could use it through its API has been created or ruled out, so every `reserve` is in. A class needing what the build provides (a part, its Data, a property read once built) is decided after it instead: the rigid solver builds without waiting for the narrowphases depending on its collider.
 - **On demand**: a component (`is_created_on_demand`) exists only while some existing System depends on it through its API.
 
@@ -384,27 +384,33 @@ class RigidMPM(System):
 
 ### 10.2 A sensor relying on the SDF
 
+The sensors are created by the user before the scene builds, so the sensor manager, which plays Observation, names the components they read beyond any constructor:
+
 ```python
-class TactileSensors(System):                           # plays Observation
-    def __init__(self, dyn_state: DynState,             # reads the rigid poses
-                 sdf: Annotated[SDF | None, Enabled(contact_depth_query="sdf")]): ...
+class SensorManager(Observation):
+    @property
+    def requires(self) -> tuple[type[System], ...]:
+        if any([isinstance(sensor, ContactDepthQuerySensorMixin) and sensor.is_sdf_queried for sensor in self.sensors]):
+            return (SDF,)
+        return ()
 ```
+
+A sensor reads the SDF it was given at build, `self._manager._sim.get_system(SDF).sdf_info`.
 
 ```mermaid
 sequenceDiagram
     participant Scene
-    participant Tactile as TactileSensors
+    participant Tactile as SensorManager
     participant SDF
     participant Rigid as RigidSolver
     Scene->>Tactile: add_sensor(depth query 'sdf')
-    Note over Tactile,SDF: created: depends on SDF through its API
-    Tactile->>SDF: demands it (created on demand)
+    Tactile->>SDF: requires it (created on demand)
     Rigid->>Rigid: build (geoms placed)
     SDF->>SDF: build (grids of the rigid geoms)
     Tactile->>Tactile: build
 ```
 
-With the raycast depth query, the dependency is absent: unless another System uses it, the SDF is never created and its grids are never loaded. The same SDF instance serves the non-convex narrowphase and the rigid couplings when they exist: they all depend on the one SDF of the rigid solver.
+With the raycast depth query, nothing is required: unless another System uses it, the SDF is never created and its grids are never loaded. The same SDF instance serves the non-convex narrowphase and the rigid couplings when they exist: they all depend on the one SDF of the rigid solver.
 
 ### 10.3 Existence decided by built Data
 
@@ -419,7 +425,7 @@ sequenceDiagram
     Rigid->>Rigid: build
     Col->>Col: built with it: pair analysis
     Col-->>NC: has_nonconvex_pairs
-    NC->>SDF: created, demands SDF
+    NC->>SDF: created, requires SDF
     SDF->>SDF: build (every possible user decided)
     NC->>NC: build
 ```

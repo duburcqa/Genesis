@@ -7,12 +7,15 @@ from typing import ForwardRef, get_args, get_origin
 import torch
 
 import genesis as gs
+from genesis.engine.pipeline import System
 from genesis.engine.step import Observation
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
 from genesis.utils.ring_buffer import TensorRingBuffer
+from genesis.utils.sdf import SDF
 
 from .base_sensor import Sensor, SharedSensorContext, SharedSensorMetadata
+from .tactile_shared import ContactDepthQuerySensorMixin
 
 
 class SensorManager(Observation):
@@ -323,6 +326,13 @@ class SensorManager(Observation):
             sensor_cls.reset(
                 self._sensors_metadata[sensor_cls], self._ground_truth_intermediate_cache[dtype][cache_slice], envs_idx
             )
+
+    @property
+    def requires(self) -> tuple[type[System], ...]:
+        """The signed distance fields (SDF) of the rigid geoms, which a tactile sensor querying them reads."""
+        if any([isinstance(sensor, ContactDepthQuerySensorMixin) and sensor.is_sdf_queried for sensor in self.sensors]):
+            return (SDF,)
+        return ()
 
     def observe(self):
         # Timeline rings must rotate before `_update_shared_cache` because `_apply_transform` mutates `at(0)` of the

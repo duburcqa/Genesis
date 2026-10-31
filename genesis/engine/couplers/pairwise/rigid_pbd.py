@@ -17,6 +17,7 @@ from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.array_class import ENVS, PARTICLES
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+from genesis.utils.sdf import SDF
 
 # The largest inverse timestep at which the particles carried by a link catch up with it, which spares them jerks
 CLAMPED_INV_DT = 50.0
@@ -77,7 +78,7 @@ def kernel_pbd_rigid_collide(
     pbd_info: array_class.PBDInfo,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ):
     """Push the sorted position based dynamics particles out of the coupled rigid geoms.
@@ -104,7 +105,7 @@ def kernel_pbd_rigid_collide(
                         pbd_info,
                         dyn_info.geoms,
                         rigid_info,
-                        collider_info.sdf,
+                        sdf_info,
                         collider_config,
                     )
 
@@ -186,6 +187,7 @@ class RigidPBD(Coupling):
         self,
         rigid_solver: RigidSolver,
         pbd_solver: PBDSolver,
+        sdf: SDF,
         options: Annotated[LegacyCouplerOptions, Enabled("rigid_pbd")],
     ) -> None:
         self._pbd_solver = pbd_solver
@@ -193,8 +195,6 @@ class RigidPBD(Coupling):
         self.clamped_inv_dt = min(1.0 / pbd_solver.substep_dt, CLAMPED_INV_DT)
         self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
         self.rigid_pbd_info.link_idx.fill(-1)
-        # The particles collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
 
     @property
     def data(self) -> Iterator[DataItem]:

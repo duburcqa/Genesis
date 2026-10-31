@@ -49,6 +49,7 @@ from genesis.engine.solvers.rigid.collider import collider, gjk_support, support
 from genesis.engine.solvers.rigid.collider.collider import Collider, ConvexConvex, ConvexConvexFirstContact
 from genesis.engine.solvers.rigid.collider.constants import PerEnv, Queued
 from genesis.engine.solvers.rigid.collider.gjk import GJK
+from genesis.engine.solvers.rigid.collider.support_field import SupportField
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -1179,16 +1180,16 @@ def test_mesh_support_exactness(show_viewer, tol):
         supports: qd.types.ndarray(),
         supports_count: qd.types.ndarray(),
         supports_idx: qd.types.ndarray(),
-        dyn_info: DynInfo,
-        collider_info: ColliderInfo,
+        dyn_info: array_class.DynInfo,
+        support_field_info: array_class.SupportFieldInfo,
     ):
         for i_d in range(directions.shape[0]):
             direction = qd.Vector([directions[i_d, 0], directions[i_d, 1], directions[i_d, 2]], dt=gs.qd_float)
-            support, i_v = support_field._func_support_mesh(i_g, direction, dyn_info, collider_info)
+            support, i_v = support_field._func_support_mesh(i_g, direction, dyn_info, support_field_info)
             supports_idx[i_d] = i_v
             for k in qd.static(range(3)):
                 supports[i_d, k] = support[k]
-            supports_count[i_d] = support_field._func_count_supports_mesh(i_g, direction, collider_info)
+            supports_count[i_d] = support_field._func_count_supports_mesh(i_g, direction, support_field_info)
 
     @qd.kernel
     def query_local_supports(
@@ -1199,8 +1200,8 @@ def test_mesh_support_exactness(show_viewer, tol):
         collider_state: array_class.ColliderState,
         gjk_state: array_class.GJKState,
         dyn_info: array_class.DynInfo,
-        collider_info: array_class.ColliderInfo,
         gjk_info: array_class.GJKInfo,
+        support_field_info: array_class.SupportFieldInfo,
         rigid_config: qd.template(),
         collider_config: qd.template(),
     ):
@@ -1217,8 +1218,8 @@ def test_mesh_support_exactness(show_viewer, tol):
                     collider_state,
                     gjk_state,
                     dyn_info,
-                    collider_info,
                     gjk_info,
+                    support_field_info,
                     rigid_config,
                     collider_config,
                     shrink_sphere=False,
@@ -1229,7 +1230,8 @@ def test_mesh_support_exactness(show_viewer, tol):
 
     # Directions on the boundaries of the cells of both charts, the second chart seeing a direction (x, y, z) of the
     # mesh frame as (x, -z, y)
-    support_res = qd_to_numpy(scene.rigid_solver.collider.collider_info.support_field.support_res).item()
+    support_field_info = scene.sim.get_system(SupportField).support_field_info
+    support_res = qd_to_numpy(support_field_info.support_res).item()
     theta = np.random.randint(support_res, size=N_RANDOM_DIRECTIONS // 4) / support_res * 2.0 * np.pi
     phi = np.random.uniform(0.25 * np.pi, 0.75 * np.pi, N_RANDOM_DIRECTIONS // 4)
     directions_meridian = np.stack((np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)), axis=-1)
@@ -1269,7 +1271,7 @@ def test_mesh_support_exactness(show_viewer, tol):
             supports_count,
             supports_idx,
             scene.rigid_solver.dyn_info,
-            scene.rigid_solver.collider.collider_info,
+            support_field_info,
         )
         directions_local = directions[:8].copy()
         supports_world = np.empty_like(directions_local)
@@ -1282,8 +1284,8 @@ def test_mesh_support_exactness(show_viewer, tol):
             scene.rigid_solver.collider.collider_state,
             scene.sim.get_system(GJK).gjk_state,
             scene.rigid_solver.dyn_info,
-            scene.rigid_solver.collider.collider_info,
             scene.sim.get_system(GJK).gjk_info,
+            support_field_info,
             scene.rigid_solver.rigid_config,
             scene.rigid_solver.collider.collider_config,
         )
@@ -1308,6 +1310,6 @@ def test_mesh_support_exactness(show_viewer, tol):
         supports_count,
         supports_idx,
         scene.rigid_solver.dyn_info,
-        scene.rigid_solver.collider.collider_info,
+        support_field_info,
     )
     assert_equal(supports_count, np.repeat((2, 4), (N_RANDOM_DIRECTIONS, 6)))

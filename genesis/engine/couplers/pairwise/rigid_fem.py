@@ -13,6 +13,7 @@ from genesis.engine.solvers.fem_solver import FEMSolver
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
+from genesis.utils.sdf import SDF
 
 from .fem_surface import FEMSurface, SurfaceCoupling
 from .rigid_contact import func_collide_with_rigid
@@ -55,7 +56,7 @@ def func_fem_rigid(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """
@@ -72,7 +73,7 @@ def func_fem_rigid(
         dyn_state.links,
         dyn_info.geoms,
         rigid_info,
-        collider_info.sdf,
+        sdf_info,
         collider_config,
     )
 
@@ -92,7 +93,7 @@ class RigidFEM(SurfaceCoupling):
         self,
         rigid_solver: RigidSolver,
         fem_surface: FEMSurface,
+        sdf: SDF,
         options: Annotated[LegacyCouplerOptions, Enabled("rigid_fem")],
     ) -> None:
-        # The vertices collide with the rigid geoms through their SDF
-        rigid_solver.opt_ins.add(array_class.SDFInfo)
+        pass
