@@ -478,7 +478,7 @@ class RasterizerCameraSensor(
 
     def _create_standalone_context(self, scene):
         """Create a simplified RasterizerContext for camera sensors."""
-        if not scene.sim._rigid_only and scene.n_envs > 1:
+        if scene.n_envs > 1 and any([solver is not scene.sim.rigid_solver for solver in scene.sim.active_solvers]):
             gs.raise_exception("Rasterizer with n_envs > 1, does not work when using non rigid simulation")
         if scene.n_envs > 1:
             gs.logger.warning(

@@ -239,19 +239,19 @@ class Simulator(RBC):
         # The Systems of the scene: the solvers holding entities, the coupler and the couplings between pairs of
         # solvers, built before the solvers allocate their Data so that each one opts in what it uses of the others
         self._engine = Engine(
-            [*[solver for solver in self._solvers if solver.is_active], *([self._coupler] if self._coupler else [])],
+            [
+                *[solver for solver in self._solvers if solver.is_active],
+                *([self._coupler] if self._coupler else []),
+                *([self._sensor_manager] if self._sensor_manager.sensors else []),
+            ],
             context=(self._coupler_options,),
         )
 
         # solvers
-        # A scene with a coupler, or with solvers other than the rigid one, runs the full step
-        self._rigid_only = self.rigid_solver.is_active and self._coupler is None
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
-                if not isinstance(solver, RigidSolver):
-                    self._rigid_only = False
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
         if self._coupler is not None:
@@ -413,13 +413,7 @@ class Simulator(RBC):
             self._has_errno_flags = False
 
         with self._step_timer.phase("physics"):
-            if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
-                self._steps += 1
-                for _ in range(self._substeps):
-                    self.rigid_solver.substep(self.cur_substep_local)
-                    self._cur_substep_global += 1
-                self.rigid_solver.clear_external_force()
-            elif self._rollout_graph.is_recording:
+            if self._rollout_graph.is_recording:
                 self._rollout_graph.record_step(StepOperation(self))
             else:
                 # A step the graph does not record overwrites the state the last recorded operation returned
@@ -438,7 +432,7 @@ class Simulator(RBC):
 
         # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
         with self._step_timer.phase("sensors"), torch.no_grad():
-            self._sensor_manager.step()
+            self._step_system.observations()
 
     def _step(self):
         """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
@@ -450,8 +444,7 @@ class Simulator(RBC):
                 for solver in self._active_solvers:
                     if solver.has_frames:
                         solver.copy_frame(solver.n_frames - 1, 0)
-        if self.rigid_solver.is_active:
-            self.rigid_solver.clear_external_force()
+        self._step_system.completions()
 
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SystemCheckpoint]) -> None:
         """
@@ -496,8 +489,7 @@ class Simulator(RBC):
                         for solver in self._active_solvers:
                             if solver.has_frames:
                                 solver.copy_frame(solver.n_frames - 1, 0)
-                    if self.rigid_solver.is_active:
-                        self.rigid_solver.clear_external_force()
+                    self._step_system.completions()
             recorder.reverse()
         self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)

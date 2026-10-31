@@ -1537,6 +1537,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             integration.add(kernel_update_forward_kinematics_after_integration)
 
         self.substep_phase = Phase(is_graph=is_graph)
+        # The external forces apply over the step they are set for
+        step.completions.add(self.clear_external_force)
         if self._is_constraint_solved_by_coupler:
             constraint_force.add(update_qvel)
             self.substep_phase.add(dynamics, constraint_force)
