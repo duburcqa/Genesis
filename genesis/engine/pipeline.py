@@ -743,6 +743,8 @@ def _is_component(cls: type) -> bool:
 
     A component exists while some System depends on it, and is built once every System that could use it is decided.
     """
+    if not (isinstance(cls, type) and issubclass(cls, System)):
+        return False
     owned = {owned for owner in _SYSTEM_CLASSES_BY_NAME.values() for owned in _get_owned(owner)}
     return not get_roles(cls) and cls not in _SYSTEM_CLASSES and cls not in owned
 
@@ -899,19 +901,25 @@ def assemble_systems(
             system._data_dependencies = {name: arg for name, arg in decision.items() if isinstance(arg, Data)}
             systems.append(system)
         for system in [system for system in systems if id(system) not in built_ids]:
-            # A pending class needing what the build of the System provides is decided after it
+            # A pending class needing what a build provides (the parts and Data of this System, a condition on a System
+            # not built yet) is decided after that build, so it makes no request of this one in its constructor
             owned = tuple(_get_owned(type(system)))
-            is_used_pending = any(
-                [
-                    issubclass(type(system), c)
-                    for cls in classes_pending
-                    if not any([issubclass(c, owned) for d in dependencies_by_cls.get(cls, ()) for c in d.classes])
-                    for dependency in dependencies_by_cls.get(cls, _get_dependencies(cls))
-                    if not dependency.conditions
-                    for c in dependency.classes
-                    if issubclass(c, System)
-                ]
-            )
+            types_built = [type(other) for other in systems if id(other) in built_ids]
+            is_used_pending = False
+            for cls in classes_pending:
+                dependencies = dependencies_by_cls.setdefault(cls, _get_dependencies(cls))
+                if any(
+                    [
+                        issubclass(c, owned)
+                        or (d.conditions and issubclass(c, System) and not any([issubclass(t, c) for t in types_built]))
+                        for d in dependencies
+                        for c in d.classes
+                    ]
+                ):
+                    continue
+                is_used_pending |= any(
+                    [issubclass(type(system), c) for d in dependencies for c in d.classes if issubclass(c, System)]
+                )
             if is_used_pending or not all([id(dependency) in built_ids for dependency in system._dependencies]):
                 continue
             with _scoped(system):
