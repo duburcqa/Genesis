@@ -7,14 +7,14 @@ one once its dependencies exist, builds it once they are built, then routes the 
 the role fills. A System that depends on a System or a struct the scene never has is absent, and so are its stages. See
 .github/contributing/PIPELINE.md for the design.
 
-A Phase is an ordered sequence of stages, split into slots. A stage is a kernel, a kernel method of a data-oriented
-object, a Python function, an extension point of a kernel (see Inline) or another Phase. Its arguments are bound by name to
-the Data of the System it belongs to and of the Systems it depends on, and an argument that none of them provides is a
-call argument, given by name when the Phase runs.
+A Phase is an ordered sequence of stages, split into slots. A stage is a kernel, a func whose loops run at the top
+level, a kernel method of a data-oriented object, a Python function, an extension point of a kernel (see Inline) or
+another Phase. Its arguments are bound by name to the Data of the System it belongs to and of the Systems it depends on,
+and an argument that none of them provides is a call argument, given by name when the Phase runs.
 
 A Phase fuses the kernels it runs between two Python functions into one kernel, generated from source, which calls the
-body of each of them as a top-level func. While the launches are recorded for a backward pass, it launches every kernel on
-its own instead, since the launch recorder of the differentiable simulation reverses one launch per entry (see
+body of each of them as a top-level func. While the launches are recorded for a backward pass, it launches every kernel
+on its own instead, since the launch recorder of the differentiable simulation reverses one launch per entry (see
 genesis/grad/bridge.py), whose tags (`no_grad`, `register_custom_backward`, `reversed_with`) apply as usual.
 """
 
@@ -50,6 +50,8 @@ Template = type(qd.template())
 
 # The System classes the simulator creates when a scene calls for them, in registration order (see register_system)
 _SYSTEM_CLASSES: list[type["System"]] = []
+# Every System class by name, which resolves the dependencies a module names as strings to break an import cycle
+_SYSTEM_CLASSES_BY_NAME: dict[str, type["System"]] = {}
 
 # The System whose stages are being added, which they bind the Data of (see '_get_scope')
 _scope_system: "System | None" = None
@@ -59,10 +61,10 @@ class System:
     """
     A unit of the simulation that owns Data, depends on other Systems and Data, and plays roles in their phases.
 
-    Its Data are its public attributes. Its dependencies are the parameters of its constructor, typed with a System class
-    to use the API of that System, or with a Data struct to read it alone, `X | None` for an optional one (see
-    'assemble_systems'). It allocates the Data whose sizes the scene decides in `build`, once its dependencies are built.
-    The roles it plays are the role classes it derives from, each routing one of its stages (see 'get_roles').
+    Its Data are its public attributes. Its dependencies are the parameters of its constructor, typed with a System
+    class to use the API of that System, or with a Data struct to read it alone, `X | None` for an optional one (see
+    'assemble_systems'). It allocates the Data whose sizes the scene decides in `build`, once its dependencies are
+    built. The roles it plays are the role classes it derives from, each routing one of its stages (see 'get_roles').
     """
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
@@ -84,6 +86,7 @@ class System:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls._template_instances = {}
+        _SYSTEM_CLASSES_BY_NAME.setdefault(cls.__name__, cls)
         # A condition names a field of an options model or a property of a System, checked once the class exists
         for hint in inspect.get_annotations(vars(cls)["__init__"]).values() if "__init__" in vars(cls) else ():
             for condition in typing.get_args(hint)[1:] if typing.get_origin(hint) is typing.Annotated else ():
@@ -121,7 +124,7 @@ class System:
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
-        """Yield every array and static config the System holds, named by the attributes reaching it (see 'iter_data')."""
+        """Yield every array and static config the System holds, named by the attributes reaching it (see iter_data)."""
         return iter(())
 
     def save_checkpoint(self, kinds: frozenset[DataKind]) -> SystemCheckpoint:
@@ -141,7 +144,7 @@ class System:
         self.load_checkpoint(state)
 
     def load_checkpoint(self, checkpoint: SystemCheckpoint) -> None:
-        """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build."""
+        """Write back the arrays of a checkpoint of 'save_checkpoint', rejecting a record read from another build."""
         fill_data(
             [item for item in self.data if isinstance(item, DataItem) and item.kind in checkpoint.kinds],
             checkpoint.arrays,
@@ -182,7 +185,7 @@ def register_system(cls: type[System]) -> type[System]:
 
 
 class SlotRef(NamedTuple):
-    """A slot of a phase, or an extension point, that a System class offers, by attribute and slot name (see PhaseSpec)."""
+    """A slot of a phase, or an extension point, that a System class offers, by attribute and slot name."""
 
     owner: type
     attr: str
@@ -200,12 +203,15 @@ class PhaseSpec:
     """
     The declaration of a phase a System offers, `detection = PhaseSpec("broadphase", "narrowphase", "pruning")`.
 
-    On the class it names the slots that roles fill, `Collider.detection.narrowphase`, and on a System it is the Phase of
-    that System, its slots running in declaration order. `is_graph` is a flag, or a function of the System.
+    On the class it names the slots that roles fill, `Collider.detection.narrowphase`, and on a System it is the Phase
+    of that System, its slots running in declaration order. `is_graph` is a flag, or a function of the System, and
+    `is_launched_apart` is passed on to the Phase.
     """
 
-    def __init__(self, *slots: str, is_graph: "bool | Callable[[System], bool]" = False) -> None:
-        self.slots, self.is_graph = slots, is_graph
+    def __init__(
+        self, *slots: str, is_graph: "bool | Callable[[System], bool]" = False, is_launched_apart: bool = False
+    ) -> None:
+        self.slots, self.is_graph, self.is_launched_apart = slots, is_graph, is_launched_apart
         self.owner: type | None = None
         self.name = ""
 
@@ -223,7 +229,9 @@ class PhaseSpec:
         if system is None:
             return self
         is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
-        vars(system)[self.name] = phase = Phase(slots=self.slots, is_graph=is_graph)
+        vars(system)[self.name] = phase = Phase(
+            slots=self.slots, is_graph=is_graph, is_launched_apart=self.is_launched_apart
+        )
         return phase
 
 
@@ -382,8 +390,8 @@ def load_generated(source: str, name: str) -> Any:
     Return the object of the given name a generated source defines, written to the cache directory and imported from
     there.
 
-    The fastcache of Quadrants reads the source of a kernel from its file, and a file named after the hash of its content
-    stays valid across processes. The module is imported once per process.
+    The fastcache of Quadrants reads the source of a kernel from its file, and a file named after the hash of its
+    content stays valid across processes. The module is imported once per process.
     """
     path = os.path.join(get_cache_dir(), "pipeline", f"{hashlib.sha1(source.encode()).hexdigest()[:16]}.py")
     if not os.path.exists(path):
@@ -407,16 +415,23 @@ class Phase:
     """
     An ordered sequence of stages, which its System runs, split into the `slots` that roles fill (see PhaseSpec).
 
-    The kernels of a run are fused into one kernel between two Python stages, a nested Phase running inline, and captured
-    as a graph with `is_graph`, which a kernel holding a device loop (`qd.graph.do_while`) requires. While the launches
-    are recorded for a backward pass, every stage runs on its own instead, all of them reversed as one by `backward` when
-    given (see custom_backward).
+    The kernels of a run are fused into one kernel between two Python stages, and captured as a graph with `is_graph`,
+    which a kernel holding a device loop (`qd.graph.do_while`) requires. A nested Phase runs inline, fused with the
+    stages around it, unless it `is_launched_apart`, its own launches then bounding the runs around it. While the
+    launches are recorded for a backward pass, every stage runs on its own instead, all of them reversed as one by
+    `backward` when given (see custom_backward).
     """
 
     def __init__(
-        self, *, slots: Sequence[str] = (), is_graph: bool = False, backward: Callable[[], None] | None = None
+        self,
+        *,
+        slots: Sequence[str] = (),
+        is_graph: bool = False,
+        is_launched_apart: bool = False,
+        backward: Callable[[], None] | None = None,
     ) -> None:
         self.is_graph = is_graph
+        self.is_launched_apart = is_launched_apart
         self.backward = backward
         # The phases of the slots, which run in declaration order
         self.slots = {name: Phase() for name in slots}
@@ -443,15 +458,22 @@ class Phase:
             if isinstance(stage, (QuadrantsCallable, BoundQuadrantsCallable)):
                 owner = stage.instance if isinstance(stage, BoundQuadrantsCallable) else None
                 _check_read_only(stage.fn, owner, names, args, read_only_ids)
+            # A func, whose loops run in parallel at the top level of a kernel, runs through the kernel generated around
+            # it
+            if isinstance(stage, QuadrantsCallable) and not stage._is_wrapped_kernel:
+                kernel_name = f"kernel_{stage.fn.__name__.removeprefix('func_')}"
+                stage, _ = make_fused_kernel(kernel_name, [FusedStage(stage, tuple(names), False)], is_graph=False)
             self.items.append((stage, tuple(args)))
         self._launches = None
 
     def get_items(self) -> list[tuple[Callable, tuple[Any, ...]]]:
-        """Return the stages the Phase runs, its nested Phases and slots unrolled."""
+        """Return the stages the Phase runs, its nested Phases and slots unrolled, but those launched apart."""
         return [
             item
             for stage, args in self.items
-            for item in (stage.get_items() if isinstance(stage, Phase) else [(stage, args)])
+            for item in (
+                stage.get_items() if isinstance(stage, Phase) and not stage.is_launched_apart else [(stage, args)]
+            )
         ]
 
     def get_launches(self) -> tuple[Launch, ...]:
@@ -500,7 +522,7 @@ class Phase:
             return
         if not is_recording_launches():
             for launch in self.get_launches():
-                if isinstance(launch.fn, Inline):
+                if isinstance(launch.fn, (Inline, Phase)):
                     launch.fn(**values)
                     continue
                 args = launch.args
@@ -682,7 +704,7 @@ class _Dependency(NamedTuple):
 
 def _get_dependencies(cls: type[System]) -> list[_Dependency]:
     """Return the dependencies a System class declares, those its template arguments rule out taking no class."""
-    hints = typing.get_type_hints(cls.__init__, include_extras=True)
+    hints = typing.get_type_hints(cls.__init__, localns=_SYSTEM_CLASSES_BY_NAME, include_extras=True)
     dependencies = []
     for name in inspect.signature(cls).parameters:
         hint, conditions, is_conditional = hints[name], (), False
@@ -693,7 +715,14 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
         if typing.get_origin(hint) is typing.Annotated:
             metadata = hint.__metadata__
             hint = hint.__origin__
-            conditions = tuple([meta for meta in metadata if isinstance(meta, Enabled)])
+            # A condition compared with a type parameter of the owner compares with its argument
+            conditions = tuple(
+                [
+                    Enabled(**{name: cls.template_args.get(value, value) for name, value in meta.conditions.items()})
+                    for meta in metadata
+                    if isinstance(meta, Enabled)
+                ]
+            )
             only_ifs = [meta for meta in metadata if isinstance(meta, OnlyIf)]
             if only_ifs:
                 if not all([only_if.arg in cls.template_args.values() for only_if in only_ifs]):
@@ -716,14 +745,19 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
     return dependencies
 
 
-def _get_owned_data(cls: type) -> list[type]:
-    """Return the Data structs a System class declares it owns, as the annotations of its class attributes."""
+def _get_owned(cls: type) -> list[type]:
+    """
+    Return the Data structs and the parts a System class declares it owns, those of its parts included.
+
+    A System declares them as the annotations of its class attributes, `dyn_state: DynState`, `collider: Collider |
+    None`.
+    """
     owned = []
     for base in cls.__mro__:
         for hint in inspect.get_annotations(base).values():
             for arg in typing.get_args(hint) or (hint,):
-                if isinstance(arg, type) and issubclass(arg, Data):
-                    owned.append(arg)
+                if isinstance(arg, type) and issubclass(arg, (Data, System)) and arg not in owned and arg is not cls:
+                    owned += [arg, *(_get_owned(arg) if issubclass(arg, System) else ())]
     return owned
 
 
@@ -776,9 +810,10 @@ def assemble_systems(
     created on demand, such as an instance of a component template, exists once an existing System depends on it. A
     System is built once the Systems it depends on are built and every System that could still use its API is decided,
     so that every request they make of it in their constructor is in, except those conditioned on it, which are decided
-    once it is built. A dependency on a struct never delays the build of its owner. The stage of each role is then routed into its slot, in the order of the Systems: those given, then those
-    created in registration order. A System that a mandatory dependency or a condition rules out is absent, and so is a
-    System another one supersedes, the reason being logged.
+    once it is built. A dependency on a struct never delays the build of its owner. The stage of each role is then
+    routed into its slot, in the order of the Systems: those given, then those created in registration order. A System
+    that a mandatory dependency or a condition rules out is absent, and so is a System another one supersedes, the
+    reason being logged.
     """
     systems = list(systems)
     built_ids = {id(system) for system in systems_built}
@@ -790,12 +825,14 @@ def assemble_systems(
             for superseded in type(system).supersedes:
                 if isinstance(superseded, type) and issubclass(cls, superseded):
                     return "absent", f"superseded by {type(system).__name__}"
-        args, is_waiting = {}, False
+        # A class waits at the first dependency still undecided, before demanding any component it may never use
+        args = {}
         for dependency in _get_dependencies(cls):
             if not dependency.classes:
                 args[dependency.name] = None
                 continue
             classes = dependency.classes
+            owners_unbuilt = [type(system) for system in systems if id(system) not in built_ids]
             if all([isinstance(c, type) and issubclass(c, Data) for c in classes]):
                 candidates = [
                     value
@@ -807,13 +844,20 @@ def assemble_systems(
                 may_come = any(
                     [
                         issubclass(owned, classes)
-                        for owner in (*[type(s) for s in systems if id(s) not in built_ids], *classes_pending)
-                        for owned in _get_owned_data(owner)
+                        for owner in (*owners_unbuilt, *classes_pending)
+                        for owned in _get_owned(owner)
                     ]
                 )
             elif all([isinstance(c, type) and issubclass(c, System) for c in classes]):
                 candidates = [system for system in systems if isinstance(system, classes)]
-                may_come = any([issubclass(other, classes) for other in classes_pending])
+                # A part joins once its owner is built
+                may_come = any(
+                    [
+                        issubclass(c, classes)
+                        for owner in (*classes_pending, *owners_unbuilt)
+                        for c in (owner, *_get_owned(owner))
+                    ]
+                )
                 if not candidates and not dependency.is_optional:
                     for needed in classes:
                         if needed.is_created_on_demand and needed not in classes_pending:
@@ -830,8 +874,7 @@ def assemble_systems(
                 raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {unique}.")
             if not unique:
                 if may_come:
-                    is_waiting = True
-                    continue
+                    return "wait", None
                 if dependency.is_optional:
                     args[dependency.name] = None
                     continue
@@ -840,15 +883,14 @@ def assemble_systems(
             if dependency.conditions:
                 # A condition on a System is read once that System is built
                 if isinstance(value, System) and id(value) not in built_ids:
-                    is_waiting = True
-                    continue
+                    return "wait", None
                 if not all([condition.holds(value) for condition in dependency.conditions]):
                     if dependency.is_optional:
                         args[dependency.name] = None
                         continue
                     return "absent", f"a condition on '{dependency.name}' does not hold"
             args[dependency.name] = value
-        return ("wait", None) if is_waiting else ("create", args)
+        return "create", args
 
     while True:
         classes_decided = list(classes_pending)
@@ -869,10 +911,18 @@ def assemble_systems(
         for system in list(systems):
             if id(system) in built_ids:
                 continue
+            # A pending class that needs what the build of the System provides, its parts or its Data, is decided after
+            # it
+            owned = tuple(_get_owned(type(system)))
+            users_pending = [
+                cls
+                for cls in classes_pending
+                if not any([issubclass(c, owned) for dependency in _get_dependencies(cls) for c in dependency.classes])
+            ]
             is_ready = all([id(dependency) in built_ids for dependency in system._dependencies]) and not any(
                 [
                     issubclass(type(system), c)
-                    for cls in classes_pending
+                    for cls in users_pending
                     for dependency in _get_dependencies(cls)
                     if not dependency.conditions
                     for c in dependency.classes
@@ -885,9 +935,10 @@ def assemble_systems(
                 system.build()
             built_ids.add(id(system))
             is_progressing = True
-            # The parts of a System join the Systems of the scene, built with it
+            # The parts of a System join the Systems of the scene, built with it, and depend on it
             for part in system.get_parts():
                 if all([part is not other for other in systems]):
+                    part._dependencies = (system, *part._dependencies)
                     systems.append(part)
                     built_ids.add(id(part))
         # A class created on demand joins the pending ones while they are decided

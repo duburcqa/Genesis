@@ -25,14 +25,15 @@ def func_gjk_contact(
     gb_quat: qd.types.vector(4),
     pos_tol: float,
     normal_tol: float,
-    geoms_init_AABB: GeomsInitAABB,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    gjk_state: GJKState,
-    diff_contact_input: DiffContactInput,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    gjk_state: array_class.GJKState,
+    diff_contact_input: array_class.DiffContactInput,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    gjk_info: array_class.GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -127,6 +128,7 @@ def func_gjk_contact(
             dyn_info,
             rigid_info,
             collider_info,
+            gjk_info,
             rigid_config,
             collider_config,
         )
@@ -139,11 +141,11 @@ def func_gjk_contact(
             gjk_state.polytope.horizon_nedges[i_b] = 0
 
             # Construct the initial polytope from the GJK simplex
-            epa.func_safe_epa_init(i_b, gjk_state, collider_info)
+            epa.func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, gjk_info)
 
             if i == 0:
                 # In default configuration, we use the extended EPA algorithm to find multiple contact points.
-                max_epa_iter = collider_info.gjk.epa_max_iterations[None]
+                max_epa_iter = gjk_info.epa_max_iterations[None]
                 while max_epa_iter > 0:
                     i_f, num_iter = func_extended_epa(
                         i_ga,
@@ -159,6 +161,7 @@ def func_gjk_contact(
                         dyn_info,
                         rigid_info,
                         collider_info,
+                        gjk_info,
                         rigid_config,
                         collider_config,
                     )
@@ -180,7 +183,7 @@ def func_gjk_contact(
                     # If the penetration depth is larger than the (default EPA depth + eps), we can ignore this contact
                     # because the weight of the contact point would be 0.
                     if found_default_epa and (
-                        penetration > default_penetration + collider_info.gjk.diff_contact_eps_distance[None]
+                        penetration > default_penetration + collider_info.diff_contact_eps_distance[None]
                     ):
                         continue
 
@@ -198,6 +201,7 @@ def func_gjk_contact(
                         gjk_state,
                         dyn_info,
                         collider_info,
+                        gjk_info,
                         rigid_config,
                         collider_config,
                     )
@@ -219,9 +223,7 @@ def func_gjk_contact(
                     # Break the loop if we found enough contact points for default configuration. As we can find at most
                     # 8 contact points for perturbed configurations, we can find at most max_contacts_per_pair - 8
                     # contact points for default configuration.
-                    if gjk_state.n_diff_contact_input[i_b] >= (
-                        collider_info.gjk.max_contacts_per_pair[None] - num_perturb
-                    ):
+                    if gjk_state.n_diff_contact_input[i_b] >= (gjk_info.max_contacts_per_pair[None] - num_perturb):
                         break
 
                 # If we failed to find the default contact point, we do not add any contact point.
@@ -241,6 +243,7 @@ def func_gjk_contact(
                     dyn_info,
                     rigid_info,
                     collider_info,
+                    gjk_info,
                     rigid_config,
                     collider_config,
                 )
@@ -261,6 +264,7 @@ def func_gjk_contact(
                     gjk_state,
                     dyn_info,
                     collider_info,
+                    gjk_info,
                     rigid_config,
                     collider_config,
                 )
@@ -342,7 +346,7 @@ def func_gjk_contact(
         if insert_id == n_contacts:
             n_contacts += 1
 
-        if n_contacts >= collider_info.gjk.max_contacts_per_pair[None]:
+        if n_contacts >= gjk_info.max_contacts_per_pair[None]:
             break
 
     gjk_state.n_contacts[i_b] = n_contacts
@@ -360,11 +364,12 @@ def func_extended_epa(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     max_iter: int,
-    collider_state: ColliderState,
-    gjk_state: GJKState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    gjk_state: array_class.GJKState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    gjk_info: array_class.GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -376,7 +381,7 @@ def func_extended_epa(
     objects are slightly perturbed, the farthest boundary face could change to one of the nearly-farthest boundary faces.
     Therefore, we use this function to find such nearly-farthest boundary faces for differentiability.
     """
-    tolerance = collider_info.gjk.tolerance[None]
+    tolerance = gjk_info.tolerance[None]
     i_f_nearest = gs.qd_int(-1)
 
     discrete = GJK.func_is_discrete_geoms(i_ga, i_gb, dyn_info)
@@ -390,7 +395,7 @@ def func_extended_epa(
         k += 1
 
         # Find the polytope face with the smallest distance to the origin
-        lower2 = collider_info.gjk.FLOAT_MAX_SQ[None]
+        lower2 = gjk_info.FLOAT_MAX_SQ[None]
         i_f_nearest = -1
 
         for i in range(gjk_state.polytope.nfaces_map[i_b]):
@@ -423,6 +428,7 @@ def func_extended_epa(
             gjk_state,
             dyn_info,
             collider_info,
+            gjk_info,
             rigid_config,
             collider_config,
         )
@@ -456,7 +462,7 @@ def func_extended_epa(
 
         # Compute horizon
         horizon_flag = epa.func_epa_horizon(
-            i_b, i_f_nearest, wi, gjk_state, collider_info, rounding_eps=rigid_info.EPS[None]
+            i_b, i_f_nearest, wi, gjk_state, gjk_info, rounding_eps=rigid_info.EPS[None]
         )
 
         if horizon_flag:
@@ -472,7 +478,7 @@ def func_extended_epa(
         # Check if the memory space is enough for attaching new faces
         nfaces = gjk_state.polytope.nfaces[i_b]
         nedges = gjk_state.polytope.horizon_nedges[i_b]
-        if nfaces + nedges >= collider_info.gjk.polytope_max_faces[None]:
+        if nfaces + nedges >= gjk_info.polytope_max_faces[None]:
             # If the polytope is full, we cannot insert new faces
             i_f_nearest = -1
             break
@@ -509,7 +515,7 @@ def func_extended_epa(
                 adj_i_f_1,
                 adj_i_f_0,  # Next face id
                 gjk_state,
-                collider_info,
+                gjk_info,
             )
             if attach_flag != GJK.RETURN_CODE.SUCCESS:
                 # Unrecoverable numerical issue
@@ -542,7 +548,7 @@ def func_extended_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        flag = epa.func_safe_epa_witness(i_b, i_f_nearest, gjk_state, collider_info)
+        flag = epa.func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, gjk_info)
         if flag == GJK.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
@@ -569,10 +575,11 @@ def func_add_diff_contact_input(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: ColliderState,
-    gjk_state: GJKState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    gjk_state: array_class.GJKState,
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    gjk_info: array_class.GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -618,16 +625,16 @@ def func_add_diff_contact_input(
     # (a) Check if the face is degenerate.
     normal = func_plane_normal(mink1, mink2, mink3)
     normal_norm = normal.norm()
-    is_face_degenerate = normal_norm < collider_info.gjk.diff_contact_min_normal_norm[None]
+    is_face_degenerate = normal_norm < gjk_info.diff_contact_min_normal_norm[None]
 
     # (b) Check if the origin is very close to the face (which means very small penetration depth).
     proj_o = func_project_origin_to_plane(mink1, mink2, mink3, normal)
     origin_dist = proj_o.norm()
-    is_origin_close_to_face = origin_dist < collider_info.gjk.diff_contact_min_penetration[None]
+    is_origin_close_to_face = origin_dist < gjk_info.diff_contact_min_penetration[None]
 
     ### Orient the face normal, so that it points to the other side of the origin.
     face_center = (mink1 + mink2 + mink3) / 3.0
-    if normal_norm > collider_info.gjk.FLOAT_MIN[None]:
+    if normal_norm > gjk_info.FLOAT_MIN[None]:
         normal = normal.normalized()
     if normal.dot(face_center) < 0.0:
         normal = -normal
@@ -646,6 +653,7 @@ def func_add_diff_contact_input(
         gjk_state,
         dyn_info,
         collider_info,
+        gjk_info,
         rigid_config,
         collider_config,
         shrink_sphere=False,
@@ -741,8 +749,8 @@ def func_differentiable_contact(
     Compute the contact normal, penetration, and point for contact [i_c] from the corresponding [diff_contact_input]
     in a differentiable way. The gradients flow through the position and quaternion stored in the [geoms_state].
     """
-    eps_B = collider_info.gjk.diff_contact_eps_boundary[None]
-    eps_D = collider_info.gjk.diff_contact_eps_distance[None]
+    eps_B = collider_info.diff_contact_eps_boundary[None]
+    eps_D = collider_info.diff_contact_eps_distance[None]
 
     # Result
     contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)

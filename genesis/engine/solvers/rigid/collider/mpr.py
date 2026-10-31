@@ -1,26 +1,32 @@
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    DynInfo,
-    GeomsInitAABB,
-    MPRState,
-    RigidInfo,
-    get_mpr_info,
-    get_mpr_state,
-)
+from genesis.engine.pipeline import System
+from genesis.utils.data import DataItem, iter_data
+
 from . import support_field
-from .constants import MPR_STAGE, MPR_SUPPORT_TYPE, PORTAL_STATUS
+from .constants import MPR_STAGE, MPR_SUPPORT_TYPE, PORTAL_STATUS, Layout, PerEnv
 from .contact import func_compute_geom_pair_scale
 
+if TYPE_CHECKING:
+    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
-class MPR:
-    def __init__(self, rigid_solver):
-        self._solver = rigid_solver
 
+class MPR[LayoutT: Layout](System):
+    """
+    Detection by Minkowski portal refinement (MPR).
+
+    Its scratch holds one column per worker: the per-environment instance sizes it itself, the queued one to the largest
+    request of its users (see 'reserve').
+    """
+
+    is_created_on_demand = True
+
+    def __init__(self, rigid_solver: "RigidSolver") -> None:
         self.mpr_info = array_class.MPRInfo(
             values=dict(
                 # Dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
@@ -35,13 +41,20 @@ class MPR:
                 CCD_ITERATIONS=50,
             )
         )
-        # The states are the fields of one struct so that the collider opts each in by name (see MPRScratch)
-        scratch = array_class.MPRScratch(sizes=dict(envs=self._solver._B), opt_ins=self._solver.opt_ins)
-        self.mpr_state, self.contact0_mpr_state, self.multicontact_mpr_state = (
-            scratch.main,
-            scratch.contact0,
-            scratch.multicontact,
-        )
+        self._n_workers = rigid_solver._B if self.template_args[LayoutT] is PerEnv else 0
+        self.mpr_state: array_class.MPRState | None = None
+
+    def reserve(self, n_workers: int) -> None:
+        """Size the scratch of the queued instance for at least the given number of workers."""
+        self._n_workers = max(self._n_workers, n_workers)
+
+    def build(self) -> None:
+        self.mpr_state = array_class.MPRState(sizes=dict(workers=self._n_workers))
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        for name in ("mpr_info", "mpr_state"):
+            yield from iter_data(self, name)
 
 
 @qd.kernel
@@ -67,16 +80,16 @@ def mpr_swap(i_b: int, i: int, j: int, mpr_state: MPRState):
 
 @qd.func
 def mpr_point_segment_dist2(
-    P: qd.types.vector(3), A: qd.types.vector(3), B: qd.types.vector(3), collider_info: ColliderInfo
+    P: qd.types.vector(3), A: qd.types.vector(3), B: qd.types.vector(3), mpr_info: array_class.MPRInfo
 ):
     AB = B - A
     AP = P - A
     AB_AB = AB.dot(AB)
     AP_AB = AP.dot(AB)
     t = AP_AB / AB_AB
-    if t < collider_info.mpr.CCD_EPS[None]:
+    if t < mpr_info.CCD_EPS[None]:
         t = gs.qd_float(0.0)
-    elif t > 1.0 - collider_info.mpr.CCD_EPS[None]:
+    elif t > 1.0 - mpr_info.CCD_EPS[None]:
         t = gs.qd_float(1.0)
     Q = A + AB * t
 
@@ -89,7 +102,7 @@ def mpr_point_tri_depth(
     x0: qd.types.vector(3),
     B: qd.types.vector(3),
     C: qd.types.vector(3),
-    collider_info: ColliderInfo,
+    mpr_info: array_class.MPRInfo,
 ):
     d1 = B - x0
     d2 = C - x0
@@ -106,29 +119,29 @@ def mpr_point_tri_depth(
     # d = |d1|^2 * |d2|^2 - (d1 . d2)^2 = |d1 x d2|^2 is the Gram determinant of the triangle edges (length^4);
     # comparing it to its own scale v * w makes the degeneracy test the dimensionless sin^2 of the edge angle.
     # Must use <= so that degenerate (zero-length) edges are still classified as degenerate.
-    if qd.abs(d) <= collider_info.mpr.CCD_EPS[None] * v * w:
+    if qd.abs(d) <= mpr_info.CCD_EPS[None] * v * w:
         s = t = -1.0
     else:
         s = (q * r - w * p) / d
         t = (-s * r - q) / w
 
     if (
-        (s > -collider_info.mpr.CCD_EPS[None])
-        and (s < 1.0 + collider_info.mpr.CCD_EPS[None])
-        and (t > -collider_info.mpr.CCD_EPS[None])
-        and (t < 1.0 + collider_info.mpr.CCD_EPS[None])
-        and (t + s < 1.0 + collider_info.mpr.CCD_EPS[None])
+        (s > -mpr_info.CCD_EPS[None])
+        and (s < 1.0 + mpr_info.CCD_EPS[None])
+        and (t > -mpr_info.CCD_EPS[None])
+        and (t < 1.0 + mpr_info.CCD_EPS[None])
+        and (t + s < 1.0 + mpr_info.CCD_EPS[None])
     ):
         pdir = x0 + d1 * s + d2 * t
         dist = (P - pdir).norm_sqr()
     else:
-        dist, pdir = mpr_point_segment_dist2(P, x0, B, collider_info)
-        dist2, pdir2 = mpr_point_segment_dist2(P, x0, C, collider_info)
+        dist, pdir = mpr_point_segment_dist2(P, x0, B, mpr_info)
+        dist2, pdir2 = mpr_point_segment_dist2(P, x0, C, mpr_info)
         if dist2 < dist:
             dist = dist2
             pdir = pdir2
 
-        dist2, pdir2 = mpr_point_segment_dist2(P, B, C, collider_info)
+        dist2, pdir2 = mpr_point_segment_dist2(P, B, C, mpr_info)
         if dist2 < dist:
             dist = dist2
             pdir = pdir2
@@ -230,7 +243,16 @@ def compute_support(
         pos = pos_a if i_side == 0 else pos_b
         quat = quat_a if i_side == 0 else quat_b
         v = support_driver(
-            i_g, i_b, side_direction, pos, quat, collider_state, dyn_info, collider_info, rigid_config, collider_config
+            i_g,
+            i_b,
+            side_direction,
+            pos,
+            quat,
+            collider_state,
+            dyn_info,
+            collider_info,
+            rigid_config,
+            collider_config,
         )
         if i_side == 0:
             v1 = v
@@ -264,7 +286,14 @@ def func_geom_support(
 
 
 @qd.func
-def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rigid_config: qd.template()):
+def mpr_find_pos(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    mpr_state: array_class.MPRState,
+    mpr_info: array_class.MPRInfo,
+    rigid_config: qd.template(),
+):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 
     # Only look into the direction of the portal for consistency with penetration depth computation
@@ -278,8 +307,8 @@ def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rig
 
     # Must use <= so that the all-zero weights of the non-mujoco-compatible path (which skips the tetrahedron
     # volumes above) still enter the portal-direction fallback.
-    if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
-        direction = mpr_portal_dir(i_b, mpr_state)
+    if sum_ <= mpr_info.CCD_EPS[None] * qd.abs(b).sum():
+        direction = mpr_portal_dir(i_ga, i_gb, i_b, mpr_state)
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
             i1, i2 = i % 3 + 1, (i + 1) % 3 + 1
@@ -290,7 +319,7 @@ def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rig
     # A portal spanning no volume along its own direction leaves every weight at zero, and the position is a ratio of
     # them: weighting the three portal vertices equally puts the contact at their centroid, which lies on the portal
     # and keeps the ratio finite.
-    if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
+    if sum_ <= mpr_info.CCD_EPS[None] * qd.abs(b).sum():
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
             b[i] = 1.0
@@ -363,10 +392,10 @@ def guess_geoms_center(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     normal_ws: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    mpr_info: array_class.MPRInfo,
     rigid_config: qd.template(),
 ):
     # MPR algorithm was initially design to check whether a pair of convex geometries was colliding. The author
@@ -403,7 +432,7 @@ def guess_geoms_center(
 
     # Completely different center logics if a normal guess is provided
     if qd.static(not rigid_config.enable_mujoco_compatibility):
-        if (qd.abs(normal_ws) > collider_info.mpr.CCD_EPS[None]).any():
+        if (qd.abs(normal_ws) > mpr_info.CCD_EPS[None]).any():
             # Must start from the center of each bounding box
             center_a_local = 0.5 * (geoms_init_AABB[i_ga, 7] + geoms_init_AABB[i_ga, 0])
             center_a = gu.qd_transform_by_trans_quat(center_a_local, pos_a, quat_a)
@@ -450,15 +479,16 @@ def func_mpr_contact_from_centers(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
-    collider_state: ColliderState,
-    mpr_state: MPRState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    collider_state: array_class.ColliderState,
+    mpr_state: array_class.MPRState,
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    mpr_info: array_class.MPRInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
-    ccd_tol = collider_info.mpr.CCD_TOLERANCE[None]
+    ccd_tol = mpr_info.CCD_TOLERANCE[None]
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         ccd_tol = ccd_tol * func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
 
@@ -542,7 +572,7 @@ def func_mpr_contact_from_centers(
                 # collinearity test vanish as well, which would fall through to normalizing a zero cross product.
                 if (
                     qd.abs(mpr_state.simplex_support.v[1, i_b])
-                    < collider_info.mpr.CCD_EPS[None] * mpr_state.simplex_support.v[0, i_b].norm()
+                    < mpr_info.CCD_EPS[None] * mpr_state.simplex_support.v[0, i_b].norm()
                 ).all():
                     support_type = MPR_SUPPORT_TYPE.VERTEX
                     stage = MPR_STAGE.DONE
@@ -551,7 +581,7 @@ def func_mpr_contact_from_centers(
                 # the segment path. Must use <= so that an exactly zero cross product counts as degenerate.
                 elif (
                     direction.dot(direction)
-                    <= collider_info.mpr.CCD_EPS[None]
+                    <= mpr_info.CCD_EPS[None]
                     * mpr_state.simplex_support.v[0, i_b].norm_sqr()
                     * mpr_state.simplex_support.v[1, i_b].norm_sqr()
                 ):
@@ -630,7 +660,7 @@ def func_mpr_contact_from_centers(
                 support_dist - portal_v3.dot(direction),
             )
             scale = qd.max(qd.abs(v).sum(), qd.abs(portal_v1).sum(), qd.abs(portal_v2).sum(), qd.abs(portal_v3).sum())
-            is_tolerance_reached = support_gain < ccd_tol + collider_info.mpr.CCD_EPS[None] * scale
+            is_tolerance_reached = support_gain < ccd_tol + mpr_info.CCD_EPS[None] * scale
 
             is_portal_expanded = False
             if stage == MPR_STAGE.REFINE:
@@ -639,7 +669,7 @@ def func_mpr_contact_from_centers(
                     stage = MPR_STAGE.DONE
                 else:
                     is_portal_expanded = True
-            elif is_tolerance_reached or n_iters > collider_info.mpr.CCD_ITERATIONS[None]:
+            elif is_tolerance_reached or n_iters > mpr_info.CCD_ITERATIONS[None]:
                 # The contact point is defined as the projection of the origin onto the portal, i.e. the closest point
                 # to the origin that lies inside the portal. Let's consider the portal as an infinite plane rather than
                 # a face triangle. This makes sense because the projection of the origin must be strictly included into
@@ -661,7 +691,7 @@ def func_mpr_contact_from_centers(
                 # https://archive.org/details/game-programming-gems-7
                 if qd.static(rigid_config.enable_mujoco_compatibility):
                     origin = gs.qd_vec3([0.0, 0.0, 0.0])
-                    penetration, pdir = mpr_point_tri_depth(origin, portal_v1, portal_v2, portal_v3, collider_info)
+                    penetration, pdir = mpr_point_tri_depth(origin, portal_v1, portal_v2, portal_v3, mpr_info)
                     normal = -pdir.normalized()
                 else:
                     penetration = direction.dot(portal_v1)
@@ -679,14 +709,14 @@ def func_mpr_contact_from_centers(
                 min_b = qd.min(b1, qd.min(b2, b3))
                 if not is_tolerance_reached:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.UNCONVERGED
-                elif min_b >= 0.0 and bsum > collider_info.mpr.CCD_EPS[None] * babs:
+                elif min_b >= 0.0 and bsum > mpr_info.CCD_EPS[None] * babs:
                     # A portal spanning no area leaves every coordinate at zero, which satisfies min_b >= 0, so it is
                     # excluded explicitly or a portal whose depth means nothing reads as exact.
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.EXACT
                 else:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.APPROXIMATE
 
-                pos = mpr_find_pos(i_b, mpr_state, collider_info, rigid_config)
+                pos = mpr_find_pos(i_ga, i_gb, i_b, mpr_state, mpr_info, rigid_config)
                 is_col = True
                 stage = MPR_STAGE.DONE
             else:
@@ -725,12 +755,13 @@ def func_mpr_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
-    collider_state: ColliderState,
-    mpr_state: MPRState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    collider_state: array_class.ColliderState,
+    mpr_state: array_class.MPRState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    mpr_info: array_class.MPRInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -745,7 +776,7 @@ def func_mpr_contact(
         geoms_init_AABB,
         dyn_info,
         rigid_info,
-        collider_info,
+        mpr_info,
         rigid_config,
     )
     return func_mpr_contact_from_centers(
@@ -763,6 +794,7 @@ def func_mpr_contact(
         mpr_state,
         dyn_info,
         collider_info,
+        mpr_info,
         rigid_config,
         collider_config,
     )

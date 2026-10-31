@@ -338,7 +338,14 @@ def func_broad_phase(
 ):
     """Run the broad phase, sweeping the links with the traversal the rigid config selects then testing their geoms."""
     func_collision_clear(
-        geoms_init_AABB, dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, collider_config
+        geoms_init_AABB,
+        dyn_state,
+        collider_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        rigid_config,
+        collider_config,
     )
     if qd.static(rigid_config.broadphase_traversal == gs.broadphase_traversal.ALL_VS_ALL):
         _func_broad_phase_links_all_vs_all(

@@ -11,7 +11,6 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.rigid.collider.collider import kernel_detection
 from genesis.engine.solvers.rigid.constraint.solver import linear_to_lower_tri
 from genesis.utils.misc import qd_to_numpy, qd_to_torch
 
@@ -116,6 +115,7 @@ def gs_static_child(args: list[str]):
 
     scene.step()
     assert qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts) == args.expected_num_contacts
+    kernel_detection = scene.rigid_solver.collider.detection.get_launches()[0].fn
     assert kernel_detection._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
     assert kernel_detection._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
     assert kernel_detection._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
@@ -212,6 +212,7 @@ def gs_num_envs_child(args: list[str]):
 
     # The kernel fusing the dynamics of the substep, the first one it launches
     kernel_dynamics = scene.rigid_solver.substep_phase.get_launches()[0].fn
+    kernel_detection = scene.rigid_solver.collider.detection.get_launches()[0].fn
     for kernel in (kernel_dynamics, kernel_detection):
         assert kernel._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
         assert kernel._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache

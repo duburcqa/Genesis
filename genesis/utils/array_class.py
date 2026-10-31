@@ -650,13 +650,18 @@ class ColliderStaticConfig(StaticConfig):
 # =========================================== MPR ===========================================
 
 
-class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, ENVS)):
+# The workers of the scratch of a detection component: one per environment, or the threads of a pass draining a queue of
+# pairs (see 'Layout' in collider/constants.py)
+WORKERS = Size("workers")
+
+
+class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, WORKERS)):
     v1: qd.Tensor = field((float, 3))
     v2: qd.Tensor = field((float, 3))
     v: qd.Tensor = field((float, 3))
 
 
-class MPRState(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
     simplex_support: MPRSimplexSupport
     simplex_size: qd.Tensor = field(int)
     # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
@@ -668,14 +673,6 @@ class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
     CCD_EPS: qd.Tensor = field(float)
     CCD_TOLERANCE: qd.Tensor = field(float)
     CCD_ITERATIONS: qd.Tensor = field(float)
-
-
-# The states MPR runs on: one per env, and those of the passes of the split narrowphase and of the terrain pass, one
-# per thread, which the collider opts in when it runs them
-class MPRScratch(Data, kind=DataKind.SCRATCH):
-    main: MPRState
-    contact0: MPRState = field(opt_in=True)
-    multicontact: MPRState = field(opt_in=True)
 
 
 # =========================================== GJK ===========================================
@@ -704,16 +701,16 @@ class MDVertex(Data, kind=DataKind.SCRATCH):
     mink: qd.Tensor = field((float, 3))
 
 
-class GJKSimplex(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+class GJKSimplex(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
     nverts: qd.Tensor = field(int)
 
 
-class GJKSimplexBuffer(Data, kind=DataKind.SCRATCH, shape=(ENVS, 4)):
+class GJKSimplexBuffer(Data, kind=DataKind.SCRATCH, shape=(WORKERS, 4)):
     normal: qd.Tensor = field((float, 3))
     sdist: qd.Tensor = field(float)
 
 
-class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
     nverts: qd.Tensor = field(int)
     nfaces: qd.Tensor = field(int)
     nfaces_map: qd.Tensor = field(int)
@@ -721,7 +718,7 @@ class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     horizon_w: qd.Tensor = field((float, 3))
 
 
-class EPAPolytopeFace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYTOPE_FACES)):
+class EPAPolytopeFace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYTOPE_FACES)):
     verts_idx: qd.Tensor = field((int, 3))
     adj_idx: qd.Tensor = field((int, 3))
     normal: qd.Tensor = field((float, 3))
@@ -735,7 +732,7 @@ class EPAPolytopeHorizonData(Data, kind=DataKind.SCRATCH):
     edge_idx: qd.Tensor = field(int)
 
 
-class ContactFace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+class ContactFace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS)):
     vert1: qd.Tensor = field((float, 3))
     vert2: qd.Tensor = field((float, 3))
     endverts: qd.Tensor = field((float, 3))
@@ -745,18 +742,18 @@ class ContactFace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
     id2: qd.Tensor = field(int)
 
 
-class ContactNormal(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+class ContactNormal(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS)):
     endverts: qd.Tensor = field((float, 3))
     normal: qd.Tensor = field((float, 3))
     id: qd.Tensor = field(int)
 
 
-class ContactHalfspace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+class ContactHalfspace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS)):
     normal: qd.Tensor = field((float, 3))
     dist: qd.Tensor = field(float)
 
 
-class Witness(Data, kind=DataKind.SCRATCH, shape=(ENVS, PAIR_CONTACTS)):
+class Witness(Data, kind=DataKind.SCRATCH, shape=(WORKERS, PAIR_CONTACTS)):
     point_obj1: qd.Tensor = field((float, 3))
     point_obj2: qd.Tensor = field((float, 3))
 
@@ -764,49 +761,49 @@ class Witness(Data, kind=DataKind.SCRATCH, shape=(ENVS, PAIR_CONTACTS)):
 class GJKState(Data, kind=DataKind.SCRATCH):
     """
     The scratch of a detection by Gilbert-Johnson-Keerthi (GJK) and the expanding polytope algorithm (EPA), one column
-    per thread or environment.
+    per worker.
 
     The state of the overlap test alone leaves the arrays labeled EPA unused.
     """
 
     # GJK simplex
-    support_mesh_prev_vertex_id: qd.Tensor = field(int, shape=(ENVS, 2))
-    simplex_vertex: MDVertex = field(shape=(ENVS, 4))
+    support_mesh_prev_vertex_id: qd.Tensor = field(int, shape=(WORKERS, 2))
+    simplex_vertex: MDVertex = field(shape=(WORKERS, 4))
     simplex_buffer: GJKSimplexBuffer
     simplex: GJKSimplex
-    last_searched_simplex_vertex_id: qd.Tensor = field(int, shape=(ENVS,))
-    simplex_vertex_intersect: MDVertex = field(shape=(ENVS, 4))
+    last_searched_simplex_vertex_id: qd.Tensor = field(int, shape=(WORKERS,))
+    simplex_vertex_intersect: MDVertex = field(shape=(WORKERS, 4))
     simplex_buffer_intersect: GJKSimplexBuffer
-    nsimplex: qd.Tensor = field(int, shape=(ENVS,))
+    nsimplex: qd.Tensor = field(int, shape=(WORKERS,))
     # EPA polytope
     polytope: EPAPolytope = field(labels=EPA)
-    polytope_verts: MDVertex = field(shape=(ENVS, POLYTOPE_VERTS), labels=EPA)
+    polytope_verts: MDVertex = field(shape=(WORKERS, POLYTOPE_VERTS), labels=EPA)
     polytope_faces: EPAPolytopeFace = field(labels=EPA)
-    polytope_faces_map: qd.Tensor = field(int, shape=(ENVS, POLYTOPE_FACES), labels=EPA)
-    polytope_horizon_data: EPAPolytopeHorizonData = field(shape=(ENVS, POLYTOPE_HORIZONS), labels=EPA)
-    polytope_horizon_stack: EPAPolytopeHorizonData = field(shape=(ENVS, 3 * POLYTOPE_FACES), labels=EPA)
+    polytope_faces_map: qd.Tensor = field(int, shape=(WORKERS, POLYTOPE_FACES), labels=EPA)
+    polytope_horizon_data: EPAPolytopeHorizonData = field(shape=(WORKERS, POLYTOPE_HORIZONS), labels=EPA)
+    polytope_horizon_stack: EPAPolytopeHorizonData = field(shape=(WORKERS, 3 * POLYTOPE_FACES), labels=EPA)
     # Multi-contact detection by the contact patch
     contact_faces: ContactFace = field(labels=EPA)
     contact_normals: ContactNormal = field(labels=EPA)
     contact_halfspaces: ContactHalfspace = field(labels=EPA)
-    contact_clipped_polygons: qd.Tensor = field((float, 3), shape=(ENVS, 2, POLYGON_VERTS), labels=EPA)
-    multi_contact_flag: qd.Tensor = field(bool, shape=(ENVS,))
+    contact_clipped_polygons: qd.Tensor = field((float, 3), shape=(WORKERS, 2, POLYGON_VERTS), labels=EPA)
+    multi_contact_flag: qd.Tensor = field(bool, shape=(WORKERS,))
     # Results
     witness: Witness
-    n_witness: qd.Tensor = field(int, shape=(ENVS,))
-    n_contacts: qd.Tensor = field(int, shape=(ENVS,), labels=EPA)
-    contact_pos: qd.Tensor = field((float, 3), shape=(ENVS, PAIR_CONTACTS), labels=EPA)
-    normal: qd.Tensor = field((float, 3), shape=(ENVS, PAIR_CONTACTS), labels=EPA)
-    is_col: qd.Tensor = field(bool, shape=(ENVS,), labels=EPA)
-    penetration: qd.Tensor = field(float, shape=(ENVS,), labels=EPA)
-    distance: qd.Tensor = field(float, shape=(ENVS,))
+    n_witness: qd.Tensor = field(int, shape=(WORKERS,))
+    n_contacts: qd.Tensor = field(int, shape=(WORKERS,), labels=EPA)
+    contact_pos: qd.Tensor = field((float, 3), shape=(WORKERS, PAIR_CONTACTS), labels=EPA)
+    normal: qd.Tensor = field((float, 3), shape=(WORKERS, PAIR_CONTACTS), labels=EPA)
+    is_col: qd.Tensor = field(bool, shape=(WORKERS,), labels=EPA)
+    penetration: qd.Tensor = field(float, shape=(WORKERS,), labels=EPA)
+    distance: qd.Tensor = field(float, shape=(WORKERS,))
     # The EPA polytope face nearest to the origin, -1 when EPA did not run, from whose support simplex the multi-contact
     # perturbation recovers the exact unperturbed normal
-    nearest_face: qd.Tensor = field(int, shape=(ENVS,))
+    nearest_face: qd.Tensor = field(int, shape=(WORKERS,))
     # Differentiable contact detection
-    diff_contact_input: DiffContactInput = field(shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
-    n_diff_contact_input: qd.Tensor = field(int, shape=(ENVS,), labels=EPA)
-    diff_penetration: qd.Tensor = field(float, shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
+    diff_contact_input: DiffContactInput = field(shape=(WORKERS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
+    n_diff_contact_input: qd.Tensor = field(int, shape=(WORKERS,), labels=EPA)
+    diff_penetration: qd.Tensor = field(float, shape=(WORKERS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
 
 
 class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
@@ -835,26 +832,11 @@ class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
     # Alignment tolerances of the normals of a face-face and an edge-face parallel contact
     contact_face_tol: qd.Tensor = field(float)
     contact_edge_tol: qd.Tensor = field(float)
-    # Tolerances of the differentiable contact: the distance along its normal from a face to the support point, zero on
-    # the boundary of the Minkowski difference, the excess of the distance from the origin to the face over the EPA
-    # depth, and the excursion of the affine coordinates of the projection of the origin outside [0, 1].
-    # FIXME: Calibrate these values on real scenes.
-    diff_contact_eps_boundary: qd.Tensor = field(float)
-    diff_contact_eps_distance: qd.Tensor = field(float)
-    diff_contact_eps_affine: qd.Tensor = field(float)
     # Minimum norm of a valid normal of the differentiable contact
     diff_contact_min_normal_norm: qd.Tensor = field(float)
     # Minimum penetration of a differentiable contact. It must exceed the rounding gap between the depths of the forward
     # and backward passes, since a depth the backward pass computes as zero yields a NaN normal.
     diff_contact_min_penetration: qd.Tensor = field(float)
-
-
-# The states GJK runs on: one per env for the single-kernel narrowphase, and those of the passes of the split
-# narrowphase, one per thread, which the collider opts in as it runs them
-class GJKScratch(Data, kind=DataKind.SCRATCH):
-    main: GJKState = field(opt_in=True)
-    contact0: GJKState = field(opt_in=True)
-    multicontact: GJKState = field(opt_in=True)
 
 
 @qd.data_oriented
@@ -925,8 +907,6 @@ TERRAIN_COLS = Size("terrain_cols")
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
     sdf: SDFInfo = requires(opt_in=True)
-    mpr: MPRInfo = requires()
-    gjk: GJKInfo = requires()
     support_field: SupportFieldInfo = requires(opt_in=True)
     vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
@@ -959,6 +939,14 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     # Tolerances of the differentiable contact
     diff_pos_tolerance: qd.Tensor = field(float, shape=())
     diff_normal_tolerance: qd.Tensor = field(float, shape=())
+    # Tolerances of the differentiable contact on a face of the Minkowski difference: the distance along its normal from
+    # the face to the support point, zero on the boundary of the difference, the excess of the distance from the origin
+    # to the face over the EPA depth, and the excursion of the affine coordinates of the projection of the origin
+    # outside [0, 1].
+    # FIXME: Calibrate these values on real scenes.
+    diff_contact_eps_boundary: qd.Tensor = field(float, shape=())
+    diff_contact_eps_distance: qd.Tensor = field(float, shape=())
+    diff_contact_eps_affine: qd.Tensor = field(float, shape=())
     # Link-pair contact pruning
     contact_pruning_tolerance: qd.Tensor = field(float, shape=())
     prune_deep_penetration_ratio: qd.Tensor = field(float, shape=())

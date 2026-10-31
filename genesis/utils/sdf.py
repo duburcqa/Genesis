@@ -339,10 +339,10 @@ def sdf_func_grad_world(
     geom_idx,
     batch_idx,
     pos_world,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
     collider_config: qd.template(),
 ):
     g_pos = dyn_state.geoms.pos[geom_idx, batch_idx]
@@ -355,7 +355,12 @@ def sdf_func_grad_world(
 
 @qd.func
 def sdf_func_grad(
-    geom_idx, pos_sdf, geoms_info: GeomsInfo, rigid_info: RigidInfo, sdf_info: SDFInfo, collider_config: qd.template()
+    geom_idx,
+    pos_sdf,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
+    collider_config: qd.template(),
 ):
     """
     sdf grad at sdf frame coordinate.
@@ -390,7 +395,13 @@ def sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info: RigidInfo, sdf_info: SDFI
 
 
 @qd.func
-def sdf_func_true_grad(geom_idx, pos_sdf, geoms_info: GeomsInfo, sdf_info: SDFInfo, collider_config: qd.template()):
+def sdf_func_true_grad(
+    geom_idx,
+    pos_sdf,
+    geoms_info: array_class.GeomsInfo,
+    sdf_info: array_class.SDFInfo,
+    collider_config: qd.template(),
+):
     """
     True sdf grad interpolated using stored sdf grad grid.
     """
@@ -479,10 +490,10 @@ def sdf_func_normal_world(
     geom_idx,
     batch_idx,
     pos_world,
-    geoms_state: GeomsState,
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
+    geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ):
     g_pos = geoms_state.pos[geom_idx, batch_idx]
@@ -499,9 +510,9 @@ def sdf_func_normal_world_local(
     pos_world: qd.types.vector(3),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -522,9 +533,9 @@ def sdf_func_grad_world_local(
     pos_world: qd.types.vector(3),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
+    geoms_info: array_class.GeomsInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
     collider_config: qd.template(),
 ):
     """

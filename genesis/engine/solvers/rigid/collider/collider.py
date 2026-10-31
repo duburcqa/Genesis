@@ -6,8 +6,8 @@ including broad-phase (sweep-and-prune), narrow-phase (convex-convex, SDF-based,
 terrain), and contact management.
 """
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Annotated
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.engine.pipeline import System
+from genesis.engine.pipeline import Enabled, PhaseSpec, System, register_system
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.data import ConfigItem, DataItem, iter_data
@@ -34,9 +34,9 @@ from genesis.utils.misc import (
 )
 from genesis.utils.sdf import SDF
 
-from . import gjk, mpr, support_field
+from . import support_field
 from .broadphase import func_broad_phase
-from .constants import CCD_ALGORITHM_CODE
+from .constants import CCD_ALGORITHM_CODE, Layout, PerEnv, Queued, WithEPA, WithoutEPA
 from .contact import (
     collider_kernel_get_contacts,
     collider_kernel_reset,
@@ -46,6 +46,8 @@ from .contact import (
     kernel_collider_clear,
     kernel_masked_collider_clear,
 )
+from .gjk import GJK
+from .mpr import MPR
 from .narrowphase import (
     func_fill_diff_contact_input_analytic,
     func_narrow_phase_any_vs_terrain,
@@ -66,6 +68,23 @@ NEUTRAL_COLLISION_RES_REL = 0.05
 
 
 class Collider(System):
+    """
+    Detect the contacts of the rigid geoms: their broad phase, the narrow phase of each family of pairs, the pruning.
+
+    The stages of the detection are the Systems filling its slots (see Broadphase, Narrowphase and Pruning), which a
+    scene holds when it has pairs of their family.
+    """
+
+    # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients runs the
+    # detection as no graph. It is launched apart from the substep around it (see 'RigidSolver._build_substep').
+    detection = PhaseSpec(
+        "broadphase",
+        "narrowphase",
+        "pruning",
+        is_graph=lambda collider: not collider._solver._requires_grad,
+        is_launched_apart=True,
+    )
+
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
 
@@ -79,31 +98,11 @@ class Collider(System):
         self._prune_max_contacts_floor = 512
 
         self._init_static_config()
-        self._use_split_narrowphase = (
-            self.collider_config.has_non_box_plane_convex_convex
-            and gs.backend != gs.cpu
-            and not self._solver._requires_grad
-        )
 
         # Two threads per core fill the warp slots the register use of the terrain pass leaves
         self._n_terrain_threads = 1
         if self.collider_config.has_terrain and gs.backend != gs.cpu:
             self._n_terrain_threads = 2 * self.collider_config.gpu_cores
-        # The split narrowphase launches one thread per core, its contact0 pass rounding up to whole environments. An
-        # upper-bound estimate of the core count sizes these launches (Genesis-Embodied-AI/Genesis#2616). The scratch
-        # states of the passes run are opted in before the narrowphase sub-components build their scratch.
-        if self._use_split_narrowphase:
-            gpu_cores = self.collider_config.gpu_cores
-            n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
-            self._solver.opt_ins.add(array_class.MPRScratch.contact0, envs=n_contact0_threads)
-            self._solver.opt_ins.add(array_class.MPRScratch.multicontact, envs=max(gpu_cores, self._n_terrain_threads))
-            self._solver.opt_ins.add(array_class.GJKScratch.contact0, envs=n_contact0_threads)
-            self._solver.opt_ins.add(array_class.GJKScratch.multicontact, envs=gpu_cores)
-        else:
-            if self.collider_config.has_terrain:
-                self._solver.opt_ins.add(array_class.MPRScratch.multicontact, envs=self._n_terrain_threads)
-            if self.collider_config.has_non_box_plane_convex_convex:
-                self._solver.opt_ins.add(array_class.GJKScratch.main, envs=self._solver._B)
 
         if self.collider_config.has_nonconvex_nonterrain:
             self._solver.opt_ins.add(array_class.ColliderInfo.sdf)
@@ -112,8 +111,6 @@ class Collider(System):
 
         # Each narrowphase sub-component builds its part of the collider info (see ColliderInfo)
         self.sdf = SDF(rigid_solver)
-        self.mpr = mpr.MPR(rigid_solver)
-        self.gjk = gjk.GJK(rigid_solver)
         self._support_field = support_field.SupportField(rigid_solver)
 
         self._init_collision_fields()
@@ -152,16 +149,54 @@ class Collider(System):
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         """Yield every array and static config of the collider (see 'Solver.data')."""
-        structs = [
-            (self, "collider_config"),
-            (self.gjk, "gjk_config"),
-            (self, "collider_info"),
-            (self, "collider_state"),
-            *[(self.mpr, name) for name in ("mpr_state", "contact0_mpr_state", "multicontact_mpr_state")],
-            *[(self.gjk, name) for name in ("gjk_state", "contact0_gjk_state", "multicontact_gjk_state")],
-        ]
-        for owner, name in structs:
-            yield from iter_data(owner, name)
+        for name in ("collider_config", "collider_info", "collider_state"):
+            yield from iter_data(self, name)
+
+    @property
+    def has_possible_pairs(self) -> bool:
+        """Whether some pair of geoms can collide."""
+        return self._n_possible_pairs > 0
+
+    @property
+    def has_convex_pairs(self) -> bool:
+        """Whether some pair of convex geoms that no primitive specialization handles can collide."""
+        return self.has_possible_pairs and self.collider_config.has_non_box_plane_convex_convex
+
+    @property
+    def has_primitive_pairs(self) -> bool:
+        """Whether some pair of primitive geoms that a specialization handles can collide."""
+        return self.has_possible_pairs and self.collider_config.has_convex_specialization
+
+    @property
+    def has_terrain_pairs(self) -> bool:
+        """Whether some geom can collide with a terrain."""
+        return self.has_possible_pairs and self.collider_config.has_terrain
+
+    @property
+    def has_nonconvex_pairs(self) -> bool:
+        """Whether some pair of geoms holding a non-convex one, a terrain aside, can collide."""
+        return self.has_possible_pairs and self.collider_config.has_nonconvex_nonterrain
+
+    @property
+    def narrowphase_layout(self) -> type[Layout]:
+        """The layout of the convex narrow phase: a queue of pairs on GPU, a worker per environment otherwise."""
+        if (
+            self.collider_config.has_non_box_plane_convex_convex
+            and gs.backend != gs.cpu
+            and not self._solver._requires_grad
+        ):
+            return Queued
+        return PerEnv
+
+    @property
+    def is_pruning_cooperative(self) -> bool:
+        """Whether a warp prunes the contacts of an environment, rather than a thread."""
+        return self._use_coop_dedup
+
+    @property
+    def n_terrain_threads(self) -> int:
+        """The threads of the narrow phase of the terrain pairs."""
+        return self._n_terrain_threads
 
     def _init_static_config(self) -> None:
         # The contact patch (polygon clipping over the touching faces) defaults on under MuJoCo compatibility with GJK,
@@ -346,16 +381,17 @@ class Collider(System):
                 mc_tolerance=self._mc_tolerance,
                 diff_pos_tolerance=self._diff_pos_tolerance,
                 diff_normal_tolerance=self._diff_normal_tolerance,
+                diff_contact_eps_boundary=1e-2,
+                diff_contact_eps_distance=1e-2,
+                diff_contact_eps_affine=1e-2,
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
             opt_ins=self._solver.opt_ins,
-            # The info of the narrowphase sub-components, the SDF and the support tables when built
+            # The info of the SDF and the support tables when built
             binds={
                 name: info
                 for name, info in (
-                    ("mpr", self.mpr.mpr_info),
-                    ("gjk", self.gjk.gjk_info),
                     ("sdf", self.sdf.sdf_info),
                     ("support_field", self._support_field.support_field_info),
                 )
@@ -386,6 +422,7 @@ class Collider(System):
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
         config = self._solver.rigid_config
+        is_split = self.narrowphase_layout is Queued
         self.collider_state = array_class.ColliderState(
             sizes=dict(
                 envs=self._solver._B,
@@ -403,9 +440,9 @@ class Collider(System):
                 box_box=not config.box_box_detection,
                 contact_cache=not self.collider_config.has_non_box_plane_convex_convex,
                 diff_contacts=not config.requires_grad,
-                work_queue=not (self._use_split_narrowphase or self.collider_config.has_terrain),
-                split_narrowphase=not self._use_split_narrowphase,
-                perturbed_slots=not (self._use_split_narrowphase and not self._solver._options.enable_contact_patch),
+                work_queue=not (is_split or self.collider_config.has_terrain),
+                split_narrowphase=not is_split,
+                perturbed_slots=not (is_split and not self._solver._options.enable_contact_patch),
                 pruning=not self.collider_config.has_prunable_contacts,
             ),
             requires_grad=config.requires_grad,
@@ -855,36 +892,6 @@ class Collider(System):
             self.collider_config,
         )
 
-    def detection(self) -> None:
-        # The step launches the same graph (see RigidSolver.substep).
-        # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
-        # launches the detection without a graph.
-        kernel = kernel_detection_without_graph if self._solver._requires_grad else kernel_detection
-        kernel(
-            self._solver.geoms_init_AABB,
-            self._solver.dyn_state,
-            self.collider_state,
-            self.mpr.mpr_state,
-            self.gjk.gjk_state,
-            self.gjk.gjk_state.diff_contact_input,
-            self.mpr.contact0_mpr_state,
-            self.gjk.contact0_gjk_state,
-            self.mpr.multicontact_mpr_state,
-            self.gjk.multicontact_gjk_state,
-            self._solver.constraint_solver.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self.collider_info,
-            self._solver.rigid_config,
-            self.collider_config,
-            self.gjk.gjk_config,
-            self._n_possible_pairs > 0,
-            self._use_split_narrowphase,
-            self._use_coop_dedup,
-            self._solver._errno,
-        )
-        self._contact_data_cache.clear()
-
     def get_contacts(
         self, as_tensor: bool = True, to_torch: bool = True, keep_batch_dim: bool = False, is_padded: bool = False
     ):
@@ -1092,241 +1099,144 @@ class Collider(System):
         )
 
 
-@qd.func
-def func_detection(
-    geoms_init_AABB: GeomsInitAABB,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    mpr_state: MPRState,
-    gjk_state: GJKState,
-    diff_contact_input: DiffContactInput,
-    contact0_mpr_state: MPRState,
-    contact0_gjk_state: GJKState,
-    multicontact_mpr_state: MPRState,
-    multicontact_gjk_state: GJKState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-    gjk_config: qd.template(),
-    has_possible_pairs: qd.template(),
-    split_narrowphase: qd.template(),
-    coop_dedup: qd.template(),
-    errno: qd.Tensor,
-):
-    """Update the geom bounding boxes, then run the broad phase, the narrow phase and the contact pruning.
+@register_system
+class Broadphase(System):
+    """Update the bounding boxes of the geoms, then find the pairs whose boxes overlap, the first detection stage."""
 
-    has_possible_pairs is False when no geom pair can collide, in which case only the bounding boxes are updated.
-    split_narrowphase runs the convex narrow phase as a contact 0 pass followed by a multi-contact pass, on their own
-    scratch states. coop_dedup prunes the contacts cooperatively.
+    slot = Collider.detection.broadphase
+    entry = "detect"
+
+    def __init__(self, collider: Collider, rigid_solver: "RigidSolver") -> None:
+        self._collider = collider
+
+    @property
+    def detect(self) -> tuple[Callable, ...]:
+        if self._collider.has_possible_pairs:
+            return func_update_geom_aabbs, func_broad_phase
+        return (func_update_geom_aabbs,)
+
+
+class Narrowphase(System):
+    """A System detecting the contacts of a family of pairs of geoms, between the broad phase and the pruning."""
+
+    slot = Collider.detection.narrowphase
+    entry = "detect"
+
+
+@register_system
+class ConvexConvexFirstContact(Narrowphase):
     """
-    func_update_geom_aabbs(geoms_init_AABB, dyn_state, dyn_info, rigid_config)
-    if qd.static(has_possible_pairs):
-        func_broad_phase(
-            geoms_init_AABB,
-            dyn_state,
-            collider_state,
-            constraint_state,
-            dyn_info,
-            rigid_info,
-            collider_info,
-            rigid_config,
-            collider_config,
-            errno,
-        )
-        if qd.static(split_narrowphase):
-            func_narrowphase_contact0(
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                contact0_mpr_state,
-                contact0_gjk_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_config,
-                errno,
-            )
-            func_narrowphase_multicontact(
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                multicontact_mpr_state,
-                multicontact_gjk_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_config,
-                gjk_config,
-                errno,
-            )
-        elif qd.static(collider_config.has_non_box_plane_convex_convex):
-            func_narrow_phase_convex_vs_convex(
-                geoms_init_AABB=geoms_init_AABB,
-                dyn_state=dyn_state,
-                collider_state=collider_state,
-                mpr_state=mpr_state,
-                gjk_state=gjk_state,
-                diff_contact_input=diff_contact_input,
-                dyn_info=dyn_info,
-                rigid_info=rigid_info,
-                collider_info=collider_info,
-                rigid_config=rigid_config,
-                collider_config=collider_config,
-                gjk_config=gjk_config,
-                errno=errno,
-            )
-        if qd.static(collider_config.has_convex_specialization):
-            func_narrow_phase_convex_specializations(
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_config,
-                errno,
-            )
-        if qd.static(collider_config.has_terrain):
-            func_narrow_phase_any_vs_terrain(
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                multicontact_mpr_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_config,
-                errno,
-            )
-        if qd.static(collider_config.has_nonconvex_nonterrain):
-            func_narrow_phase_nonconvex_vs_nonterrain(
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_config,
-                errno,
-            )
-        if qd.static(coop_dedup):
-            func_clamp_prune_contacts_coop(dyn_state, collider_state, dyn_info, rigid_info, collider_info, errno)
-        else:
-            func_clamp_prune_contacts(
-                dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_config, errno
-            )
-        # Plane-convex and sphere-sphere contacts come from analytic paths that leave diff_contact_input unfilled, so
-        # it is filled here for the differentiable narrow-phase reverse (see func_fill_diff_contact_input_analytic)
-        if qd.static(rigid_config.requires_grad):
-            func_fill_diff_contact_input_analytic(dyn_state, collider_state, dyn_info, rigid_config)
+    Detect the first contact of the convex pairs on queued workers, queueing those holding several (see ConvexConvex).
+
+    The pass runs one thread per core, rounded up to whole environments, an upper-bound estimate of the core count
+    sizing it (Genesis-Embodied-AI/Genesis#2616).
+    """
+
+    detect = func_narrowphase_contact0
+
+    def __init__(
+        self,
+        collider: Annotated[Collider, Enabled("has_convex_pairs", narrowphase_layout=Queued)],
+        rigid_solver: "RigidSolver",
+        mpr: MPR[Queued],
+        gjk: GJK[Queued, WithoutEPA],
+    ) -> None:
+        gpu_cores, n_envs = collider.collider_config.gpu_cores, rigid_solver._B
+        n_threads = n_envs * ((gpu_cores + n_envs - 1) // n_envs)
+        mpr.reserve(n_threads)
+        gjk.reserve(n_threads)
 
 
-@qd.kernel(graph=True, fastcache=True)
-def kernel_detection(
-    geoms_init_AABB: GeomsInitAABB,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    mpr_state: MPRState,
-    gjk_state: GJKState,
-    diff_contact_input: DiffContactInput,
-    contact0_mpr_state: MPRState,
-    contact0_gjk_state: GJKState,
-    multicontact_mpr_state: MPRState,
-    multicontact_gjk_state: GJKState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-    gjk_config: qd.template(),
-    has_possible_pairs: qd.template(),
-    split_narrowphase: qd.template(),
-    coop_dedup: qd.template(),
-    errno: qd.Tensor,
-):
-    """Detect the collisions of every environment, captured as one graph."""
-    func_detection(
-        geoms_init_AABB=geoms_init_AABB,
-        dyn_state=dyn_state,
-        collider_state=collider_state,
-        mpr_state=mpr_state,
-        gjk_state=gjk_state,
-        diff_contact_input=diff_contact_input,
-        contact0_mpr_state=contact0_mpr_state,
-        contact0_gjk_state=contact0_gjk_state,
-        multicontact_mpr_state=multicontact_mpr_state,
-        multicontact_gjk_state=multicontact_gjk_state,
-        constraint_state=constraint_state,
-        dyn_info=dyn_info,
-        rigid_info=rigid_info,
-        collider_info=collider_info,
-        rigid_config=rigid_config,
-        collider_config=collider_config,
-        gjk_config=gjk_config,
-        has_possible_pairs=has_possible_pairs,
-        split_narrowphase=split_narrowphase,
-        coop_dedup=coop_dedup,
-        errno=errno,
-    )
+class ConvexConvex[LayoutT: Layout](Narrowphase):
+    """
+    Detect the contacts of the convex pairs that no primitive specialization handles, by MPR or GJK.
+
+    A worker per environment detects every contact of its pairs. Queued workers, one thread per core, detect the
+    contacts of the pairs that the first-contact pass queued (see ConvexConvexFirstContact).
+    """
+
+    def __init__(
+        self,
+        collider: Annotated[Collider, Enabled("has_convex_pairs", narrowphase_layout=LayoutT)],
+        rigid_solver: "RigidSolver",
+        mpr: MPR[LayoutT],
+        gjk: GJK[LayoutT, WithEPA],
+    ) -> None:
+        if self.template_args[LayoutT] is Queued:
+            mpr.reserve(collider.collider_config.gpu_cores)
+            gjk.reserve(collider.collider_config.gpu_cores)
+
+    @property
+    def detect(self) -> Callable:
+        if self.template_args[LayoutT] is Queued:
+            return func_narrowphase_multicontact
+        return func_narrow_phase_convex_vs_convex
 
 
-@qd.kernel(fastcache=True)
-def kernel_detection_without_graph(
-    geoms_init_AABB: GeomsInitAABB,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    mpr_state: MPRState,
-    gjk_state: GJKState,
-    diff_contact_input: DiffContactInput,
-    contact0_mpr_state: MPRState,
-    contact0_gjk_state: GJKState,
-    multicontact_mpr_state: MPRState,
-    multicontact_gjk_state: GJKState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-    gjk_config: qd.template(),
-    has_possible_pairs: qd.template(),
-    split_narrowphase: qd.template(),
-    coop_dedup: qd.template(),
-    errno: qd.Tensor,
-):
-    """Detect the collisions of every environment without a graph (see Collider.detection)."""
-    func_detection(
-        geoms_init_AABB=geoms_init_AABB,
-        dyn_state=dyn_state,
-        collider_state=collider_state,
-        mpr_state=mpr_state,
-        gjk_state=gjk_state,
-        diff_contact_input=diff_contact_input,
-        contact0_mpr_state=contact0_mpr_state,
-        contact0_gjk_state=contact0_gjk_state,
-        multicontact_mpr_state=multicontact_mpr_state,
-        multicontact_gjk_state=multicontact_gjk_state,
-        constraint_state=constraint_state,
-        dyn_info=dyn_info,
-        rigid_info=rigid_info,
-        collider_info=collider_info,
-        rigid_config=rigid_config,
-        collider_config=collider_config,
-        gjk_config=gjk_config,
-        has_possible_pairs=has_possible_pairs,
-        split_narrowphase=split_narrowphase,
-        coop_dedup=coop_dedup,
-        errno=errno,
-    )
+register_system(ConvexConvex[PerEnv])
+register_system(ConvexConvex[Queued])
+
+
+@register_system
+class PrimitivePrimitive(Narrowphase):
+    """Detect the contacts of the pairs of primitive geoms that an analytic specialization handles."""
+
+    detect = func_narrow_phase_convex_specializations
+
+    def __init__(
+        self, collider: Annotated[Collider, Enabled("has_primitive_pairs")], rigid_solver: "RigidSolver"
+    ) -> None:
+        pass
+
+
+@register_system
+class ConvexTerrain(Narrowphase):
+    """Detect the contacts of the geoms with a terrain, by MPR on queued workers (see 'Collider.n_terrain_threads')."""
+
+    detect = func_narrow_phase_any_vs_terrain
+
+    def __init__(
+        self,
+        collider: Annotated[Collider, Enabled("has_terrain_pairs")],
+        rigid_solver: "RigidSolver",
+        mpr: MPR[Queued],
+    ) -> None:
+        mpr.reserve(collider.n_terrain_threads)
+
+
+@register_system
+class NonconvexNonconvex(Narrowphase):
+    """Detect the contacts of the pairs holding a non-convex geom, by the signed distance field (SDF) of the geoms."""
+
+    detect = func_narrow_phase_nonconvex_vs_nonterrain
+
+    def __init__(
+        self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: "RigidSolver"
+    ) -> None:
+        pass
+
+
+@register_system
+class Pruning(System):
+    """Clamp the contacts of every environment to its budget and prune those of each pair of links, the last stage."""
+
+    slot = Collider.detection.pruning
+    entry = "prune"
+
+    def __init__(
+        self, collider: Annotated[Collider, Enabled("has_possible_pairs")], rigid_solver: "RigidSolver"
+    ) -> None:
+        self._collider = collider
+        self._requires_grad = rigid_solver._requires_grad
+
+    @property
+    def prune(self) -> tuple[Callable, ...]:
+        prune = func_clamp_prune_contacts_coop if self._collider.is_pruning_cooperative else func_clamp_prune_contacts
+        # Plane-convex and sphere-sphere contacts come from analytic paths that leave diff_contact_input unfilled, so it
+        # is filled here for the differentiable narrow-phase reverse (see func_fill_diff_contact_input_analytic)
+        if self._requires_grad:
+            return prune, func_fill_diff_contact_input_analytic
+        return (prune,)
 
 
 from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module

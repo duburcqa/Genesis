@@ -298,9 +298,9 @@ class OptIns:
         """
         Opt in a field declared `opt_in`, or a whole struct, before the owner builds it.
 
-        The target is a field by reference from the struct holding it, `add(GJKScratch.contact0, envs=n_threads)`, with
-        the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
-        with `in`. Opting in a requirement (see 'requires') opts in the struct it requires as well.
+        The target is a field by reference from the struct holding it, `add(ColliderInfo.sdf)`, with the sizes of its
+        arrays if any, added to those of its struct, or a struct class, which its builder checks with `in`. Opting in a
+        requirement (see 'requires') opts in the struct it requires as well.
         """
         root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
         if root_cls in self._built:
@@ -352,8 +352,8 @@ class Data:
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
     `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
     environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
-    placeholder no kernel reads. `opt_ins` is the registry of the owner opting in fields (see OptIns), and `binds` maps a
-    field to the struct or array allocated elsewhere it holds, every required struct opted in among them.
+    placeholder no kernel reads. `opt_ins` is the registry of the owner opting in fields (see OptIns), and `binds` maps
+    a field to the struct or array allocated elsewhere it holds, every required struct opted in among them.
     """
 
     kind: ClassVar["DataKind | None"] = None

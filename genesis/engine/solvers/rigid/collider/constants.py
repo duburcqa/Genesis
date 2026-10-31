@@ -5,6 +5,30 @@ Constants and enums for the collider module.
 from enum import IntEnum
 
 
+class Layout:
+    """How the scratch of a detection component is indexed, the first template parameter of the components."""
+
+
+class PerEnv(Layout):
+    """One worker per environment, the scratch sizing itself."""
+
+
+class Queued(Layout):
+    """The threads of the passes draining a queue of pairs, as many as the largest request of its users."""
+
+
+class Capability:
+    """What a detection by Gilbert-Johnson-Keerthi (GJK) computes, the second template parameter of GJK."""
+
+
+class WithEPA(Capability):
+    """The penetration and the contacts, by the expanding polytope algorithm (EPA)."""
+
+
+class WithoutEPA(Capability):
+    """The overlap and the distance alone, which leave the arrays of the EPA unused."""
+
+
 class CCD_ALGORITHM_CODE(IntEnum):
     """Convex collision detection algorithm codes."""
 

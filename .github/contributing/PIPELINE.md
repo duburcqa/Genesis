@@ -63,7 +63,7 @@ flowchart LR
 |---|---|---|
 | **System** | A unit of the simulation: Data, dependencies, roles. | `RigidSolver`, `Collider`, `RigidMPM`, `GJK[Queued, WithEPA]` |
 | **Data** | A struct of arrays a System owns (see `genesis/utils/data.py`). | `DynState`, `SDFInfo` |
-| **Dependency** | A typed parameter of a System's `__init__`. | `rigid_solver: RigidSolver`, `pairs: TerrainPairs` |
+| **Dependency** | A typed parameter of a System's `__init__`. | `rigid_solver: RigidSolver`, `dyn_state: DynState` |
 | **Phase** | An ordered sequence of stages a System offers, split into **slots**. | `Step.substep`, `Collider.detection` |
 | **Role** | What a System does in a phase, which fixes its slot and its entry point. | `Narrowphase`, `Integration` |
 | **Stage** | A kernel or a method run in a slot. Consecutive kernels fuse into one launch. | `kernel_convex_vs_terrain` |
@@ -78,21 +78,18 @@ flowchart LR
 
 ```python
 class ConvexTerrain(Narrowphase):                       # the role: the collider runs it after the broadphase
-    scratch: TerrainScratch                             # the Data it owns
+    detect = func_narrow_phase_any_vs_terrain           # the entry point of its role, args bound by name
 
     def __init__(
         self,
-        pairs: TerrainPairs,                            # Data dependency: exists iff such pairs exist
+        collider: Annotated[Collider, Enabled("has_terrain_pairs")],  # exists iff the collider found such pairs
+        rigid_solver: "RigidSolver",                    # a string breaks an import cycle
         mpr: MPR[Queued],                               # System dependency: uses its API
-        support_field: SupportField,
     ) -> None:
-        mpr.reserve(pairs.n_workers)                    # tell a dependency what it will use
-
-    def build(self) -> None:
-        self.scratch = TerrainScratch(sizes=...)       # allocate what only the scene sizes
-
-    detect = kernel_convex_vs_terrain                   # the entry point of its role, args bound by name
+        mpr.reserve(collider.n_terrain_threads)         # tell a dependency what it will use
 ```
+
+A System owning Data or parts declares them as annotations of its class, `dyn_state: DynState`, `collider: Collider | None`, which tells the pipeline who is yet to build them.
 
 Two methods, both optional:
 
@@ -101,7 +98,7 @@ Two methods, both optional:
 | `__init__(dependencies)` | once everything it depends on exists | stores its dependencies, tells them what it will use |
 | `build()` | once its dependencies are built | allocates the Data whose sizes the scene decides |
 
-Where it runs and with which arguments is declared, never written: the role fixes the slot, and the kernel's parameters bind by name to the Data of the System and of its dependencies.
+Where it runs and with which arguments is declared, never written: the role fixes the slot, and the parameters of the kernel or func bind by name to the Data of the System and of its dependencies. A func whose loops run at the top level is a stage like a kernel.
 
 ---
 
@@ -110,8 +107,8 @@ Where it runs and with which arguments is declared, never written: the role fixe
 ```mermaid
 flowchart LR
     CT["ConvexTerrain"] -- "System: calls its API<br/>(may change its state)" --> MPR["MPR[Queued]"]
-    CT -. "Data: reads it<br/>(read-only)" .-> TP[("TerrainPairs")]
-    CO["Collider"] -- owns --> TP
+    AR["AltitudeRecorder"] -. "Data: reads it<br/>(read-only)" .-> DS[("DynState")]
+    RS["RigidSolver"] -- owns --> DS
 ```
 
 | Declaration | Meaning | Guarantee | For the scheduler |
@@ -119,7 +116,6 @@ flowchart LR
 | `x: SomeSystem` | uses its API | only its API writes its state | exclusive: users of one System are serialized |
 | `x: SomeData` | reads its Data | read-only, refused at build if a stage writes it | shared: readers may run in parallel |
 | `x: T \| None` | optional | `None` when it will never exist | |
-| `x: IfQueued[T]` | exists in the instances of a template taking `Queued` | | |
 | `x: Annotated[Opts, Enabled("flag")]` | the System exists only if the option holds | field checked at import | |
 
 A dependency on Data, rather than on the System owning it, is the default whenever reading is all a System does: it decouples the reader from its owner, and it is what lets readers run side by side.
@@ -137,9 +133,9 @@ flowchart TB
         O2["LegacyCouplerOptions.rigid_mpm<br/>+ rigid and MPM active"] --> E2["RigidMPM exists?"]
         O3["sensor options<br/>contact_depth_query == 'sdf'"] --> E3["TactileSensors depend on SDF?"]
     end
-    subgraph after ["after an owner builds: the Data it produced"]
-        B1["Collider pair analysis"] --> P1[("TerrainPairs?")] --> N1["ConvexTerrain exists?"]
-        B1 --> P2[("NonconvexPairs?")] --> N2["Nonconvex exists?"] --> S1["SDF demanded"]
+    subgraph after ["after an owner builds: its properties"]
+        B1["Collider pair analysis"] --> P1["has_terrain_pairs?"] --> N1["ConvexTerrain exists?"]
+        B1 --> P2["has_nonconvex_pairs?"] --> N2["NonconvexNonconvex exists?"] --> S1["SDF demanded"]
     end
 ```
 
@@ -155,8 +151,8 @@ stateDiagram-v2
     Absent --> [*]
 ```
 
-- **Created** as soon as it can be decided: its System dependencies exist, its Data dependencies are built, its conditions are known.
-- **Built** once its dependencies are built and every class that could use it through its API has been created or ruled out, so every `reserve` is in. A Data dependency never delays its owner: the collider builds without waiting for the narrowphases reading its pairs.
+- **Created** as soon as it can be decided: its System dependencies exist, its Data dependencies are built, its conditions are known. A class waits at its first undecided dependency, so it demands no component before it is known to exist.
+- **Built** once its dependencies are built and every class that could use it through its API has been created or ruled out, so every `reserve` is in. A class needing what the build provides (a part, its Data, a property read once built) is decided after it instead: the rigid solver builds without waiting for the narrowphases depending on its collider.
 - **On demand**: a component (`is_created_on_demand`) exists only while some existing System depends on it through its API.
 
 A contradiction between declarations (A reads B's Data, B serves A's API) is detected by the loop and raised with the cycle named.
@@ -188,10 +184,10 @@ flowchart LR
         end
         subgraph np ["narrowphase"]
             direction TB
-            N1["ConvexConvex[layout]"]
+            N1["ConvexConvex[layout]<br/>(queued: after its first-contact pass)"]
             N2["PrimitivePrimitive"]
             N3["ConvexTerrain"]
-            N4["Nonconvex"]
+            N4["NonconvexNonconvex"]
         end
         subgraph pr ["pruning"]
             PR["Pruning"]
@@ -202,7 +198,7 @@ flowchart LR
 
 - **Order** within a slot is the registration order of the participants, fixed by import order in one place. Build timing never decides order, so results never depend on which System happened to be created first.
 - **Several stages** means several roles, each with a distinctly named entry point: `MPMSolver` plays `Dynamics` (`substep_pre_coupling`), `Coupling` (`couple`) and `Integration` (`substep_post_coupling`).
-- **Kernels fuse**: the consecutive kernel stages of a phase become one generated kernel, so splitting the detection into Systems launches what the hand-written kernel launched.
+- **Kernels fuse**: the consecutive kernel stages of a phase become one generated kernel, so splitting the detection into Systems launches what the hand-written kernel launched. A nested phase fuses with the stages around it unless it is launched apart (`is_launched_apart`), as the detection is within the rigid substep, which bounds the size of the kernels around it.
 
 ---
 
@@ -227,16 +223,20 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
 - **Instances** coexist: `GJK[Queued, WithoutEPA]` and `GJK[Queued, WithEPA]` share nothing, so their users can run in parallel.
 - **Inside the template**, arguments read by parameter: `if self.template_args[CapabilityT] is WithEPA`.
 
-A dependency can be conditioned on the arguments of the dependent:
+A condition can compare with a parameter of the template, which each instance reads as its argument:
 
 ```python
-type IfQueued[T] = Annotated[T | None, OnlyIf(Queued)]  # declared once, with the marker
-
 class ConvexConvex[LayoutT: Layout](Narrowphase):
-    def __init__(self, gjk: GJK[LayoutT, WithEPA], gjk_overlap: IfQueued[GJK[Queued, WithoutEPA]]) -> None: ...
+    def __init__(
+        self,
+        collider: Annotated[Collider, Enabled("has_convex_pairs", narrowphase_layout=LayoutT)],
+        rigid_solver: "RigidSolver",
+        mpr: MPR[LayoutT],
+        gjk: GJK[LayoutT, WithEPA],
+    ) -> None: ...
 ```
 
-`ConvexConvex[Queued]` depends on both GJK instances, `ConvexConvex[PerEnv]` on one: `gjk_overlap` is `None` there and nothing creates it. Type checkers read `IfQueued[X]` as `X | None`.
+A stage binds its arguments by name, so a System depends on one instance of a component: the first-contact pass of the queued layout, which runs `GJK[Queued, WithoutEPA]`, is a System of its own (`ConvexConvexFirstContact`) placed before `ConvexConvex[Queued]` in the narrowphase slot. A dependency present in some instances alone is declared `Annotated[T | None, OnlyIf(Queued)]`.
 
 ---
 
@@ -286,7 +286,7 @@ flowchart TB
         CC["ConvexConvex[layout]"]
         PP["PrimitivePrimitive"]
         CT["ConvexTerrain"]
-        NC["Nonconvex"]
+        NC["NonconvexNonconvex"]
         PR["Pruning"]
     end
 
@@ -414,11 +414,11 @@ The narrowphases exist only for the pair families the collider found, after its 
 sequenceDiagram
     participant Rigid as RigidSolver
     participant Col as Collider
-    participant NC as Nonconvex
+    participant NC as NonconvexNonconvex
     participant SDF
     Rigid->>Rigid: build
-    Col->>Col: build: pair analysis, NonconvexPairs built
-    Col-->>NC: NonconvexPairs exists
+    Col->>Col: built with it: pair analysis
+    Col-->>NC: has_nonconvex_pairs
     NC->>SDF: created, demands SDF
     SDF->>SDF: build (every possible user decided)
     NC->>NC: build

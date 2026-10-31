@@ -200,6 +200,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
     _entities: list[RigidEntity] = gs.List()
+    # The parts the solver builds, which other Systems may depend on (see 'assemble_systems')
+    collider: Collider | None
+    constraint_solver: ConstraintSolver | None
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -339,7 +342,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self._init_constraint_solver()
         collider_info = self.collider.collider_info
         self.register_errors(
-            self._errno,
+            self.errno,
             {
                 ErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
@@ -769,8 +772,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = RigidData(self, kinematic_only=False)
-        self._errno = self.data_manager.errno
+        self.data_manager = array_class.DataManager(self, kinematic_only=False)
+        self.errno = self.data_manager.errno
 
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
@@ -1305,8 +1308,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             force_update_all_geoms=is_recording,
             is_backward=False,
             noslip=self._options.noslip_iterations > 0,
-            errno=self._errno,
-            collider_static_config=None if self.collider is None else self.collider.collider_config,
+            collider_config=None if self.collider is None else self.collider.collider_config,
         )
 
     def _kernel_detect_collision(self):

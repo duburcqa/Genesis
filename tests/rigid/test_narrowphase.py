@@ -30,6 +30,7 @@ resetting errno explicit in this test.
 
 import copy
 import importlib.util
+import sys
 import xml.etree.ElementTree as ET
 from itertools import combinations
 from pathlib import Path
@@ -44,7 +45,10 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.collider import gjk_support, support_field
+from genesis.engine.solvers.rigid.collider import collider, gjk_support, support_field
+from genesis.engine.solvers.rigid.collider.collider import Collider, ConvexConvex, ConvexConvexFirstContact
+from genesis.engine.solvers.rigid.collider.constants import PerEnv, Queued
+from genesis.engine.solvers.rigid.collider.gjk import GJK
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -410,15 +414,18 @@ class AnalyticalVsGJKSceneCreator:
         temp_narrowphase_path = create_modified_narrowphase_file(tmp_path=self.tmp_path)
         spec = importlib.util.spec_from_file_location("narrowphase_modified", temp_narrowphase_path)
         narrowphase_modified = importlib.util.module_from_spec(spec)
+        # A fused stage imports its funcs by module name
+        self.monkeypatch.setitem(sys.modules, "narrowphase_modified", narrowphase_modified)
         spec.loader.exec_module(narrowphase_modified)
-        from genesis.engine.solvers.rigid.collider import collider
 
-        self.monkeypatch.setattr(collider, "func_narrowphase_contact0", narrowphase_modified.func_narrowphase_contact0)
+        self.monkeypatch.setattr(ConvexConvexFirstContact, "detect", narrowphase_modified.func_narrowphase_contact0)
         self.monkeypatch.setattr(
             collider, "func_narrowphase_multicontact", narrowphase_modified.func_narrowphase_multicontact
         )
         self.monkeypatch.setattr(
-            collider, "func_narrow_phase_convex_vs_convex", narrowphase_modified.func_narrow_phase_convex_vs_convex
+            collider,
+            "func_narrow_phase_convex_vs_convex",
+            narrowphase_modified.func_narrow_phase_convex_vs_convex,
         )
 
     def update_pos_quat_analytical(self, entity_idx: int, pos, euler) -> None:
@@ -443,7 +450,7 @@ class AnalyticalVsGJKSceneCreator:
         errno_val = self.scene_gjk._sim.rigid_solver._errno[0]
         if expect_collision:
             # Kernel1 runs GJK on every pair left by the broad phase (analytical paths are disabled).
-            if self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase:
+            if self.scene_gjk._sim.rigid_solver.collider.narrowphase_layout is Queued:
                 assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
             # On GPU: multicontact is reached when contact0 detects a collision and enqueues the pair.
             # On CPU: the monolithic kernel calls gjk.func_gjk_contact directly (skipping gjk.func_gjk).
@@ -760,31 +767,35 @@ def test_split_vs_monolithic_narrowphase(
     radius = 0.1
     half_length = 0.25
 
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            enable_mujoco_compatibility=enable_mujoco_compatibility,
-            use_gjk_collision=True,
-        ),
-        show_viewer=show_viewer,
-    )
-    capsule_a = scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius)
-    capsule_b = scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius)
-    box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.3, 0.3, 0.3),
-            pos=(10.0, 0.0, 0.0),
-        ),
-        vis_mode="collision",
-    )
-    # The monolithic arm runs GJK on one state per environment, which the split arm leaves unused
-    scene.rigid_solver.opt_ins.add(array_class.GJKScratch.main, envs=2)
-    # Batched build: the split arm packs its work queue across environments through one global counter, a structure
-    # a single environment cannot exercise.
-    scene.build(n_envs=2)
-
-    collider = scene.rigid_solver.collider
-    assert collider is not None
-    assert collider._use_split_narrowphase, "Expected split narrowphase on GPU backend"
+    # The split arm is the layout of the GPU, the monolithic one the layout a scene of its own forces
+    scenes, capsules_a, capsules_b, boxes = [], [], [], []
+    for narrowphase_layout in (Queued, PerEnv):
+        monkeypatch.setattr(
+            Collider, "narrowphase_layout", property(lambda collider, layout=narrowphase_layout: layout)
+        )
+        scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(
+                enable_mujoco_compatibility=enable_mujoco_compatibility,
+                use_gjk_collision=True,
+            ),
+            show_viewer=show_viewer,
+        )
+        capsules_a.append(scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius))
+        capsules_b.append(scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius))
+        boxes.append(
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(0.3, 0.3, 0.3),
+                    pos=(10.0, 0.0, 0.0),
+                ),
+                vis_mode="collision",
+            )
+        )
+        # Batched build: the split arm packs its work queue across environments through one global counter, a
+        # structure a single environment cannot exercise.
+        scene.build(n_envs=2)
+        assert scene.sim.get_system(ConvexConvex[narrowphase_layout]) is not None
+        scenes.append(scene)
 
     test_configs = [
         # (pos_a, euler_a, pos_b, euler_b, pos_box, atol, normal_atol). Analytic capsule-capsule contacts agree
@@ -808,21 +819,14 @@ def test_split_vs_monolithic_narrowphase(
         quat_a = gs.utils.geom.xyz_to_quat(xyz=np.array(euler_a, dtype=gs.np_float), degrees=True)
         quat_b = gs.utils.geom.xyz_to_quat(xyz=np.array(euler_b, dtype=gs.np_float), degrees=True)
 
-        # Run with split narrowphase (default on GPU)
-        capsule_a.set_qpos((*pos_a, *quat_a))
-        capsule_b.set_qpos((*pos_b, *quat_b))
-        box.set_pos(pos_box)
-        scene.step()
-        contacts_split = collider.get_contacts(as_tensor=False, to_torch=False)
-
-        # Run with monolithic narrowphase
-        monkeypatch.setattr(collider, "_use_split_narrowphase", False)
-        capsule_a.set_qpos((*pos_a, *quat_a))
-        capsule_b.set_qpos((*pos_b, *quat_b))
-        box.set_pos(pos_box)
-        scene.step()
-        contacts_mono = collider.get_contacts(as_tensor=False, to_torch=False)
-        monkeypatch.undo()
+        arms_contacts = []
+        for scene, capsule_a, capsule_b, box in zip(scenes, capsules_a, capsules_b, boxes):
+            capsule_a.set_qpos((*pos_a, *quat_a))
+            capsule_b.set_qpos((*pos_b, *quat_b))
+            box.set_pos(pos_box)
+            scene.step()
+            arms_contacts.append(scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False))
+        contacts_split, contacts_mono = arms_contacts
 
         n_contacts_split = [len(geoms) for geoms in contacts_split["geom_a"]]
         n_contacts_mono = [len(geoms) for geoms in contacts_mono["geom_a"]]
@@ -1166,8 +1170,6 @@ def test_mesh_support_exactness(show_viewer, tol):
         )
         for i_e, mesh in enumerate((*meshes, meshes[-1]))
     ]
-    # The support queries run on the GJK state of the monolithic narrowphase, which the split one leaves unused
-    scene.rigid_solver.opt_ins.add(array_class.GJKScratch.main, envs=1)
     scene.build()
 
     @qd.kernel
@@ -1194,10 +1196,11 @@ def test_mesh_support_exactness(show_viewer, tol):
         directions: qd.types.ndarray(),
         supports_world: qd.types.ndarray(),
         supports_local: qd.types.ndarray(),
-        collider_state: ColliderState,
-        gjk_state: GJKState,
-        dyn_info: DynInfo,
-        collider_info: ColliderInfo,
+        collider_state: array_class.ColliderState,
+        gjk_state: array_class.GJKState,
+        dyn_info: array_class.DynInfo,
+        collider_info: array_class.ColliderInfo,
+        gjk_info: array_class.GJKInfo,
         rigid_config: qd.template(),
         collider_config: qd.template(),
     ):
@@ -1215,6 +1218,7 @@ def test_mesh_support_exactness(show_viewer, tol):
                     gjk_state,
                     dyn_info,
                     collider_info,
+                    gjk_info,
                     rigid_config,
                     collider_config,
                     shrink_sphere=False,
@@ -1276,9 +1280,10 @@ def test_mesh_support_exactness(show_viewer, tol):
             supports_world,
             supports_local,
             scene.rigid_solver.collider.collider_state,
-            scene.rigid_solver.collider.gjk.gjk_state,
+            scene.sim.get_system(GJK).gjk_state,
             scene.rigid_solver.dyn_info,
             scene.rigid_solver.collider.collider_info,
+            scene.sim.get_system(GJK).gjk_info,
             scene.rigid_solver.rigid_config,
             scene.rigid_solver.collider.collider_config,
         )

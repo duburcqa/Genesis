@@ -11,7 +11,7 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import ErrorCode
-from genesis.utils.data import DataItem, DataKind, iter_data
+from genesis.utils.data import CHECKPOINT_KINDS, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
@@ -354,9 +354,15 @@ class Simulator(RBC):
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
+        # A System holding none of the kinds a checkpoint restores, such as a component holding constants and scratch
+        # alone, has no record (see 'CHECKPOINT_KINDS')
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            systems={type(system).__name__: system.__getstate__() for system in self.checkpointed_systems},
+            systems={
+                type(system).__name__: system.__getstate__()
+                for system in self.checkpointed_systems
+                if any([isinstance(item, DataItem) and item.kind in CHECKPOINT_KINDS for item in system.data])
+            },
         )
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
@@ -371,8 +377,9 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        for system in self.checkpointed_systems:
-            system.__setstate__(state.systems[type(system).__name__])
+        systems = {type(system).__name__: system for system in self.checkpointed_systems}
+        for name, record in state.systems.items():
+            systems[name].__setstate__(record)
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:

@@ -170,7 +170,10 @@ def rotmatx(i0: int, i1: int, i2: int, matin: qd.types.matrix(3, 3), f0: int, f1
 
 @qd.func
 def func_collider_reset_env(
-    i_b: int, collider_state: ColliderState, collider_config: qd.template(), cache_only: qd.template()
+    i_b: int,
+    collider_state: array_class.ColliderState,
+    collider_config: qd.template(),
+    cache_only: qd.template(),
 ):
     """Drop what the collision detection of env i_b carries over from the previous steps.
 
@@ -181,7 +184,7 @@ def func_collider_reset_env(
         collider_state.first_time[i_b] = True
 
     # The contact cache is only held for the convex-convex pairs (see ContactCache in array_class.py)
-    if qd.static(collider_static_config.has_non_box_plane_convex_convex):
+    if qd.static(collider_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
             collider_state.contact_cache.penetration[i_pair, i_b] = 0.0

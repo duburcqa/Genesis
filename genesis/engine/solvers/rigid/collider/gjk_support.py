@@ -20,9 +20,9 @@ def support_mesh(
     direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    gjk_state: GJKState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    gjk_state: array_class.GJKState,
+    dyn_info: array_class.DynInfo,
+    gjk_info: array_class.GJKInfo,
 ):
     """
     Find the support point on a mesh in the given direction.
@@ -30,7 +30,7 @@ def support_mesh(
     d_mesh = gu.qd_transform_by_quat(direction, gu.qd_inv_quat(quat))
 
     # Exhaustively search for the vertex with maximum dot product
-    fmax = -collider_info.gjk.FLOAT_MAX[None]
+    fmax = -gjk_info.FLOAT_MAX[None]
     imax = 0
 
     vert_start = dyn_info.geoms.vert_start[i_g]
@@ -67,10 +67,11 @@ def support_driver(
     direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    collider_state: ColliderState,
-    gjk_state: GJKState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    gjk_state: array_class.GJKState,
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    gjk_info: array_class.GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -99,7 +100,7 @@ def support_driver(
     elif qd.static(rigid_config.enable_mujoco_compatibility):
         # If mujoco-compatible, do exhaustive search for the vertex
         if geom_type == gs.GEOM_TYPE.MESH:
-            v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, collider_info)
+            v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, gjk_info)
         else:
             v, v_, vid = support_field._func_support_world(
                 i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=True
@@ -121,10 +122,11 @@ def func_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: ColliderState,
-    gjk_state: GJKState,
-    dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    collider_state: array_class.ColliderState,
+    gjk_state: array_class.GJKState,
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    gjk_info: array_class.GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -161,6 +163,7 @@ def func_support(
             gjk_state,
             dyn_info,
             collider_info,
+            gjk_info,
             rigid_config,
             collider_config,
             shrink_sphere,

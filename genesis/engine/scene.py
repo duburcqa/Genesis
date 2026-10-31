@@ -1843,9 +1843,15 @@ class Scene(RBC):
             )
         if state.digest != self._desc_digest:
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
-        # Every System checks its record before anything is touched, so a record from another scene leaves this one as
-        # it was, the recorders included
-        systems = {type(system).__name__: system for system in self._sim.checkpointed_systems}
+        # Every System holding data of the kinds the record holds checks its record before anything is touched, so a
+        # record from another scene leaves this one as it was, the recorders included. A System holding none of them,
+        # such as a component holding constants and scratch alone, has no record.
+        kinds = frozenset().union(*[record.kinds for record in state.sim.systems.values()])
+        systems = {
+            type(system).__name__: system
+            for system in self._sim.checkpointed_systems
+            if any([isinstance(item, DataItem) and item.kind in kinds for item in system.data])
+        }
         if set(state.sim.systems) != set(systems):
             gs.raise_exception(
                 f"The checkpoint holds {sorted(state.sim.systems)} where this scene simulates {sorted(systems)}."
