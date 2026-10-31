@@ -817,7 +817,7 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
     The scope holds the public attributes of the System, of the Systems it depends on, and of their parts, as they are
     when a stage is added, and the structs it depends on as Data under the name of their parameter. The stages write
     the Data of the System and of the System offering their slot, each with its owner when it is a part and the parts
-    of either (see 'System.api').
+    of either, but never the Data another System declares it owns (see 'System.api').
     """
     system = _scope_system
     assert system is not None, "A stage is added within the scope of its System (see 'assemble_systems')."
@@ -832,12 +832,20 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
             scope.setdefault(name, []).append(struct)
     units = [unit for unit in (system, _scope_slot_owner) if unit is not None]
     owners = [dep for unit in units for dep in unit._dependencies if any([part is unit for part in dep.get_parts()])]
+    unit_systems = [unit_system for unit in (*units, *owners) for unit_system in (unit, *unit.get_parts())]
+    # The Data another System of the scope declares it owns stays read-only, even held by a System of the unit
+    owned_ids = {
+        id(vars(other).get(name))
+        for dependency in (system, *system._dependencies)
+        for other in (dependency, *dependency.get_parts())
+        if all([other is not unit_system for unit_system in unit_systems])
+        for name in _get_owned_attrs(type(other))
+    }
     writable_ids = {
         id(value)
-        for unit_owner in (*units, *owners)
-        for unit_system in (unit_owner, *unit_owner.get_parts())
+        for unit_system in unit_systems
         for name, value in vars(unit_system).items()
-        if not name.startswith("_")
+        if not name.startswith("_") and id(value) not in owned_ids
     }
     return scope, writable_ids
 

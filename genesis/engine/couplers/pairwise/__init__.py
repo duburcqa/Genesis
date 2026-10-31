@@ -6,8 +6,7 @@ imports is the order the couplings of a substep run in.
 """
 
 from .rigid_mpm import RigidMPM, RigidMPMAttachment, RigidMPMCPIC
-from .mpm_sph import MPMSPH
-from .mpm_pbd import MPMPBD
+from .mpm_particles import MPMSPH, MPMPBD
 from .rigid_sph import RigidSPH
 from .rigid_pbd import RigidPBD
 from .fem_surface import FEMSurface
