@@ -260,7 +260,7 @@ class PBDSolver(ParticleSolver):
 
     def substep_pre_coupling(self, f):
         if self.is_active:
-            kernel_apply_external_force(self._sim.cur_t, self.pbd_state, self.pbd_info, self._force_fields_dispatcher)
+            kernel_apply_external_force(self._sim.cur_t, self.pbd_state, self.pbd_info, self.force_fields_dispatcher)
 
             # topology constraints (doesn't require spatial hashing)
             if self._n_edges > 0:

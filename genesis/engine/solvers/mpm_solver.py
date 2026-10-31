@@ -13,7 +13,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.materials import MPM
-from genesis.engine.pipeline import Inline, InlineSpec, System
+from genesis.engine.pipeline import Inline, Stages, System
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.engine.step import Coupling
@@ -90,15 +90,241 @@ class MPMMaterialDispatcher:
         return stress
 
 
+@qd.func
+def func_mpm_cell_separation(f: int, i_p: int, i_b: int, i_c: int, cell_pos: qd.types.vector(3), i_sep: int) -> int:
+    """
+    Return what separates a particle from a cell of its stencil, -1 for nothing, the cell then getting nothing from it.
+
+    `i_c` indexes the cell among the 27 of the stencil, at `cell_pos`. The placeholder of the extension point of the
+    transfer from the particles to the grid, which the coupling Systems add their funcs to (see 'MPMSolver.p2g'), each
+    leaving a separation found by an earlier one as it is.
+    """
+    return i_sep
+
+
+@qd.func
+def func_mpm_cell_velocity(
+    f: int, i_p: int, i_b: int, i_c: int, weight: float, grid_vel: qd.types.vector(3)
+) -> qd.types.vector(3):
+    """
+    Return the velocity a cell of the stencil of a particle contributes to it, of the given weight.
+
+    `i_c` indexes the cell among the 27 of the stencil. The placeholder of the extension point of the transfer from the
+    grid to the particles, which the coupling Systems add their funcs to (see 'MPMSolver.g2p').
+    """
+    return grid_vel
+
+
+@qd.kernel
+def kernel_p2g(
+    f: int,
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+    mpm_static_config: qd.template(),
+    material_dispatcher: qd.template(),
+):
+    """
+    Update the deformation of the active particles of a frame, then scatter their momentum and mass to the grid.
+
+    The material of each particle updates its deformation gradient and plastic volume ratio into the next frame and
+    gives its stress, which enters the momentum. A cell separated from a particle gets nothing from it (see
+    func_mpm_cell_separation). Without gradient, the cells first touched are listed for the sparse reset (see
+    MPMGrid).
+    """
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            substep_dt = mpm_info.substep_dt[None]
+            dx = mpm_info.dx[None]
+            inv_dx = mpm_info.inv_dx[None]
+            grid_offset = mpm_info.grid_offset[None]
+
+            # The determinant of F_tmp equals that of S, since U and V of the singular value decomposition are proper
+            # rotations (see MPMStaticConfig). J is declared before the branches, which quadrants scopes locally.
+            J = gs.qd_float(0.0)
+            if qd.static(mpm_static_config.is_svd_needed):
+                J = mpm_state.particles.S[f, i_p, i_b].determinant()
+            else:
+                J = mpm_state.particles.F_tmp[f, i_p, i_b].determinant()
+            i_mat = mpm_info.particles.material_idx[i_p]
+            F_new, S_new, Jp_new = material_dispatcher.update_F_S_Jp(
+                i_mat,
+                J,
+                mpm_state.particles.F_tmp[f, i_p, i_b],
+                mpm_state.particles.U[f, i_p, i_b],
+                mpm_state.particles.S[f, i_p, i_b],
+                mpm_state.particles.V[f, i_p, i_b],
+                mpm_state.particles.Jp[f, i_p, i_b],
+            )
+            mpm_state.particles.F[f + 1, i_p, i_b] = F_new
+            mpm_state.particles.Jp[f + 1, i_p, i_b] = Jp_new
+            # The actuation holds over every substep of the step it is set at, and until it is set again
+            mpm_state.particles.actu[f + 1, i_p, i_b] = mpm_state.particles.actu[f, i_p, i_b]
+
+            # The stress takes both the advected deformation gradient and the one once plasticity applies: the elastic
+            # materials read the latter, while a viscous liquid reads the former, whose shear the plasticity removes.
+            # The plastic volume ratio is that of the frame the substep starts from.
+            stress = material_dispatcher.update_stress(
+                i_mat,
+                mpm_state.particles.U[f, i_p, i_b],
+                S_new,
+                mpm_state.particles.V[f, i_p, i_b],
+                mpm_state.particles.F_tmp[f, i_p, i_b],
+                F_new,
+                J,
+                mpm_state.particles.Jp[f, i_p, i_b],
+                mpm_state.particles.actu[f, i_p, i_b],
+                mpm_info.particles.muscle_direction[i_p],
+            )
+            stress = (-substep_dt * mpm_info.particle_volume[None] * 4 * inv_dx * inv_dx) * stress
+            affine = stress + mpm_info.particles.mass[i_p] * mpm_state.particles.C[f, i_p, i_b]
+
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
+            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                dpos = (offset.cast(gs.qd_float) - fx) * dx
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= w[offset[d], d]
+
+                i_sep = -1
+                i_sep = func_mpm_cell_separation(
+                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], (base + offset) * dx, i_sep
+                )
+                cell_ijk = base - grid_offset + offset
+                if i_sep == -1:
+                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] += weight * (
+                        mpm_info.particles.mass[i_p] * mpm_state.particles.vel[f, i_p, i_b] + affine @ dpos
+                    )
+                    mass_contrib = weight * mpm_info.particles.mass[i_p]
+                    prev_mass = qd.atomic_add(
+                        mpm_state.grid.mass[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b], mass_contrib
+                    )
+                    # The first contribution of an env to a cell claims the cell in the dirty flag shared by the envs,
+                    # and the first env claiming it lists it (see MPMGrid). The masses are non-negative.
+                    if qd.static(not mpm_static_config.requires_grad):
+                        if prev_mass <= 0.0 and mass_contrib > 0.0:
+                            dirty_flag_prev = qd.atomic_or(
+                                mpm_state.grid.dirty_flag[cell_ijk[0], cell_ijk[1], cell_ijk[2]], gs.qd_int(1)
+                            )
+                            if dirty_flag_prev == 0:
+                                i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
+                                grid_res_y, grid_res_z = mpm_state.grid.mass.shape[2], mpm_state.grid.mass.shape[3]
+                                i_cell = (cell_ijk[0] * grid_res_y + cell_ijk[1]) * grid_res_z + cell_ijk[2]
+                                mpm_state.grid.dirty_list[i_slot] = i_cell
+
+                # The particles held in place act as boundary conditions of the grid
+                if not mpm_info.particles.is_free[i_p]:
+                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] = qd.Vector.zero(
+                        gs.qd_float, 3
+                    )
+
+
+@qd.kernel
+def kernel_g2p(
+    f: int, mpm_state: array_class.MPMState, mpm_info: array_class.MPMInfo, mpm_static_config: qd.template()
+):
+    """
+    Gather the velocity of the grid back to the active particles of a frame and advect them into the next frame.
+
+    A cell contributes the velocity the couplings give it (see func_mpm_cell_velocity). The inactive particles carry
+    their state over to the next frame unchanged.
+    """
+    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            substep_dt = mpm_info.substep_dt[None]
+            inv_dx = mpm_info.inv_dx[None]
+            grid_offset = mpm_info.grid_offset[None]
+
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
+            new_vel = qd.Vector.zero(gs.qd_float, 3)
+            new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                dpos = offset.cast(gs.qd_float) - fx
+                cell_ijk = base - grid_offset + offset
+                grid_vel = mpm_state.grid.vel_out[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b]
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= w[offset[d], d]
+
+                grid_vel = func_mpm_cell_velocity(
+                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], weight, grid_vel
+                )
+
+                new_vel += weight * grid_vel
+                new_C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
+
+            new_pos = mpm_state.particles.pos[f, i_p, i_b] + substep_dt * new_vel
+
+            # The boundary keeps an exploding simulation from reading cells out of the grid
+            new_pos, new_vel = func_impose_cube_boundary(new_pos, new_vel, mpm_info.boundary)
+
+            mpm_state.particles.vel[f + 1, i_p, i_b] = new_vel
+            mpm_state.particles.C[f + 1, i_p, i_b] = new_C
+            mpm_state.particles.pos[f + 1, i_p, i_b] = new_pos
+        else:
+            mpm_state.particles.vel[f + 1, i_p, i_b] = mpm_state.particles.vel[f, i_p, i_b]
+            mpm_state.particles.pos[f + 1, i_p, i_b] = mpm_state.particles.pos[f, i_p, i_b]
+            mpm_state.particles.C[f + 1, i_p, i_b] = mpm_state.particles.C[f, i_p, i_b]
+            mpm_state.particles.F[f + 1, i_p, i_b] = mpm_state.particles.F[f, i_p, i_b]
+            mpm_state.particles.Jp[f + 1, i_p, i_b] = mpm_state.particles.Jp[f, i_p, i_b]
+
+        mpm_state.particles.is_active[f + 1, i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
+
+
+@qd.func
+def func_mpm_grid_couplings(
+    f: int, i_b: int, pos: qd.types.vector(3), vel: qd.types.vector(3), mass: float
+) -> qd.types.vector(3):
+    """
+    Return the velocity of a cell of the grid holding mass, at the given position and of the given mass, once coupled
+    with the other solvers.
+
+    The placeholder of the extension point of the couplings of the grid, which the coupling Systems add their funcs to
+    (see 'MPMSolver.grid_couplings').
+    """
+    return vel
+
+
+@qd.kernel
+def kernel_mpm_grid_op(
+    f: int,
+    t: float,
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+    force_fields_dispatcher: qd.template(),
+):
+    """
+    Update the velocity of the cells of the material point method (MPM) grid holding mass.
+
+    The momentum of a cell turns into a velocity, which gravity and the force fields accelerate, the couplings with the
+    other solvers update (see func_mpm_grid_couplings), and the boundary of the solver clamps.
+    """
+    for i_x, i_y, i_z, i_b in qd.ndrange(
+        mpm_state.grid.mass.shape[1],
+        mpm_state.grid.mass.shape[2],
+        mpm_state.grid.mass.shape[3],
+        mpm_state.grid.mass.shape[4],
+    ):
+        if mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] > mpm_info.EPS[None]:
+            substep_dt = mpm_info.substep_dt[None]
+            vel = (1 / mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
+            vel += substep_dt * mpm_info.gravity[i_b]
+            pos = (qd.Vector([i_x, i_y, i_z], dt=gs.qd_int) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
+            mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
+            for i_ff in qd.static(range(len(force_fields_dispatcher.fields))):
+                vel += force_fields_dispatcher.fields[i_ff].get_acc(pos, vel, t, i=-1) * substep_dt
+            vel = func_mpm_grid_couplings(f, i_b, pos, vel, mass)
+            _, mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = func_impose_cube_boundary(pos, vel, mpm_info.boundary)
+
+
 class MPMSolver(ParticleSolver, Coupling):
     material_cls = MPM.Base
     has_frames = True
 
     # The extension points of the transfers between the particles and the grid, and of the update of the grid, filled
     # by the Systems playing CellSeparation, GridCoupling and CellVelocity
-    p2g = InlineSpec()
-    grid_couplings = InlineSpec()
-    g2p = InlineSpec()
+    p2g = Inline(kernel_p2g, func_mpm_cell_separation)
+    grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
+    g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -113,9 +339,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
-        self.p2g = Inline(kernel_p2g, func_mpm_cell_separation)
-        self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
-        self.g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -145,7 +368,7 @@ class MPMSolver(ParticleSolver, Coupling):
         self.mpm_state: array_class.MPMState | None = None
         self.mpm_info: array_class.MPMInfo | None = None
         self.mpm_static_config: array_class.MPMStaticConfig | None = None
-        self._material_dispatcher: MPMMaterialDispatcher | None = None
+        self.material_dispatcher: MPMMaterialDispatcher | None = None
         # The hybrid entities whose soft part the solver holds, which drive their particles after each substep
         self._hybrid_entities: list[HybridEntity] = []
 
@@ -223,7 +446,7 @@ class MPMSolver(ParticleSolver, Coupling):
         self.mpm_static_config = array_class.MPMStaticConfig(
             is_svd_needed=is_svd_needed, requires_grad=self._sim.requires_grad
         )
-        self._material_dispatcher = MPMMaterialDispatcher(self._materials)
+        self.material_dispatcher = MPMMaterialDispatcher(self._materials)
         self._hybrid_entities = [
             entity
             for entity in self._sim.entities
@@ -232,9 +455,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self._build_gravity(self.mpm_info.gravity)
 
         if self.is_active:
-            self.p2g.bind(static_config=self.mpm_static_config, material_dispatcher=self._material_dispatcher)
-            self.grid_couplings.bind(force_fields=self.force_fields_dispatcher)
-            self.g2p.bind(static_config=self.mpm_static_config)
             self.register_errors(
                 self.mpm_state.errno,
                 {
@@ -701,184 +921,6 @@ def kernel_svd(f: int, mpm_state: array_class.MPMState):
             mpm_state.particles.V[f, i_p, i_b] = V
 
 
-@qd.func
-def func_mpm_cell_separation(f: int, i_p: int, i_b: int, i_c: int, cell_pos: qd.types.vector(3), i_sep: int) -> int:
-    """
-    Return what separates a particle from a cell of its stencil, -1 for nothing, the cell then getting nothing from it.
-
-    `i_c` indexes the cell among the 27 of the stencil, at `cell_pos`. The placeholder of the extension point of the
-    transfer from the particles to the grid, which the coupling Systems add their funcs to (see 'MPMSolver.p2g'), each
-    leaving a separation found by an earlier one as it is.
-    """
-    return i_sep
-
-
-@qd.func
-def func_mpm_cell_velocity(
-    f: int, i_p: int, i_b: int, i_c: int, weight: float, grid_vel: qd.types.vector(3)
-) -> qd.types.vector(3):
-    """
-    Return the velocity a cell of the stencil of a particle contributes to it, of the given weight.
-
-    `i_c` indexes the cell among the 27 of the stencil. The placeholder of the extension point of the transfer from the
-    grid to the particles, which the coupling Systems add their funcs to (see 'MPMSolver.g2p').
-    """
-    return grid_vel
-
-
-@qd.kernel
-def kernel_p2g(
-    f: int,
-    mpm_state: array_class.MPMState,
-    mpm_info: array_class.MPMInfo,
-    static_config: qd.template(),
-    material_dispatcher: qd.template(),
-):
-    """
-    Update the deformation of the active particles of a frame, then scatter their momentum and mass to the grid.
-
-    The material of each particle updates its deformation gradient and plastic volume ratio into the next frame and
-    gives its stress, which enters the momentum. A cell separated from a particle gets nothing from it (see
-    func_mpm_cell_separation). Without gradient, the cells first touched are listed for the sparse reset (see
-    MPMGrid).
-    """
-    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
-        if mpm_state.particles.is_active[f, i_p, i_b]:
-            substep_dt = mpm_info.substep_dt[None]
-            dx = mpm_info.dx[None]
-            inv_dx = mpm_info.inv_dx[None]
-            grid_offset = mpm_info.grid_offset[None]
-
-            # The determinant of F_tmp equals that of S, since U and V of the singular value decomposition are proper
-            # rotations (see MPMStaticConfig). J is declared before the branches, which quadrants scopes locally.
-            J = gs.qd_float(0.0)
-            if qd.static(static_config.is_svd_needed):
-                J = mpm_state.particles.S[f, i_p, i_b].determinant()
-            else:
-                J = mpm_state.particles.F_tmp[f, i_p, i_b].determinant()
-            i_mat = mpm_info.particles.material_idx[i_p]
-            F_new, S_new, Jp_new = material_dispatcher.update_F_S_Jp(
-                i_mat,
-                J,
-                mpm_state.particles.F_tmp[f, i_p, i_b],
-                mpm_state.particles.U[f, i_p, i_b],
-                mpm_state.particles.S[f, i_p, i_b],
-                mpm_state.particles.V[f, i_p, i_b],
-                mpm_state.particles.Jp[f, i_p, i_b],
-            )
-            mpm_state.particles.F[f + 1, i_p, i_b] = F_new
-            mpm_state.particles.Jp[f + 1, i_p, i_b] = Jp_new
-            # The actuation holds over every substep of the step it is set at, and until it is set again
-            mpm_state.particles.actu[f + 1, i_p, i_b] = mpm_state.particles.actu[f, i_p, i_b]
-
-            # The stress takes both the advected deformation gradient and the one once plasticity applies: the elastic
-            # materials read the latter, while a viscous liquid reads the former, whose shear the plasticity removes.
-            # The plastic volume ratio is that of the frame the substep starts from.
-            stress = material_dispatcher.update_stress(
-                i_mat,
-                mpm_state.particles.U[f, i_p, i_b],
-                S_new,
-                mpm_state.particles.V[f, i_p, i_b],
-                mpm_state.particles.F_tmp[f, i_p, i_b],
-                F_new,
-                J,
-                mpm_state.particles.Jp[f, i_p, i_b],
-                mpm_state.particles.actu[f, i_p, i_b],
-                mpm_info.particles.muscle_direction[i_p],
-            )
-            stress = (-substep_dt * mpm_info.particle_volume[None] * 4 * inv_dx * inv_dx) * stress
-            affine = stress + mpm_info.particles.mass[i_p] * mpm_state.particles.C[f, i_p, i_b]
-
-            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
-            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
-                dpos = (offset.cast(gs.qd_float) - fx) * dx
-                weight = gs.qd_float(1.0)
-                for d in qd.static(range(3)):
-                    weight *= w[offset[d], d]
-
-                i_sep = -1
-                i_sep = func_mpm_cell_separation(
-                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], (base + offset) * dx, i_sep
-                )
-                cell_ijk = base - grid_offset + offset
-                if i_sep == -1:
-                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] += weight * (
-                        mpm_info.particles.mass[i_p] * mpm_state.particles.vel[f, i_p, i_b] + affine @ dpos
-                    )
-                    mass_contrib = weight * mpm_info.particles.mass[i_p]
-                    prev_mass = qd.atomic_add(
-                        mpm_state.grid.mass[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b], mass_contrib
-                    )
-                    # The first contribution of an env to a cell claims the cell in the dirty flag shared by the envs,
-                    # and the first env claiming it lists it (see MPMGrid). The masses are non-negative.
-                    if qd.static(not static_config.requires_grad):
-                        if prev_mass <= 0.0 and mass_contrib > 0.0:
-                            dirty_flag_prev = qd.atomic_or(
-                                mpm_state.grid.dirty_flag[cell_ijk[0], cell_ijk[1], cell_ijk[2]], gs.qd_int(1)
-                            )
-                            if dirty_flag_prev == 0:
-                                i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
-                                grid_res_y, grid_res_z = mpm_state.grid.mass.shape[2], mpm_state.grid.mass.shape[3]
-                                i_cell = (cell_ijk[0] * grid_res_y + cell_ijk[1]) * grid_res_z + cell_ijk[2]
-                                mpm_state.grid.dirty_list[i_slot] = i_cell
-
-                # The particles held in place act as boundary conditions of the grid
-                if not mpm_info.particles.is_free[i_p]:
-                    mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] = qd.Vector.zero(
-                        gs.qd_float, 3
-                    )
-
-
-@qd.kernel
-def kernel_g2p(f: int, mpm_state: array_class.MPMState, mpm_info: array_class.MPMInfo, static_config: qd.template()):
-    """
-    Gather the velocity of the grid back to the active particles of a frame and advect them into the next frame.
-
-    A cell contributes the velocity the couplings give it (see func_mpm_cell_velocity). The inactive particles carry
-    their state over to the next frame unchanged.
-    """
-    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
-        if mpm_state.particles.is_active[f, i_p, i_b]:
-            substep_dt = mpm_info.substep_dt[None]
-            inv_dx = mpm_info.inv_dx[None]
-            grid_offset = mpm_info.grid_offset[None]
-
-            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[f, i_p, i_b], inv_dx)
-            new_vel = qd.Vector.zero(gs.qd_float, 3)
-            new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
-                dpos = offset.cast(gs.qd_float) - fx
-                cell_ijk = base - grid_offset + offset
-                grid_vel = mpm_state.grid.vel_out[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b]
-                weight = gs.qd_float(1.0)
-                for d in qd.static(range(3)):
-                    weight *= w[offset[d], d]
-
-                grid_vel = func_mpm_cell_velocity(
-                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], weight, grid_vel
-                )
-
-                new_vel += weight * grid_vel
-                new_C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
-
-            new_pos = mpm_state.particles.pos[f, i_p, i_b] + substep_dt * new_vel
-
-            # The boundary keeps an exploding simulation from reading cells out of the grid
-            new_pos, new_vel = func_impose_cube_boundary(new_pos, new_vel, mpm_info.boundary)
-
-            mpm_state.particles.vel[f + 1, i_p, i_b] = new_vel
-            mpm_state.particles.C[f + 1, i_p, i_b] = new_C
-            mpm_state.particles.pos[f + 1, i_p, i_b] = new_pos
-        else:
-            mpm_state.particles.vel[f + 1, i_p, i_b] = mpm_state.particles.vel[f, i_p, i_b]
-            mpm_state.particles.pos[f + 1, i_p, i_b] = mpm_state.particles.pos[f, i_p, i_b]
-            mpm_state.particles.C[f + 1, i_p, i_b] = mpm_state.particles.C[f, i_p, i_b]
-            mpm_state.particles.F[f + 1, i_p, i_b] = mpm_state.particles.F[f, i_p, i_b]
-            mpm_state.particles.Jp[f + 1, i_p, i_b] = mpm_state.particles.Jp[f, i_p, i_b]
-
-        mpm_state.particles.is_active[f + 1, i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
-
-
 @no_grad
 @qd.kernel(fastcache=True)
 def kernel_flag_non_finite_pos(f: int, mpm_state: array_class.MPMState, errno: qd.Tensor):
@@ -1265,68 +1307,22 @@ def func_backward_svd(
     return u_term + v_term + S_term
 
 
-@qd.func
-def func_mpm_grid_couplings(
-    f: int, i_b: int, pos: qd.types.vector(3), vel: qd.types.vector(3), mass: float
-) -> qd.types.vector(3):
-    """
-    Return the velocity of a cell of the grid holding mass, at the given position and of the given mass, once coupled
-    with the other solvers.
-
-    The placeholder of the extension point of the couplings of the grid, which the coupling Systems add their funcs to
-    (see 'MPMSolver.grid_couplings').
-    """
-    return vel
-
-
-@qd.kernel
-def kernel_mpm_grid_op(
-    f: int,
-    t: float,
-    mpm_state: array_class.MPMState,
-    mpm_info: array_class.MPMInfo,
-    force_fields: qd.template(),
-):
-    """
-    Update the velocity of the cells of the material point method (MPM) grid holding mass.
-
-    The momentum of a cell turns into a velocity, which gravity and the force fields accelerate, the couplings with the
-    other solvers update (see func_mpm_grid_couplings), and the boundary of the solver clamps.
-    """
-    for i_x, i_y, i_z, i_b in qd.ndrange(
-        mpm_state.grid.mass.shape[1],
-        mpm_state.grid.mass.shape[2],
-        mpm_state.grid.mass.shape[3],
-        mpm_state.grid.mass.shape[4],
-    ):
-        if mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] > mpm_info.EPS[None]:
-            substep_dt = mpm_info.substep_dt[None]
-            vel = (1 / mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
-            vel += substep_dt * mpm_info.gravity[i_b]
-            pos = (qd.Vector([i_x, i_y, i_z], dt=gs.qd_int) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
-            mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
-            for i_ff in qd.static(range(len(force_fields.fields))):
-                vel += force_fields.fields[i_ff].get_acc(pos, vel, t, i=-1) * substep_dt
-            vel = func_mpm_grid_couplings(f, i_b, pos, vel, mass)
-            _, mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = func_impose_cube_boundary(pos, vel, mpm_info.boundary)
-
-
 class CellSeparation(System):
     """A System adding the separation of the particles of a cell to the transfer from the particles to the grid."""
 
     slot = MPMSolver.p2g
-    entry = "cell_separation"
+    cell_separation: Stages
 
 
 class GridCoupling(System):
     """A System coupling the velocity of the grid with another solver, between its update and its boundary."""
 
     slot = MPMSolver.grid_couplings
-    entry = "grid_coupling"
+    grid_coupling: Stages
 
 
 class CellVelocity(System):
     """A System adding the velocity of a cell it separates to the transfer from the grid to the particles."""
 
     slot = MPMSolver.g2p
-    entry = "cell_velocity"
+    cell_velocity: Stages

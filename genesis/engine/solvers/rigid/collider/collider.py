@@ -19,7 +19,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.engine.pipeline import Enabled, PhaseSpec, System, register_system
+from genesis.engine.pipeline import Enabled, Phase, Stages, System, register_system
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.data import ConfigItem, DataItem, iter_data
@@ -77,7 +77,7 @@ class Collider(System):
 
     # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients runs the
     # detection as no graph. It is launched apart from the substep around it (see 'RigidSolver._build_substep').
-    detection = PhaseSpec(
+    detection = Phase(
         "broadphase",
         "narrowphase",
         "pruning",
@@ -1083,7 +1083,7 @@ class Broadphase(System):
     """Update the bounding boxes of the geoms, then find the pairs whose boxes overlap, the first detection stage."""
 
     slot = Collider.detection.broadphase
-    entry = "detect"
+    detect: Stages
 
     def __init__(self, collider: Collider, rigid_solver: "RigidSolver") -> None:
         self._collider = collider
@@ -1099,7 +1099,7 @@ class Narrowphase(System):
     """A System detecting the contacts of a family of pairs of geoms, between the broad phase and the pruning."""
 
     slot = Collider.detection.narrowphase
-    entry = "detect"
+    detect: Stages
 
 
 @register_system
@@ -1203,7 +1203,7 @@ class Pruning(System):
     """Clamp the contacts of every environment to its budget and prune those of each pair of links, the last stage."""
 
     slot = Collider.detection.pruning
-    entry = "prune"
+    prune: Stages
 
     def __init__(
         self, collider: Annotated[Collider, Enabled("has_possible_pairs")], rigid_solver: "RigidSolver"

@@ -218,77 +218,24 @@ class RoleOf(NamedTuple):
     role: type
 
 
-class PhaseSpec:
-    """
-    The declaration of a phase a System offers, `detection = PhaseSpec("broadphase", "narrowphase", "pruning")`.
-
-    On the class it names the slots that roles fill, `Collider.detection.narrowphase`, and on a System it is the Phase
-    of that System, its slots running in declaration order. `is_graph` is a flag, or a function of the System, and
-    `is_launched_apart` is passed on to the Phase.
-    """
-
-    def __init__(
-        self, *slots: str, is_graph: "bool | Callable[[System], bool]" = False, is_launched_apart: bool = False
-    ) -> None:
-        self.slots, self.is_graph, self.is_launched_apart = slots, is_graph, is_launched_apart
-        self.owner: type | None = None
-        self.name = ""
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        # A role naming the phase as its slot assigns it again, which leaves its owner
-        if self.owner is None:
-            self.owner, self.name = owner, name
-
-    def __getattr__(self, slot: str) -> SlotRef:
-        if slot not in vars(self).get("slots", ()):
-            raise AttributeError(f"The phase has no slot '{slot}'.")
-        return SlotRef(self.owner, self.name, slot)
-
-    def __get__(self, system: "System | None", owner: type) -> "PhaseSpec | Phase":
-        if system is None:
-            return self
-        is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
-        vars(system)[self.name] = phase = Phase(
-            slots=self.slots, is_graph=is_graph, is_launched_apart=self.is_launched_apart
-        )
-        return phase
-
-
-class InlineSpec:
-    """
-    The declaration of an extension point a System offers in one of its kernels (see Inline), which roles fill.
-
-    On the class it is the slot a role names, `MPMSolver.grid_couplings`. The System creates the Inline under the same
-    name in its constructor, which shadows the declaration.
-    """
-
-    def __init__(self) -> None:
-        self.owner: type | None = None
-        self.name = ""
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        # A role naming the extension point as its slot assigns it again, which leaves its owner
-        if self.owner is None:
-            self.owner, self.name = owner, name
-
-    def __get__(self, system: "System | None", owner: type) -> "InlineSpec":
-        assert system is None, f"{owner.__name__} creates its extension point '{self.name}' in its constructor."
-        return self
+# The entry point of a role: one stage or several, run in order (see 'get_roles')
+type Stages = Callable | tuple[Callable, ...]
 
 
 def get_roles(cls: type) -> list[type]:
     """
     Return the roles a System class plays: the classes it derives from that declare a slot.
 
-    A role is a System class declaring the slot it fills, `slot = Collider.detection.narrowphase`, and the name of the
-    entry point of a System playing it, `entry = "detect"`: a method, a property, a kernel, or a tuple of them run in
-    order. The stage of every System playing the role is routed into the slot (see 'assemble_systems').
+    A role is a System class declaring the slot it fills, `slot = Collider.detection.narrowphase`, and annotating the
+    entry point a System playing it provides, `detect: Stages`: a method, a property, a kernel, a func, or a tuple of
+    them run in order. The stages of every System playing the role are routed into the slot (see 'assemble_systems').
     """
     return [base for base in cls.__mro__ if "slot" in vars(base)]
 
 
-def _get_stages(system: System, entry: str) -> tuple[Any, ...]:
-    """Return the stages an entry point of a System names, its methods bound and its properties evaluated."""
+def _get_stages(system: System, role: type) -> tuple[Any, ...]:
+    """Return the stages of the entry point of a role a System plays, its methods bound and its properties evaluated."""
+    (entry,) = inspect.get_annotations(role)
     value = inspect.getattr_static(system, entry)
     if isinstance(value, property):
         value = value.fget(system)
@@ -432,7 +379,11 @@ def load_generated(source: str, name: str) -> Any:
 
 class Phase:
     """
-    An ordered sequence of stages, which its System runs, split into the `slots` that roles fill (see PhaseSpec).
+    An ordered sequence of stages, which its System runs, split into the `slots` that roles fill.
+
+    Declared on a System class, `detection = Phase("broadphase", "narrowphase", "pruning")`, it names the slots,
+    `Collider.detection.narrowphase`, and every System of the class runs a Phase of its own, `is_graph` being then a
+    flag or a function of the System.
 
     The kernels of a run are fused into one kernel between two Python stages, and captured as a graph with `is_graph`,
     which a kernel holding a device loop (`qd.graph.do_while`) requires. A nested Phase runs inline, fused with the
@@ -443,9 +394,8 @@ class Phase:
 
     def __init__(
         self,
-        *,
-        slots: Sequence[str] = (),
-        is_graph: bool = False,
+        *slots: str,
+        is_graph: "bool | Callable[[System], bool]" = False,
         is_launched_apart: bool = False,
         backward: Callable[[], None] | None = None,
     ) -> None:
@@ -457,6 +407,27 @@ class Phase:
         # The stages, in order, with their arguments
         self.items: list[tuple[Callable, tuple[Any, ...]]] = [(phase, ()) for phase in self.slots.values()]
         self._launches: tuple[Launch, ...] | None = None
+        # The System class declaring the Phase and its attribute, for a declaration (see '__set_name__')
+        self.owner: type | None = None
+        self.name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        # A role naming the phase as its slot assigns it again, which leaves its owner
+        if self.owner is None:
+            self.owner, self.name = owner, name
+
+    def __getattr__(self, slot: str) -> SlotRef:
+        if slot not in vars(self).get("slots", {}):
+            raise AttributeError(f"The phase has no slot '{slot}'.")
+        return SlotRef(self.owner, self.name, slot)
+
+    def __get__(self, system: "System | None", owner: type) -> "Phase":
+        if system is None:
+            return self
+        is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
+        phase = Phase(*self.slots, is_graph=is_graph, is_launched_apart=self.is_launched_apart, backward=self.backward)
+        vars(system)[self.name] = phase
+        return phase
 
     def add(self, *stages: Callable) -> None:
         """Append stages, binding their arguments to the Data of the System they belong to and of its dependencies."""
@@ -570,9 +541,12 @@ class Inline:
     whose call to the placeholder is replaced by the calls of the funcs in turn, taking their Data as parameters of
     their own. The values handed over stay in registers, which the autodiff of the kernel reverses as a whole, unlike a
     sequence of kernels updating the same array in place. The other parameters of the kernel are bound to the Data of
-    the System declaring the extension point when it binds it (see 'bind'), and those that none provides are call
-    arguments, given by name when it runs. A parameter of a func that the scope of its System leaves unbound takes the
-    value the kernel binds to that name.
+    the System declaring the extension point once it is built, and those that none provides are call arguments, given
+    by name when it runs. A parameter of a func that the scope of its System leaves unbound takes the value the kernel
+    binds to that name.
+
+    Declared on a System class, `grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)`, it is the slot
+    that roles name, `MPMSolver.grid_couplings`, and every System of the class runs an extension point of its own.
 
     `run_without_funcs` false skips the kernel while no func is added, for a kernel doing nothing but hand the values
     over: its writes of the values it read back would race on their adjoints in a parallel reverse pass.
@@ -586,16 +560,26 @@ class Inline:
         self.items: list[tuple[Callable, tuple[Any, ...]]] = []
         self._args: tuple[Any, ...] | None = None
         self._launch: tuple[Callable, tuple[Any, ...]] | None = None
+        # The System class declaring the extension point and its attribute, for a declaration (see '__set_name__')
+        self.owner: type | None = None
+        self.name = ""
 
-    def bind(self, **values: Any) -> None:
-        """
-        Bind the parameters of the kernel to the Data of the System declaring the extension point, as it builds.
+    def __set_name__(self, owner: type, name: str) -> None:
+        # A role naming the extension point as its slot assigns it again, which leaves its owner
+        if self.owner is None:
+            self.owner, self.name = owner, name
 
-        `values` binds parameters by name to values of its own, such as objects the System reaches through a property.
-        """
+    def __get__(self, system: "System | None", owner: type) -> "Inline":
+        if system is None:
+            return self
+        inline = Inline(self.kernel, self.hook, run_without_funcs=self._is_run_without_funcs)
+        vars(system)[self.name] = inline
+        return inline
+
+    def bind(self) -> None:
+        """Bind the parameters of the kernel to the Data of the System declaring the extension point, once built."""
         scope, _ = _get_scope()
-        parameters = inspect.signature(self.kernel.fn).parameters
-        self._args = tuple([values[name] if name in values else _bind(scope, name) for name in parameters])
+        self._args = tuple([_bind(scope, name) for name in inspect.signature(self.kernel.fn).parameters])
 
     def add(self, *funcs: Callable) -> None:
         """Append funcs, binding their Data parameters to the Data of the System composing and of its dependencies."""
@@ -979,8 +963,24 @@ def assemble_systems(
         return (2 if _is_component(type(system)) else 0), 0
 
     systems = sorted(systems, key=get_rank)
+    # The extension points a System declares bind their kernel to its Data, whether or not a role fills them. A role
+    # holds the extension point it fills as its slot, which its owner alone declares.
+    for system in systems:
+        for name in [
+            name
+            for base in type(system).__mro__
+            for name, value in vars(base).items()
+            if isinstance(value, Inline) and value.owner is base and value.name == name
+        ]:
+            with _scoped(system):
+                _get_declared(system, name).bind()
     _route_roles(systems)
     return systems
+
+
+def _get_declared(system: System, name: str) -> "Phase | Inline":
+    """Return the Phase or the extension point a System class declares under a name, that of the System itself."""
+    return vars(system).get(name) or inspect.getattr_static(system, name).__get__(system, type(system))
 
 
 def _route_roles(systems: Sequence[System]) -> None:
@@ -1005,7 +1005,7 @@ def _route_roles(systems: Sequence[System]) -> None:
             if any([role_of in superseded_roles for role_of in role_ofs]):
                 continue
             slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
-            slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (PhaseSpec, InlineSpec)) else slot
+            slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot
             owners = [dep for dep in system._dependencies if isinstance(dep, slot.owner)] or [
                 other for other in systems if isinstance(other, slot.owner)
             ]
@@ -1013,10 +1013,8 @@ def _route_roles(systems: Sequence[System]) -> None:
                 raise TypeError(
                     f"{type(system).__name__} plays {role.__name__}, which {len(owners)} {slot.owner.__name__} offer."
                 )
-            target = inspect.getattr_static(owners[0], slot.attr)
-            if isinstance(target, PhaseSpec):
-                target = target.__get__(owners[0], type(owners[0]))
+            target = _get_declared(owners[0], slot.attr)
             if slot.slot is not None:
                 target = target.slots[slot.slot]
             with _scoped(system):
-                target.add(*_get_stages(system, role.entry))
+                target.add(*_get_stages(system, role))

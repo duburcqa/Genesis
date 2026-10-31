@@ -165,12 +165,12 @@ The System offering a phase defines its slots and the roles that fill them. A pa
 
 ```python
 class Collider(System):
-    detection = PhaseSpec("broadphase", "narrowphase", "pruning", is_graph=True)
+    detection = Phase("broadphase", "narrowphase", "pruning", is_graph=True)
 
 class Narrowphase(System):
     """Detect the contacts of one pair family, after the broadphase, before the pruning."""
     slot = Collider.detection.narrowphase
-    entry = "detect"                                    # the entry point every narrowphase provides
+    detect: Stages                                    # the entry point every narrowphase provides
 ```
 
 An entry point is a kernel, a func of an extension point, a method, a property, or a tuple of them run in order.
@@ -436,14 +436,12 @@ Some couplings must run inside another System's kernel, on values held in regist
 
 ```python
 class MPMSolver(Solver):
-    grid_couplings = InlineSpec()                        # the slot, on the class
-
-    def __init__(self, ...) -> None:
-        self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)   # vel = hook(f, i_b, pos, vel, mass)
+    # the slot: the kernel and its placeholder, vel = hook(f, i_b, pos, vel, mass), its arguments bound by name
+    grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
 
 class GridCoupling(System):
     slot = MPMSolver.grid_couplings
-    entry = "grid_coupling"
+    grid_coupling: Stages
 
 class RigidMPM(GridCoupling):
     grid_coupling = func_mpm_rigid                       # inlined into MPMSolver.grid_couplings

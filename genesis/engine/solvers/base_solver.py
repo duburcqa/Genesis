@@ -221,7 +221,8 @@ class Solver(RBC, Dynamics, Integration):
         # valid from then on since the arrays are never reallocated, which spares walking the structs at every step
         self._boundary_items: BoundaryItems | None = None
 
-        self._force_fields_dispatcher = ForceFieldsDispatcher()
+        # The force fields acting on the solver, as the template argument its kernels and the couplers take
+        self.force_fields_dispatcher = ForceFieldsDispatcher()
 
         # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
         # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
@@ -250,7 +251,7 @@ class Solver(RBC, Dynamics, Integration):
         self._errno_host_context: str | None = None
 
     def _add_force_field(self, force_field):
-        self._force_fields_dispatcher.fields.append(force_field)
+        self.force_fields_dispatcher.fields.append(force_field)
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""
@@ -703,12 +704,7 @@ class Solver(RBC, Dynamics, Integration):
 
     @property
     def force_fields(self) -> list[ForceField]:
-        return self._force_fields_dispatcher.fields
-
-    @property
-    def force_fields_dispatcher(self) -> ForceFieldsDispatcher:
-        """The force fields acting on the solver, as the template argument its kernels and the couplers take."""
-        return self._force_fields_dispatcher
+        return self.force_fields_dispatcher.fields
 
     def _repr_brief(self):
         repr_str = f"{self.__repr_name__()}: {self._uid}, n_entities: {self.n_entities}"

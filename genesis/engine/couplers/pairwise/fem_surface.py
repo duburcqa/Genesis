@@ -5,7 +5,7 @@ from quadrants.lang._quadrants_callable import QuadrantsCallable
 
 import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import func_impose_floor_boundary
-from genesis.engine.pipeline import Inline, InlineSpec, System, register_system
+from genesis.engine.pipeline import Inline, Stages, System, register_system
 from genesis.engine.solvers.fem_solver import FEMSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
@@ -82,13 +82,10 @@ class FEMSurface(Coupling):
     The couplings of the surface vertices are the funcs of the Systems playing SurfaceCoupling.
     """
 
-    surface_couplings = InlineSpec()
+    surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings, run_without_funcs=False)
 
     def __init__(self, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
-        self.surface_couplings = Inline(kernel_fem_surface, func_fem_surface_couplings, run_without_funcs=False)
-
-    def build(self) -> None:
-        self.surface_couplings.bind()
+        pass
 
     @property
     def couple(self) -> tuple[Inline, QuadrantsCallable]:
@@ -99,4 +96,4 @@ class SurfaceCoupling(System):
     """A System coupling the velocity of the surface vertices of the FEM entities with another solver."""
 
     slot = FEMSurface.surface_couplings
-    entry = "surface_coupling"
+    surface_coupling: Stages

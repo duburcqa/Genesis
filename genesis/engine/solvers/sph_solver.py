@@ -221,7 +221,7 @@ class SPHSolver(ParticleSolver):
             if self._pressure_solver == "WCSPH":
                 kernel_compute_rho(self.sph_state, self.sph_info)
                 kernel_compute_non_pressure_forces(
-                    self._sim.cur_t, self.sph_state, self.sph_info, self._force_fields_dispatcher
+                    self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
                 )
                 kernel_compute_pressure_forces(self.sph_state, self.sph_info)
                 kernel_advect_velocity(self.sph_state, self.sph_info)
@@ -231,7 +231,7 @@ class SPHSolver(ParticleSolver):
                 self._divergence_solve()
                 kernel_advect_velocity(self.sph_state, self.sph_info)
                 kernel_compute_non_pressure_forces(
-                    self._sim.cur_t, self.sph_state, self.sph_info, self._force_fields_dispatcher
+                    self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
                 )
                 kernel_advect_velocity(self.sph_state, self.sph_info)
                 self._density_solve()
