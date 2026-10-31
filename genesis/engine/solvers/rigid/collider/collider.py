@@ -26,6 +26,8 @@ from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
+    get_gpu_cores_per_unit,
+    has_zerocopy_view,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -110,33 +112,30 @@ class Collider(System):
 
         self._init_collision_fields()
 
-        if gs.use_zerocopy:
-            # Probe every view the zero-copy contact query needs (including the per-call n_contacts and
-            # contact_sort_idx ones, which qd_to_torch caches on their fields). If any field sits past 2**31 bytes
-            # in its SNode tree no zero-copy view exists, and get_contacts falls back to the gather-kernel path.
-            self._contact_data: dict[str, torch.Tensor] | None = {}
-            try:
-                qd_to_torch(self.collider_state.n_contacts, copy=False)
-                qd_to_torch(self.collider_state.contact_sort_idx, transpose=True, copy=False)
-                qd_to_torch(self.collider_state.first_time, copy=False)
-                if self.collider_config.has_non_box_plane_convex_convex:
-                    qd_to_torch(self.collider_state.contact_cache.normal, copy=False)
-                    qd_to_torch(self.collider_state.contact_cache.penetration, copy=False)
-                for key, name in (
-                    ("link_a", "link_a"),
-                    ("link_b", "link_b"),
-                    ("geom_a", "geom_a"),
-                    ("geom_b", "geom_b"),
-                    ("penetration", "penetration"),
-                    ("position", "pos"),
-                    ("normal", "normal"),
-                    ("force", "force"),
-                ):
-                    self._contact_data[key] = qd_to_torch(
-                        getattr(self.collider_state.contact_data, name), transpose=True, copy=False
-                    )
-            except ValueError:
-                self._contact_data = None
+        # The query of the contacts reads these arrays through zero-copy views when they all have one, else gathers them
+        # through a kernel (see 'get_contacts'). The views of n_contacts and contact_sort_idx are cached on their fields.
+        collider_state = self.collider_state
+        contact_data = collider_state.contact_data
+        contact_arrays = dict(
+            link_a=contact_data.link_a,
+            link_b=contact_data.link_b,
+            geom_a=contact_data.geom_a,
+            geom_b=contact_data.geom_b,
+            penetration=contact_data.penetration,
+            position=contact_data.pos,
+            normal=contact_data.normal,
+            force=contact_data.force,
+        )
+        query_arrays = [collider_state.n_contacts, collider_state.contact_sort_idx, collider_state.first_time]
+        if self.collider_config.has_non_box_plane_convex_convex:
+            query_arrays += [collider_state.contact_cache.normal, collider_state.contact_cache.penetration]
+        self._contact_data: dict[str, torch.Tensor] | None = None
+        if all([has_zerocopy_view(array) for array in (*query_arrays, *contact_arrays.values())]):
+            qd_to_torch(collider_state.n_contacts, copy=False)
+            qd_to_torch(collider_state.contact_sort_idx, transpose=True, copy=False)
+            self._contact_data = {
+                key: qd_to_torch(array, transpose=True, copy=False) for key, array in contact_arrays.items()
+            }
 
         # Make sure that the initial state is clean
         self.clear()

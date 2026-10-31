@@ -859,6 +859,22 @@ def _apply_masks(out, value, row_mask, col_mask, keepdim, copy, *, to_torch):
     return out[mask]
 
 
+def has_zerocopy_view(value: "qd.Tensor | qd.Field | qd.Ndarray") -> bool:
+    """
+    Return whether a quadrants array has a zero-copy torch view, which 'qd_to_torch' then returns without copying.
+
+    'gs.use_zerocopy' resolves the conditions of the platform. Beyond them, DLPack carries 32-bit and 64-bit integers
+    and floats and booleans alone, and a field holding one scalar without dimensions has no view.
+    """
+    if isinstance(value, qd.Tensor):
+        value = value._unwrap()
+    return (
+        gs.use_zerocopy.is_supported
+        and value.dtype in (qd.f32, qd.f64, qd.i32, qd.i64, qd.u1)
+        and (bool(value.shape) or not isinstance(value, qd.ScalarField))
+    )
+
+
 def qd_to_torch(
     value: qd.Tensor | qd.Field | qd.Ndarray,
     row_mask: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None = None,
@@ -901,16 +917,17 @@ def qd_to_torch(
             tensor = value._T_tc if transpose else value._tc
             is_copy = False
         except AttributeError:
-            try:
-                tc = value.to_torch(copy=False)
-            except (ValueError, RuntimeError, TypeError):
+            if not has_zerocopy_view(value):
                 if copy is False:
-                    raise
+                    gs.raise_exception(
+                        f"Specifying 'copy=False' is not supported by an array of {value.dtype} {value.shape}."
+                    )
                 # See the copy without zero-copy support above
                 tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
                 tensor = tensor.clone(memory_format=torch.contiguous_format)
                 is_copy = True
             else:
+                tc = value.to_torch(copy=False)
                 value._tc = tc
                 value._T_tc = _maybe_transpose(tc, value, True)
                 if isinstance(value, qd.Ndarray):
@@ -1158,15 +1175,8 @@ def qd_zero_grad(value) -> None:
     if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
         if value.has_grad():
             grad = value.grad
-            if gs.use_zerocopy.is_supported:
-                try:
-                    grad_view = qd_to_torch(grad, copy=False)
-                    grad_view.zero_()
-                except ValueError:
-                    # No zero-copy view for this buffer (e.g. an interleaved AOS struct member, or a field whose
-                    # in-tree byte offset the installed torch cannot carry through DLPack); fill it in place through
-                    # quadrants instead.
-                    grad.fill(0.0)
+            if has_zerocopy_view(grad):
+                qd_to_torch(grad, copy=False).zero_()
             else:
                 grad.fill(0.0)
         return

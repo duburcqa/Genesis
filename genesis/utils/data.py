@@ -23,7 +23,7 @@ from quadrants.lang.util import to_numpy_type
 
 import genesis as gs
 from genesis.typing import StrictBool, StrictInt, ValidFloat
-from genesis.utils.misc import data_to_array, get_own_annotations
+from genesis.utils.misc import data_to_array, get_own_annotations, has_zerocopy_view
 
 
 # FIXME: quadrants#936 - a vector or matrix tensor takes no layout, so those read environment by environment are
@@ -910,12 +910,8 @@ def fill_data(
         view = None
         if isinstance(item.array, torch.Tensor):
             view = item.array
-        elif gs.use_zerocopy.is_supported:
-            try:
-                view = data_to_array(item.array, to_torch=True, copy=False)
-            except ValueError:
-                # A member of a struct field may have no zero-copy view (see 'qd_zero_grad')
-                pass
+        elif has_zerocopy_view(item.array):
+            view = data_to_array(item.array, to_torch=True, copy=False)
         if view is not None:
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
             (view[0] if frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))

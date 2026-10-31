@@ -24,6 +24,7 @@ from genesis.utils.misc import (
     broadcast_tensor,
     data_to_array,
     drop_repeated_index,
+    has_zerocopy_view,
     indices_to_mask,
     make_static_tuple,
     qd_add_grad,
@@ -579,33 +580,24 @@ class Solver(RBC, Dynamics, Integration):
                         continue
                     if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
                         grad_names.add(f"{item.name}.grad")
-                        grad = None
-                        if gs.use_zerocopy.is_supported:
-                            try:
-                                grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
-                            except ValueError:
-                                # See 'fill_data'
-                                pass
-                        if grad is None:
-                            self._boundary_items.items_grad_copied.append(item)
-                        else:
+                        if has_zerocopy_view(item.array.grad):
+                            grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
                             self._boundary_items.grads.append(grad[..., None])
+                        else:
+                            self._boundary_items.items_grad_copied.append(item)
                 self._boundary_items.items.append(item)
                 if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
                     self._boundary_items.items_copied.append(item)
                     continue
                 if isinstance(item.array, torch.Tensor):
                     view = item.array
+                elif not has_zerocopy_view(item.array):
+                    self._boundary_items.items_copied.append(item)
+                    continue
+                elif self.has_frames:
+                    view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
                 else:
-                    try:
-                        if self.has_frames:
-                            view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
-                        else:
-                            view = qd_to_torch(item.array, copy=False)
-                    except ValueError:
-                        # A member of a struct field may have no zero-copy view (see 'fill_data')
-                        self._boundary_items.items_copied.append(item)
-                        continue
+                    view = qd_to_torch(item.array, copy=False)
                 self._boundary_items.names.append(item.name)
                 self._boundary_items.views.append(view)
         if self._boundary_items.views:
