@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import weakref
+from collections.abc import Iterator
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
@@ -12,12 +13,12 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
+from genesis.engine.pipeline import Coupler
 from genesis.engine.step import Step
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
+from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
-
-from ..base import Coupler
 
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
@@ -894,8 +895,45 @@ class IPCCoupler(RBC, Coupler):
         return bool(self._coup_type_by_entity)
 
     @property
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        gs.raise_exception("A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own.")
+
+    @property
     def is_simulating_rigid_first(self) -> bool:
         return self.has_any_rigid_coupling
+
+    @property
+    def is_simulating_fem(self) -> bool:
+        return True
+
+    @property
+    def is_using_rigid_coup_type(self) -> bool:
+        return True
+
+    @property
+    def rigid_links_idx_simulated(self) -> set[int]:
+        return {
+            link.idx
+            for entity in self.sim.rigid_solver.entities
+            if entity.material.needs_coup and entity.material.coup_type == "ipc_only"
+            for link in entity.links
+        }
+
+    @property
+    def rigid_links_idx_contacting(self) -> set[int]:
+        """
+        Return the indices of the rigid links added to IPC (see '_add_rigid_geoms_to_ipc'): the links named by the
+        material of a 'two_way_soft_constraint' entity filtering its links, every link of any other coupled entity.
+        """
+        links_idx = set()
+        for entity in self.sim.rigid_solver.entities:
+            if not entity.material.needs_coup or entity.material.coup_type is None:
+                continue
+            if entity.material.coup_type == "two_way_soft_constraint" and entity.material.coup_links is not None:
+                links_idx.update([entity.get_link(name=name).idx for name in entity.material.coup_links])
+            else:
+                links_idx.update([link.idx for link in entity.links])
+        return links_idx
 
     # ============================================================
     # Section 3: Helpers

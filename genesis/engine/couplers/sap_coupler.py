@@ -14,6 +14,7 @@ import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
+from genesis.engine.pipeline import Coupler
 from genesis.engine.solvers.fem_solver import func_compute_element_mapping_matrix
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
@@ -23,8 +24,6 @@ from genesis.repr_base import RBC
 from genesis.utils.array_class import FixedOrderSums, SAPState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch
 from genesis.utils.sort import func_sort_segments, get_segment_sort_data
-
-from .base import Coupler
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -449,7 +448,7 @@ class SAPCoupler(RBC, Coupler):
 
         if self._is_fem_hydroelastic:
             self.sap_state.hydroelastic_fem.pressure.from_numpy(
-                np.concatenate([fem_entity.pressure_field_np for fem_entity in fem_solver.entities])
+                np.concatenate([fem_entity.compute_pressure_field() for fem_entity in fem_solver.entities])
             )
         if self._is_rigid_hydroelastic:
             rigid_volume = self.sap_state.rigid_volume

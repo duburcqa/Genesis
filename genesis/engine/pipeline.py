@@ -102,6 +102,43 @@ class System:
         )
 
 
+class Coupler(System):
+    """
+    A System solving the interactions of several solvers at once, which the solvers it couples arrange their substep
+    around.
+    """
+
+    @property
+    def is_solving_rigid_constraints(self) -> bool:
+        """Whether the coupler solves the constraints of the rigid entities, between their dynamics and integration."""
+        return False
+
+    @property
+    def is_simulating_rigid_first(self) -> bool:
+        """Whether the coupler simulates the rigid entities it couples before the rigid solver runs its substep."""
+        return False
+
+    @property
+    def is_simulating_fem(self) -> bool:
+        """Whether the coupler computes the dynamics of the FEM entities in place of the FEM solver."""
+        return False
+
+    @property
+    def is_using_rigid_coup_type(self) -> bool:
+        """Whether the coupler couples every rigid entity the way the `coup_type` of its material sets."""
+        return False
+
+    @property
+    def rigid_links_idx_simulated(self) -> set[int]:
+        """Return the indices of the rigid links the coupler simulates alone, which take part in no rigid contact."""
+        return set()
+
+    @property
+    def rigid_links_idx_contacting(self) -> set[int]:
+        """Return the indices of the rigid links whose contacts with each other the coupler resolves."""
+        return set()
+
+
 def register_system(cls: type[System]) -> type[System]:
     """Declare a System the Engine builds whenever a scene provides every dependency of its constructor."""
     _SYSTEM_CLASSES.append(cls)

@@ -923,6 +923,14 @@ class KinematicEntity(Entity):
     # ------------------------------------------------------------------------------------
 
     @property
+    def _coup_type(self) -> str | None:
+        """Return the coupling type the material of the entity sets, None where the coupler of the scene ignores it."""
+        coupler = self.sim.coupler
+        if coupler is None or not coupler.is_using_rigid_coup_type:
+            return None
+        return self.material.coup_type
+
+    @property
     def is_built(self):
         """
         Whether this rigid entity is built.
@@ -1578,15 +1586,8 @@ class RigidEntity(KinematicEntity):
         # masks happen not to overlap (e.g. the ground plane).
         self._is_local_collision_mask = isinstance(self._morph, (gs.morphs.MJCF, gs.morphs.USD))
 
-        # Imported here since the couplers import the rigid entity package
-        from genesis.engine.couplers import IPCCoupler
-
         # Make sure that the entity is not object
-        if (
-            isinstance(self.sim.coupler, IPCCoupler)
-            and self.material.coup_type == "ipc_only"
-            and any(l_desc.is_robot for l_desc in self._desc.links)
-        ):
+        if self._coup_type == "ipc_only" and any(l_desc.is_robot for l_desc in self._desc.links):
             gs.raise_exception("`RigidMaterial.coup_type='ipc_only'` only supported by rigid non-articulated objects.")
 
         super()._load_model()
@@ -2179,9 +2180,7 @@ class RigidEntity(KinematicEntity):
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting position. Defaults to False.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type is not None and self.base_link.is_fixed:
+        if self._coup_type is not None and self.base_link.is_fixed:
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
@@ -2208,9 +2207,7 @@ class RigidEntity(KinematicEntity):
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting quaternion. Defaults to False.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type is not None and self.base_link.is_fixed:
+        if self._coup_type is not None and self.base_link.is_fixed:
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
@@ -2269,9 +2266,7 @@ class RigidEntity(KinematicEntity):
             Whether to zero the velocity of all the entity's dofs. Defaults to True. This is a safety measure after a
             sudden change in entity pose.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
+        if self._coup_type == "external_articulation":
             gs.raise_exception("This method is not supported by `RigidMaterial.coup_type='external_articulation'`.")
         super().set_qpos(qpos, qs_idx_local, envs_idx, zero_velocity=zero_velocity, skip_forward=skip_forward)
 
@@ -2447,9 +2442,7 @@ class RigidEntity(KinematicEntity):
             Whether to zero the velocity of all the entity's dofs. Defaults to True. This is a safety measure after a
             sudden change in entity pose.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
+        if self._coup_type == "external_articulation":
             gs.raise_exception("This method is not supported by `RigidMaterial.coup_type='external_articulation'`.")
         super().set_dofs_position(position, dofs_idx_local, envs_idx, zero_velocity=zero_velocity)
 
@@ -2471,9 +2464,7 @@ class RigidEntity(KinematicEntity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if self._coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2493,9 +2484,7 @@ class RigidEntity(KinematicEntity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if self._coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2516,9 +2505,7 @@ class RigidEntity(KinematicEntity):
         envs_idx : array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if self._coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2540,9 +2527,7 @@ class RigidEntity(KinematicEntity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if self._coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)

@@ -210,12 +210,6 @@ class FEMEntity(Entity):
             unique_el = tri2el.flat[unique_idcs]
             self._surface_el_np = unique_el[cnt == 1]
 
-        # Imported here to avoid a circular dependency, the couplers importing the FEM solver
-        from genesis.engine.couplers import SAPCoupler
-
-        if isinstance(self.sim.coupler, SAPCoupler):
-            self.compute_pressure_field()
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- basic entity ops -------------------------------
     # ------------------------------------------------------------------------------------
@@ -463,9 +457,9 @@ class FEMEntity(Entity):
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
 
-    def compute_pressure_field(self):
+    def compute_pressure_field(self) -> np.ndarray:
         """
-        Compute the pressure field for the FEM entity based on its tetrahedral elements.
+        Return the pressure field of the FEM entity at its vertices, from its tetrahedral elements.
 
         For hydroelastic contact: https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
 
@@ -489,7 +483,7 @@ class FEMEntity(Entity):
                 f"Pressure field max distance is too small: {max_distance}. "
                 "This might be due to a mesh having no internal vertices."
             )
-        self.pressure_field_np = unsigned_distance / max_distance * self.material.hydroelastic_modulus  # normalize
+        return unsigned_distance / max_distance * self.material.hydroelastic_modulus
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------

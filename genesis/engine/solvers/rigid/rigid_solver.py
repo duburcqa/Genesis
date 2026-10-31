@@ -10,10 +10,9 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
-from genesis.engine.couplers.base import Coupler
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
-from genesis.engine.pipeline import Phase, System
+from genesis.engine.pipeline import Coupler, Phase, System
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.engine.step import Step

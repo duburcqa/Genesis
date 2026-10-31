@@ -422,12 +422,6 @@ class Collider(System):
         Returns (n_possible_pairs, collision_pair_idx, pair_flags) where pair_flags is a dict of booleans
         for has_terrain, has_non_box_plane_convex_convex, has_convex_specialization, has_nonconvex_nonterrain.
         """
-        # Links whose contact is handled by an external solver (e.g. IPC) are excluded from GJK collision.
-        # Only applies when the IPC coupler is active. Mirrors the link filtering logic in
-        # IPCCoupler._add_rigid_geoms_to_ipc: for two_way_soft_constraint with a link filter,
-        # only the filtered links are in IPC; for all other coupling modes, all links are in IPC.
-        from genesis.engine.couplers import IPCCoupler
-
         n_geoms = self._solver.n_geoms
         geoms = self._solver.geoms
 
@@ -436,24 +430,10 @@ class Collider(System):
             empty_mask = np.zeros((0,), dtype=bool)
             return 0, np.full((0, 0), -1, dtype=gs.np_int), empty_pairs, False, False, False, False, empty_mask
 
-        # Links delegated to IPC coupler (skip pair only when BOTH are IPC-handled)
-        ipc_delegated_link_idxs = set()
-        ipc_only_link_idxs = set()
-        if isinstance(self._solver.sim.coupler, IPCCoupler):
-            for entity in self._solver._entities:
-                if not entity.material.needs_coup:
-                    continue
-                mode = entity.material.coup_type
-                if mode is None:
-                    continue
-                if mode == "ipc_only":
-                    ipc_only_link_idxs.update(l.idx for l in entity.links)
-                link_filter_names = entity.material.coup_links
-                if mode == "two_way_soft_constraint" and link_filter_names is not None:
-                    for name in link_filter_names:
-                        ipc_delegated_link_idxs.add(entity.get_link(name=name).idx)
-                else:
-                    ipc_delegated_link_idxs.update(l.idx for l in entity.links)
+        # A coupler resolving the contacts of some links leaves the rigid solver the pairs it does not resolve
+        coupler = self._solver.sim.coupler
+        links_idx_contacting = set() if coupler is None else coupler.rigid_links_idx_contacting
+        links_idx_simulated = set() if coupler is None else coupler.rigid_links_idx_simulated
 
         # Pre-compute per-geom properties into numpy arrays for vectorized filtering
         geom_link_idx = np.array([g.link.idx for g in geoms], dtype=np.int32)
@@ -463,8 +443,8 @@ class Collider(System):
         geom_contype = np.array([g.contype for g in geoms], dtype=np.int64)
         geom_conaffinity = np.array([g.conaffinity for g in geoms], dtype=np.int64)
         geom_local_mask = np.array([g.entity.is_local_collision_mask for g in geoms], dtype=bool)
-        geom_is_ipc_only = np.array([g.link.idx in ipc_only_link_idxs for g in geoms], dtype=bool)
-        geom_is_ipc_deleg = np.array([g.link.idx in ipc_delegated_link_idxs for g in geoms], dtype=bool)
+        geom_is_simulated = np.array([g.link.idx in links_idx_simulated for g in geoms], dtype=bool)
+        geom_is_contacting = np.array([g.link.idx in links_idx_contacting for g in geoms], dtype=bool)
         geom_type = np.array([g.type for g in geoms], dtype=np.int32)
         geom_is_convex = np.array([g.is_convex for g in geoms], dtype=bool)
 
@@ -484,12 +464,9 @@ class Collider(System):
         # geoms in the same link
         valid = link_a != link_b
 
-        # Skip all pairs involving ipc_only links
-        valid &= ~geom_is_ipc_only[row]
-        valid &= ~geom_is_ipc_only[col]
-
-        # Skip pairs where both links are delegated to IPC
-        valid &= ~(geom_is_ipc_deleg[row] & geom_is_ipc_deleg[col])
+        valid &= ~geom_is_simulated[row]
+        valid &= ~geom_is_simulated[col]
+        valid &= ~(geom_is_contacting[row] & geom_is_contacting[col])
 
         # pair of fixed links wrt the world
         valid &= ~(geom_is_fixed[row] & geom_is_fixed[col])

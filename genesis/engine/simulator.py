@@ -16,7 +16,7 @@ from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, SAPCoupler
-from .pipeline import Engine, System
+from .pipeline import Coupler, Engine, System
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -132,7 +132,7 @@ class Simulator(RBC):
         # The coupler solving the couplings of the scene at once, if any. LegacyCouplerOptions enable
         # couplings between pairs of solvers instead, which are Systems of their own (see genesis/engine/couplers/pairwise).
         self._coupler_options = options.coupler
-        self._coupler: SAPCoupler | IPCCoupler | None = None
+        self._coupler: Coupler | None = None
         if isinstance(options.coupler, SAPCouplerOptions):
             self._coupler = SAPCoupler(self, options.coupler)
         elif isinstance(options.coupler, IPCCouplerOptions):
@@ -244,7 +244,7 @@ class Simulator(RBC):
         )
 
         # solvers
-        # IPCCoupler needs full substep flow for pre/post coupling phases
+        # A scene with a coupler, or with solvers other than the rigid one, runs the full step
         self._rigid_only = self.rigid_solver.is_active and self._coupler is None
         for solver in self._solvers:
             solver.build()
@@ -346,10 +346,6 @@ class Simulator(RBC):
 
         The items of the simulator are named under 'Simulator', and the ones of a solver under its class name.
         """
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         for item in iter_data(self, "steps", DataKind.STATE):
             if item.kind in kinds:
                 yield item._replace(name=f"Simulator.{item.name}")
@@ -361,10 +357,6 @@ class Simulator(RBC):
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
             systems={type(system).__name__: system.__getstate__() for system in self.checkpointed_systems},
