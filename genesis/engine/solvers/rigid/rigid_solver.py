@@ -1591,6 +1591,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
             )
 
+    def get_parts(self) -> "tuple[Collider, ...]":
+        """Return the collider, whose Data the couplings of the rigid geoms read (see 'Collider')."""
+        return () if self.collider is None else (self.collider,)
+
     def substep_pre_coupling(self, f):
         if self.is_active:
             # Skip rigid body computation when using IPCCoupler (IPC handles rigid simulation)
@@ -3144,10 +3148,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=True)
 
     def get_AABB(self, entities_idx=None, envs_idx=None):
-        from genesis.engine.couplers import LegacyCoupler
-
-        if not isinstance(self.sim.coupler, LegacyCoupler):
-            gs.raise_exception("Method only supported when using 'LegacyCoupler' coupler type.")
+        if self.sim.coupler is not None:
+            gs.raise_exception("Method only supported with the options of the legacy coupler.")
 
         aabb_min = qd_to_torch(self.dyn_state.geoms.aabb_min, envs_idx, transpose=True)
         aabb_max = qd_to_torch(self.dyn_state.geoms.aabb_max, envs_idx, transpose=True)

@@ -350,7 +350,15 @@ class PBDSolver(ParticleSolver):
         _, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
-        self._sim._coupler.attach_pbd_particles_to_link(particles_idx, envs_idx, link_idx)
+        # Imported here to break the import cycle between the couplings and the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidPBD
+
+        rigid_pbd = self._sim.get_system(RigidPBD)
+        if rigid_pbd is None:
+            gs.raise_exception(
+                "Attaching particles to a link requires the PBD solver to be coupled with the rigid solver."
+            )
+        rigid_pbd.attach_particles(particles_idx, envs_idx, link_idx)
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
@@ -360,7 +368,12 @@ class PBDSolver(ParticleSolver):
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
         kernel_set_particles_free(particles_idx, envs_idx, self.pbd_state, free=True)
-        self._sim._coupler.detach_pbd_particles(particles_idx, envs_idx)
+        # Imported here to break the import cycle between the couplings and the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidPBD
+
+        rigid_pbd = self._sim.get_system(RigidPBD)
+        if rigid_pbd is not None:
+            rigid_pbd.detach_particles(particles_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

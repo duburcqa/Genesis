@@ -16,11 +16,13 @@ its own instead, since the launch recorder of the differentiable simulation reve
 genesis/grad/bridge.py), whose tags (`no_grad`, `register_custom_backward`, `reversed_with`) apply as usual.
 """
 
+import ast
 import hashlib
 import importlib.util
 import inspect
 import os
 import sys
+import textwrap
 import types
 import typing
 from collections.abc import Callable, Sequence
@@ -51,6 +53,9 @@ class System:
     class, `X | None` for an optional one. A System the Engine builds also takes them as the parameters of its
     constructor, which decide whether it exists (see register_system).
     """
+
+    # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
+    is_differentiable: bool = True
 
     @classmethod
     def create(cls, *args: Any, **kwargs: Any) -> "System | None":
@@ -146,6 +151,17 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
     lines += ["", "", decorator, f"def {name}({signature}):", *calls, ""]
     source = "\n".join(lines)
 
+    return load_generated(source, name), tuple(annotations)
+
+
+def load_generated(source: str, name: str) -> Any:
+    """
+    Return the object of the given name a generated source defines, written to the cache directory and imported from
+    there.
+
+    The fastcache of Quadrants reads the source of a kernel from its file, and a file named after the hash of its content
+    stays valid across processes. The module is imported once per process.
+    """
     path = os.path.join(get_cache_dir(), "pipeline", f"{hashlib.sha1(source.encode()).hexdigest()[:16]}.py")
     if not os.path.exists(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -161,7 +177,7 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-    return vars(module)[name], tuple(annotations)
+    return vars(module)[name]
 
 
 class Phase:
@@ -185,7 +201,7 @@ class Phase:
         """Append stages, binding their arguments to the Data of the System composing and of its dependencies."""
         assert _scope is not None, "A stage is added while its System composes."
         for stage in stages:
-            if isinstance(stage, Phase):
+            if isinstance(stage, (Phase, Inline)):
                 self.items.append((stage, ()))
                 continue
             if isinstance(stage, BoundQuadrantsCallable):
@@ -251,6 +267,9 @@ class Phase:
         """Run the stages, in order, with the given values of their call arguments."""
         if not is_recording_launches():
             for launch in self.get_launches():
+                if isinstance(launch.fn, Inline):
+                    launch.fn(**values)
+                    continue
                 args = launch.args
                 if launch.call_args:
                     args = list(args)
@@ -260,10 +279,133 @@ class Phase:
             return
         with custom_backward(self.backward) if self.backward is not None else nullcontext():
             for stage, args in self.items:
-                if isinstance(stage, Phase):
+                if isinstance(stage, (Phase, Inline)):
                     stage(**values)
                 else:
                     stage(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
+
+
+class Inline:
+    """
+    An extension point of a kernel: the funcs the Systems add run in turn where the kernel calls a placeholder func.
+
+    The kernel calls the placeholder `hook` with the values the extension point hands over, `x = hook(a, b, x)`, and the
+    placeholder returns the last of them unchanged. Every func added takes the same leading parameters, then the Data
+    it reads, bound by name to the Data of the System adding it and of its dependencies like the stages of a Phase. The
+    kernel launched is the kernel itself while no func is added, and otherwise a kernel generated from its source,
+    whose call to the placeholder is replaced by the calls of the funcs in turn, taking their Data as parameters of
+    their own. The values handed over stay in registers, which the autodiff of the kernel reverses as a whole, unlike a
+    sequence of kernels updating the same array in place. The other parameters of the kernel are bound to the Data of
+    the System declaring the extension point when it binds it (see 'bind'), and those that none provides are call
+    arguments, given by name when it runs. A parameter of a func that the scope of its System leaves unbound takes the
+    value the kernel binds to that name.
+    """
+
+    def __init__(self, kernel: QuadrantsCallable, hook: Callable) -> None:
+        self.kernel = kernel
+        self.hook = hook
+        # The funcs added, in order, with the arguments of their Data parameters
+        self.items: list[tuple[Callable, tuple[Any, ...]]] = []
+        self._args: tuple[Any, ...] | None = None
+        self._launch: tuple[Callable, tuple[Any, ...]] | None = None
+
+    def bind(self, **values: Any) -> None:
+        """
+        Bind the parameters of the kernel to the Data of the System declaring the extension point, as it composes.
+
+        `values` binds parameters by name to values of its own, such as objects the System reaches through a property.
+        """
+        assert _scope is not None, "An extension point is bound while its System composes."
+        parameters = inspect.signature(self.kernel.fn).parameters
+        self._args = tuple([values[name] if name in values else _bind(name) for name in parameters])
+
+    def add(self, *funcs: Callable) -> None:
+        """Append funcs, binding their Data parameters to the Data of the System composing and of its dependencies."""
+        assert _scope is not None, "A func is added while its System composes."
+        n_handed = len(inspect.signature(self.hook).parameters)
+        for func in funcs:
+            names = list(inspect.signature(func.fn).parameters)[n_handed:]
+            self.items.append((func, tuple([_bind(name) for name in names])))
+        self._launch = None
+
+    def get_launch(self) -> tuple[Callable, tuple[Any, ...]]:
+        """Return the kernel running the extension point with its arguments, generated once the funcs are added."""
+        assert self._args is not None, "An extension point is bound before it runs."
+        if self._launch is None:
+            if not self.items:
+                self._launch = (self.kernel, self._args)
+            else:
+                self._launch = self._make_kernel()
+        return self._launch
+
+    def _make_kernel(self) -> tuple[Callable, tuple[Any, ...]]:
+        fn = self.kernel.fn
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        funcdef = tree.body[0]
+        funcdef.decorator_list = []
+        funcdef.name = f"{fn.__name__}_inline"
+        lines = ["import inspect", "import sys", "", "import quadrants as qd", ""]
+        # The names of the module of the kernel, which its body refers to
+        lines.append(f"globals().update(vars(sys.modules[{fn.__module__!r}]))")
+        args_by_name = dict(zip(inspect.signature(fn).parameters, self._args))
+        params_new: list[ast.arg] = []
+        calls_data: list[list[str]] = []
+        for i, (func, args) in enumerate(self.items):
+            owner_name, *path = func.fn.__qualname__.split(".")
+            assert "<locals>" not in path, "A func added to an extension point is defined at module level."
+            lines.append(f"from {func.fn.__module__} import {owner_name} as func_module_{i}")
+            lines.append(f"func_{i} = func_module_{i}{''.join([f'.{attr}' for attr in path])}")
+            names = list(inspect.signature(func.fn).parameters)[-len(args) :] if args else []
+            for name, arg in zip(names, args):
+                # A parameter that the scope of the func leaves unbound takes the value the kernel binds to its name
+                if name in args_by_name:
+                    assert args_by_name[name] is arg or isinstance(arg, CallArg), (
+                        f"Parameter '{name}' of '{func.fn.__qualname__}' is bound to another value by another func."
+                    )
+                    continue
+                args_by_name[name] = arg
+                annotation = f"inspect.signature(func_{i}.fn).parameters['{name}'].annotation"
+                lines.append(f"{name}_annotation = {annotation}")
+                params_new.append(ast.arg(arg=name, annotation=ast.Name(id=f"{name}_annotation", ctx=ast.Load())))
+            calls_data.append(names)
+        funcdef.args.args += params_new
+
+        hook_name = self.hook.__name__
+        items = self.items
+
+        class ReplaceHook(ast.NodeTransformer):
+            def visit_Assign(self, node: ast.Assign) -> Any:
+                call = node.value
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == hook_name:
+                    return [
+                        ast.Assign(
+                            targets=node.targets,
+                            value=ast.Call(
+                                func=ast.Name(id=f"func_{i}", ctx=ast.Load()),
+                                args=[*call.args, *[ast.Name(id=name, ctx=ast.Load()) for name in calls_data[i]]],
+                                keywords=[],
+                            ),
+                        )
+                        for i in range(len(items))
+                    ]
+                return node
+
+        tree = ast.fix_missing_locations(ReplaceHook().visit(tree))
+        lines += ["", "", "@qd.kernel", ast.unparse(funcdef), ""]
+        kernel = load_generated("\n".join(lines), funcdef.name)
+        return kernel, tuple(args_by_name.values())
+
+    def __call__(self, **values: Any) -> None:
+        """Run the kernel with the given values of its call arguments."""
+        kernel, args = self.get_launch()
+        kernel(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
+
+
+def _bind(name: str) -> Any:
+    """Return the Data of the given name in the scope of the System composing, the CallArg naming it if none."""
+    values = _scope.get(name, ())
+    assert len(values) < 2, f"Data '{name}' is ambiguous among the dependencies of the System composing."
+    return values[0] if values else CallArg(name)
 
 
 def get_dependencies(fn: Callable, systems: Sequence[object]) -> dict[str, Any] | None:
@@ -291,23 +433,21 @@ class Engine:
     """
     Build the Systems a scene calls for, then let each one compose with its dependencies.
 
-    `systems` are the Systems that exist already, their parts included, and `context` the other objects a dependency may
-    name, such as the options of the scene. A registered System class is built once every System class its constructor depends on is
+    `systems` are the Systems that exist already, and `context` the other objects a dependency may name, such as the
+    options of the scene. A registered System class is built once every System class its constructor depends on is
     settled, in registration order otherwise, and only when every mandatory dependency exists (see register_system).
+    The Systems are built as the Engine is, before the solvers allocate their Data, so that a System opts in what it uses
+    of another one (see 'opt_in'). They compose afterwards (see 'compose').
     """
 
     def __init__(self, systems: Sequence[System], context: Sequence[object] = ()) -> None:
-        global _scope
-
+        self.context = tuple(context)
         self.systems: list[System] = []
-        systems_pending = list(systems)
-        while systems_pending:
-            system = systems_pending.pop(0)
+        for system in systems:
             if all([system is not other for other in self.systems]):
                 self.systems.append(system)
-                systems_pending[:0] = system.get_parts()
-        # The dependencies of every System, by System
-        dependencies: dict[int, list[System]] = {id(system): [] for system in self.systems}
+        # The Systems each System depends on, by System
+        self._dependencies: dict[int, list[System]] = {id(system): [] for system in self.systems}
         classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(s) is not cls for s in self.systems])]
         while classes_pending:
             for cls in classes_pending:
@@ -321,21 +461,38 @@ class Engine:
                 if any([issubclass(other, needed) for other in classes_pending for needed in classes_needed]):
                     continue
                 classes_pending.remove(cls)
-                args = get_dependencies(cls, [*self.systems, *context])
+                args = get_dependencies(cls, [*self.systems, *self.context])
                 system = None if args is None else cls.create(**args)
                 if system is not None:
                     self.systems.append(system)
-                    dependencies[id(system)] = [arg for arg in args.values() if isinstance(arg, System)]
+                    self._dependencies[id(system)] = [arg for arg in args.values() if isinstance(arg, System)]
                 break
             else:
                 assert False, f"The dependencies of {classes_pending} form a cycle."
 
+    def compose(self) -> None:
+        """
+        Let every System add its stages to the phases of its dependencies, once the solvers allocated their Data.
+
+        The parts of a System, which exist once it is built (see 'System.get_parts'), join the Systems first. The stages
+        of a System bind the Data of the System and of the Systems its constructor and `compose` depend on.
+        """
+        global _scope
+
+        systems_pending = list(self.systems)
+        while systems_pending:
+            system = systems_pending.pop(0)
+            if all([system is not other for other in self.systems]):
+                self.systems.append(system)
+                self._dependencies[id(system)] = []
+            systems_pending[:0] = [part for part in system.get_parts() if all([part is not s for s in self.systems])]
+
         for system in self.systems:
-            args = get_dependencies(system.compose, [*self.systems, *context])
+            args = get_dependencies(system.compose, [*self.systems, *self.context])
             assert args is not None, f"A dependency of '{type(system).__qualname__}.compose' is missing."
-            dependencies[id(system)] += [arg for arg in args.values() if isinstance(arg, System)]
+            dependencies = [*self._dependencies[id(system)], *[arg for arg in args.values() if isinstance(arg, System)]]
             _scope = {}
-            for owner in (system, *dependencies[id(system)]):
+            for owner in (system, *dependencies):
                 for name, value in vars(owner).items():
                     if not name.startswith("_") and all([value is not other for other in _scope.get(name, ())]):
                         _scope.setdefault(name, []).append(value)

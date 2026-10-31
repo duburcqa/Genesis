@@ -125,7 +125,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
                 upper_bound=(0.5, 0.5, 0.5),
                 grid_density=32,
             ),
-            # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
+            # The coupling of FEM and MPM carries no gradient (see 'FEMMPM')
             coupler_options=gs.options.LegacyCouplerOptions(
                 fem_mpm=False,
             ),

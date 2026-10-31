@@ -1,0 +1,85 @@
+"""The couplings of the rigid solver with the finite element method (FEM) solver."""
+
+import quadrants as qd
+
+import genesis.utils.array_class as array_class
+from genesis.engine.pipeline import System, register_system
+from genesis.engine.solvers.fem_solver import FEMSolver
+from genesis.engine.solvers.rigid.collider.collider import Collider
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+from genesis.engine.step import Step
+from genesis.options.solvers import LegacyCouplerOptions
+from genesis.utils.data import opt_in
+
+from .fem_surface import FEMSurface
+from .rigid_contact import func_collide_with_rigid
+
+
+@register_system
+class RigidFEM(System):
+    """
+    Collide the surface vertices of the finite element method (FEM) entities with the coupled rigid geoms.
+
+    The mass of the element of a surface triangle is spread evenly over its vertices.
+    """
+
+    is_differentiable = False
+
+    def __init__(self, rigid_solver: RigidSolver, fem_surface: FEMSurface, options: LegacyCouplerOptions) -> None:
+        self._fem_surface = fem_surface
+        # The vertices collide with the rigid geoms through their SDF
+        opt_in(array_class.SDFInfo)
+
+    @classmethod
+    def create(
+        cls, rigid_solver: RigidSolver, fem_surface: FEMSurface, options: LegacyCouplerOptions
+    ) -> "RigidFEM | None":
+        return cls(rigid_solver, fem_surface, options) if options.rigid_fem else None
+
+    def compose(self, fem_solver: FEMSolver, collider: Collider) -> None:
+        self._fem_surface.surface_couplings.add(func_fem_rigid)
+
+
+@register_system
+class RigidFEMAttachment(System):
+    """Move the targets of the finite element method vertices following a rigid link with the link."""
+
+    def __init__(self, rigid_solver: RigidSolver, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
+        self._fem_solver = fem_solver
+
+    def compose(self, step: Step) -> None:
+        step.couplings.add(self._fem_solver.update_linked_vertex_constraints)
+
+
+@qd.func
+def func_fem_rigid(
+    f: int,
+    i_v: int,
+    i_b: int,
+    pos: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    surface_normal: qd.types.vector(3),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    collider_config: qd.template(),
+) -> qd.types.vector(3):
+    """
+    Return the velocity of a surface vertex colliding with the coupled rigid geoms (see func_collide_with_rigid).
+
+    The mass of the element of its triangle is spread evenly over the vertices of the triangle.
+    """
+    return func_collide_with_rigid(
+        i_b,
+        pos,
+        vel,
+        mass / 3.0,
+        dyn_state.geoms,
+        dyn_state.links,
+        dyn_info.geoms,
+        rigid_info,
+        collider_info.sdf,
+        collider_config,
+    )

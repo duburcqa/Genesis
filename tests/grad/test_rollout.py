@@ -360,7 +360,7 @@ def test_reject_non_differentiable_solvers():
         ((gs.materials.PBD.Liquid(),), {}, "PBDSolver"),
         ((gs.materials.SPH.Liquid(),), {}, "SPHSolver"),
         ((gs.materials.FEM.Elastic(),), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
-        ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "LegacyCoupler"),
+        ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "RigidFEM"),
         ((gs.materials.Rigid(),), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
     ):
         scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True), **options, show_viewer=False)

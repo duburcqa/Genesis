@@ -19,6 +19,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.pipeline import System
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
@@ -64,7 +65,7 @@ NEUTRAL_COLLISION_RES_ABS = 0.01
 NEUTRAL_COLLISION_RES_REL = 0.05
 
 
-class Collider:
+class Collider(System):
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
 

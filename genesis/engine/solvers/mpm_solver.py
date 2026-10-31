@@ -13,8 +13,10 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.materials import MPM
+from genesis.engine.pipeline import Inline
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
+from genesis.engine.step import Step
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
@@ -105,6 +107,8 @@ class MPMSolver(ParticleSolver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
+        # The couplings of the grid with the other solvers, which the coupling Systems add their funcs to
+        self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
         # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
         opt_in(array_class.SDFInfo, cond=lambda: self.is_cpic_active)
 
@@ -209,6 +213,7 @@ class MPMSolver(ParticleSolver):
                 grid_offset=self._lower_bound_cell,
                 particle_volume=self.particle_volume,
                 particle_volume_scale=self.particle_volume_scale,
+                EPS=gs.EPS,
             ),
             unused={info_arrays: not self.is_active},
         )
@@ -331,6 +336,17 @@ class MPMSolver(ParticleSolver):
             rigid_solver.collider.collider_config,
             self._material_dispatcher,
         )
+
+    def compose(self, step: Step) -> None:
+        """
+        Add the substep of the solver to the step, and the update of the velocity of its grid to the couplings.
+
+        The couplings of the grid with the other solvers run between the velocity of the cells and the boundary of the
+        grid (see 'func_mpm_grid_couplings').
+        """
+        super().compose(step)
+        self.grid_couplings.bind(force_fields=self.force_fields_dispatcher)
+        step.couplings.add(self.grid_couplings)
 
     def substep_post_coupling(self, f):
         rigid_solver = self.sim.rigid_solver
@@ -1432,3 +1448,49 @@ def func_backward_svd(
     u_term = U @ ((F * (ut @ grad_U - grad_U.transpose() @ U)) @ S) @ vt
     v_term = U @ (S @ ((F * (vt @ grad_V - grad_V.transpose() @ V)) @ vt))
     return u_term + v_term + S_term
+
+
+@qd.func
+def func_mpm_grid_couplings(
+    f: int, i_b: int, pos: qd.types.vector(3), vel: qd.types.vector(3), mass: float
+) -> qd.types.vector(3):
+    """
+    Return the velocity of a cell of the grid holding mass, at the given position and of the given mass, once coupled
+    with the other solvers.
+
+    The placeholder of the extension point of the couplings of the grid, which the coupling Systems add their funcs to
+    (see 'MPMSolver.grid_couplings').
+    """
+    return vel
+
+
+@qd.kernel
+def kernel_mpm_grid_op(
+    f: int,
+    t: float,
+    mpm_state: array_class.MPMState,
+    mpm_info: array_class.MPMInfo,
+    force_fields: qd.template(),
+):
+    """
+    Update the velocity of the cells of the material point method (MPM) grid holding mass.
+
+    The momentum of a cell turns into a velocity, which gravity and the force fields accelerate, the couplings with the
+    other solvers update (see func_mpm_grid_couplings), and the boundary of the solver clamps.
+    """
+    for i_x, i_y, i_z, i_b in qd.ndrange(
+        mpm_state.grid.mass.shape[1],
+        mpm_state.grid.mass.shape[2],
+        mpm_state.grid.mass.shape[3],
+        mpm_state.grid.mass.shape[4],
+    ):
+        if mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] > mpm_info.EPS[None]:
+            substep_dt = mpm_info.substep_dt[None]
+            vel = (1 / mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
+            vel += substep_dt * mpm_info.gravity[i_b]
+            pos = (qd.Vector([i_x, i_y, i_z], dt=gs.qd_int) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
+            mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
+            for i_ff in qd.static(range(len(force_fields.fields))):
+                vel += force_fields.fields[i_ff].get_acc(pos, vel, t, i=-1) * substep_dt
+            vel = func_mpm_grid_couplings(f, i_b, pos, vel, mass)
+            _, mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = func_impose_cube_boundary(pos, vel, mpm_info.boundary)

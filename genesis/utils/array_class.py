@@ -1975,6 +1975,7 @@ class MPMInfo(Data, kind=DataKind.CONSTANT):
     grid_offset: qd.Tensor = field((int, 3), shape=())
     particle_volume: qd.Tensor = field(float, shape=())
     particle_volume_scale: qd.Tensor = field(float, shape=())
+    EPS: qd.Tensor = field(float, shape=())
 
 
 class MPMStaticConfig(StaticConfig):
@@ -2246,42 +2247,6 @@ class FEMStaticConfig(StaticConfig):
     has_rotation: bool
     # Whether every substep of a step keeps its own element contributions (see FEMExplicitCorners)
     requires_grad: bool
-
-
-# =========================================== LegacyCoupler ===========================================
-
-
-# The particles of the position based dynamics (PBD) solver a rigid link carries (see LegacyCouplerInfo)
-RIGID_PBD = Label("rigid_pbd")
-
-
-class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT, shape=(PARTICLES, ENVS)):
-    """
-    Model parameters of the legacy coupler.
-
-    A material point method (MPM) cell exchanges momentum with the smoothed particle hydrodynamics (SPH) and position
-    based dynamics (PBD) particles of the cube of `mpm_sph_stencil_size` and `mpm_pbd_stencil_size` cells of their hash
-    grid around its lower corner. A PBD particle carried by the link `pbd_attach_link_idx` (-1 for none) stays at the
-    point `pbd_attach_local_pos` of the frame of the link.
-    """
-
-    mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
-    mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
-    pbd_attach_link_idx: qd.Tensor = field(int, kind=DataKind.INFO, labels=RIGID_PBD)
-    pbd_attach_local_pos: qd.Tensor = field((float, 3), kind=DataKind.INFO, labels=RIGID_PBD)
-    EPS: qd.Tensor = field(float, shape=())
-
-
-class LegacyCouplerStaticConfig(StaticConfig):
-    # The pairs of solvers coupled with each other
-    enable_rigid_mpm: bool
-    enable_rigid_sph: bool
-    enable_rigid_pbd: bool
-    enable_rigid_fem: bool
-    enable_mpm_sph: bool
-    enable_mpm_pbd: bool
-    enable_fem_mpm: bool
-    enable_fem_sph: bool
 
 
 # =========================================== HybridEntity ===========================================

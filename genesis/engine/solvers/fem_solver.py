@@ -722,10 +722,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         kernel_remove_specific_constraints(verts_idx, envs_idx, self.vertex_constraints)
 
-    def update_linked_vertex_constraints(self, links_state):
+    def update_linked_vertex_constraints(self, dyn_state: array_class.DynState):
         """Move the target of the vertices following a rigid link with the link."""
         if self.vertex_constraints is not None:
-            kernel_update_linked_vertex_constraints(self.vertex_constraints, links_state)
+            kernel_update_linked_vertex_constraints(self.vertex_constraints, dyn_state.links)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

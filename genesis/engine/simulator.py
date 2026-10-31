@@ -15,8 +15,8 @@ from genesis.utils.data import DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
-from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
-from .pipeline import Engine
+from .couplers import IPCCoupler, SAPCoupler
+from .pipeline import Engine, System
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -126,14 +126,15 @@ class Simulator(RBC):
 
         self._active_solvers: list["Solver"] = gs.List()
 
-        # coupler
+        # The coupler solving the couplings of the scene at once, if any. LegacyCouplerOptions enable
+        # couplings between pairs of solvers instead, which are Systems of their own (see genesis/engine/couplers/pairwise).
+        self._coupler_options = options.coupler
+        self._coupler: SAPCoupler | IPCCoupler | None = None
         if isinstance(options.coupler, SAPCouplerOptions):
             self._coupler = SAPCoupler(self, options.coupler)
-        elif isinstance(options.coupler, LegacyCouplerOptions):
-            self._coupler = LegacyCoupler(self, options.coupler)
         elif isinstance(options.coupler, IPCCouplerOptions):
             self._coupler = IPCCoupler(self, options.coupler)
-        else:
+        elif not isinstance(options.coupler, LegacyCouplerOptions):
             gs.raise_exception(
                 f"Coupler options {options.coupler} not supported. Please use SAPCouplerOptions, "
                 "LegacyCouplerOptions, or IPCCouplerOptions."
@@ -232,9 +233,16 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
+        # The Systems of the scene: the solvers holding entities, the coupler and the couplings between pairs of
+        # solvers, built before the solvers allocate their Data so that each one opts in what it uses of the others
+        self._engine = Engine(
+            [*[solver for solver in self._solvers if solver.is_active], *([self._coupler] if self._coupler else [])],
+            context=(self._coupler_options,),
+        )
+
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
-        self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        self._rigid_only = self.rigid_solver.is_active and self._coupler is None
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
@@ -243,19 +251,17 @@ class Simulator(RBC):
                     self._rigid_only = False
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
-        self._coupler.build()
-        # The solvers and the coupler compose the substep from their stages
-        self._engine = Engine([*self._active_solvers, self._coupler])
+        if self._coupler is not None:
+            self._coupler.build()
+        # The Systems compose the substep from their stages
+        self._engine.compose()
         self._step_system = self._engine.find(Step)
 
-        # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
-        # coupler declares it for the couplings it activated at build.
+        # Every System of a differentiable scene supports gradients, which it declares
         if self._requires_grad:
             unsupported_names = [
-                type(solver).__name__ for solver in self._active_solvers if not solver.is_differentiable
+                type(system).__name__ for system in self._engine.systems if not system.is_differentiable
             ]
-            if not self._coupler.is_differentiable:
-                unsupported_names.append(type(self._coupler).__name__)
             if unsupported_names:
                 gs.raise_exception(
                     f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
@@ -318,7 +324,8 @@ class Simulator(RBC):
 
     def _restart(self, envs_idx=None):
         """Restart the coupler, the autograd graph of the rollout and the sensors."""
-        self._coupler.reset(envs_idx=envs_idx)
+        if self._coupler is not None:
+            self._coupler.reset(envs_idx=envs_idx)
 
         # The adjoints of the state start from zero, and a new rollout of the autograd graph begins
         for solver in self._active_solvers:
@@ -501,7 +508,7 @@ class Simulator(RBC):
         self._steps.copy_(steps_start)
 
     def substep(self, f):
-        self._step_system.run(f=f)
+        self._step_system.run(f=f, t=self.cur_t)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -618,9 +625,13 @@ class Simulator(RBC):
         """
         return self._cur_substep_global * self._substep_dt
 
+    def get_system(self, cls: type[System]) -> System | None:
+        """Return the System of the scene of the given class, None when the scene has none."""
+        return self._engine.find(cls)
+
     @property
     def coupler(self):
-        """The coupler object that manages the inter-solver coupling."""
+        """The coupler solving the couplings of the scene at once, None for the couplings between pairs of solvers."""
         return self._coupler
 
     @property
