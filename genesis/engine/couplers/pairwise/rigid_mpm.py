@@ -12,9 +12,10 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.entities.hybrid_entity import HybridEntity
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.mpm_solver import CellSeparation, CellVelocity, GridCoupling, MPMSolver
-from genesis.engine.solvers.rigid.abd import func_collide_in_rigid_geom
+from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.step import Integration, Preparation
@@ -239,6 +240,100 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
             self.rigid_mpm_cpic.rigid_normal.fill(0)
         else:
             kernel_reset_cpic_rigid_normal(self._mpm_solver.scene._sanitize_envs_idx(envs_idx), self.rigid_mpm_cpic)
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_soft_part_mpm(
+    f: int,
+    particle_start: int,
+    dt: float,
+    damping: float,
+    soft_dv_coef: float,
+    mpm_state: array_class.MPMState,
+    links_state: array_class.LinksState,
+    soft_part_info: array_class.HybridSoftPartInfo,
+    mpm_info: array_class.MPMInfo,
+    geoms_info: array_class.GeomsInfo,
+):
+    """
+    Couple the particles of the soft part of a hybrid entity with the links of its rigid part, once g2p advected them.
+
+    Each active particle is driven toward the pose its muscle group takes with its link, the velocity correction being
+    damped by `damping` over the timestep `dt` shared by both solvers, partly applied to the particle by
+    `soft_dv_coef`, and its momentum applied to the link.
+    """
+    for i_p_, i_b in qd.ndrange(soft_part_info.particles_init_pos.shape[0], mpm_state.particles.pos.shape[2]):
+        i_p = i_p_ + particle_start
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            i_mg = mpm_info.particles.muscle_group[i_p]
+            i_l = soft_part_info.groups_link_idx[i_mg]
+            i_g = soft_part_info.groups_geom_idx[i_mg]
+
+            # Target position of the particle, rigidly attached to its link
+            local_pos = gu.qd_inv_transform_by_trans_quat(
+                soft_part_info.particles_init_pos[i_p_],
+                soft_part_info.groups_frame_pos[i_mg],
+                soft_part_info.groups_frame_quat[i_mg],
+            )
+            target_pos, target_quat = gu.qd_transform_pos_quat_by_trans_quat(
+                geoms_info.pos[i_g], geoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
+            )
+            new_x_pos = gu.qd_transform_by_trans_quat(local_pos, trans=target_pos, quat=target_quat)
+
+            # The velocity covers the distance to the target over a whole step, so each substep moves the particle part
+            # of the way
+            x_pos = mpm_state.particles.pos[f + 1, i_p, i_b]
+            xd_vel = (new_x_pos - x_pos) / dt
+
+            vel_d = xd_vel - mpm_state.particles.vel[f + 1, i_p, i_b]
+            vel_d *= qd.exp(-dt * damping)
+
+            # Soft to rigid, over the timestep of the rigid solver since the update integrates within a substep of the
+            # soft solver
+            mass_real = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
+            func_apply_coupling_force(i_l, i_b, x_pos, -mass_real * (vel_d / dt), links_state)
+
+            # Rigid to soft, which may destabilize the loop
+            mpm_state.particles.vel[f + 1, i_p, i_b] += vel_d * soft_dv_coef
+
+
+@register_system
+class RigidMPMHybrid(Integration):
+    """
+    Drive the particles of the soft part of the hybrid entities toward the links of their rigid part, after the grid
+    advects them (see kernel_update_soft_part_mpm).
+    """
+
+    def __init__(
+        self, mpm_solver: Annotated[MPMSolver, Enabled("has_hybrid_entities")], rigid_solver: RigidSolver
+    ) -> None:
+        self._mpm_solver = mpm_solver
+        self._rigid_solver = rigid_solver
+        self._entities = [
+            entity
+            for entity in mpm_solver.sim.entities
+            if isinstance(entity, HybridEntity) and not entity.material.use_default_coupling
+        ]
+
+    def build(self) -> None:
+        for entity in self._entities:
+            entity.build()
+
+    def substep_post_coupling(self, f: int) -> None:
+        mpm_solver, dyn_state, dyn_info = self._mpm_solver, self._rigid_solver.dyn_state, self._rigid_solver.dyn_info
+        for entity in self._entities:
+            kernel_update_soft_part_mpm(
+                f,
+                entity.part_soft.particle_start,
+                mpm_solver.dt,
+                entity.material.damping,
+                entity.material.soft_dv_coef,
+                mpm_solver.mpm_state,
+                dyn_state.links,
+                entity.soft_part_info,
+                mpm_solver.mpm_info,
+                dyn_info.geoms,
+            )
 
 
 class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):

@@ -270,11 +270,6 @@ class Simulator(RBC):
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
 
-        # hybrid
-        for entity in self._entities:
-            if isinstance(entity, HybridEntity):
-                entity.build()
-
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
         # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
         # stays outside the graph.

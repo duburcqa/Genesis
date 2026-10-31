@@ -11,7 +11,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
-from genesis.engine.entities import HybridEntity, MPMEntity
+from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.pipeline import Inline, Stages, System
 from genesis.engine.state_change import StateChange, mutates
@@ -369,8 +369,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self.mpm_info: array_class.MPMInfo | None = None
         self.mpm_static_config: array_class.MPMStaticConfig | None = None
         self.material_dispatcher: MPMMaterialDispatcher | None = None
-        # The hybrid entities whose soft part the solver holds, which drive their particles after each substep
-        self._hybrid_entities: list[HybridEntity] = []
 
     def setup_boundary(self):
         # safety padding
@@ -447,11 +445,6 @@ class MPMSolver(ParticleSolver, Coupling):
             is_svd_needed=is_svd_needed, requires_grad=self._sim.requires_grad
         )
         self.material_dispatcher = MPMMaterialDispatcher(self._materials)
-        self._hybrid_entities = [
-            entity
-            for entity in self._sim.entities
-            if isinstance(entity, HybridEntity) and not entity.material.use_default_coupling
-        ]
         self._build_gravity(self.mpm_info.gravity)
 
         if self.is_active:
@@ -548,11 +541,18 @@ class MPMSolver(ParticleSolver, Coupling):
         """The update of the velocity of the grid, which runs the couplings with the other solvers (see GridCoupling)."""
         return self.grid_couplings
 
+    @property
+    def has_hybrid_entities(self) -> bool:
+        """Whether the solver holds the soft part of hybrid entities that their rigid part drives (see RigidMPMHybrid)."""
+        return any(
+            [
+                isinstance(entity.material, gs.materials.Hybrid) and not entity.material.use_default_coupling
+                for entity in self._sim.entities
+            ]
+        )
+
     def substep_post_coupling(self, f):
         self.g2p(f=f)
-
-        for entity in self._hybrid_entities:
-            entity.update_soft_part(f)
 
         # The grid is read no more in this substep (see MPMGrid)
         if not self._sim.requires_grad:
