@@ -16,7 +16,7 @@ from genesis.engine.solvers.rigid.data import DataManager, RigidErrorCode, Rigid
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.engine.step import Completion
-from genesis.grad.bridge import custom_backward, is_recording_launches
+from genesis.grad.bridge import is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
@@ -76,13 +76,8 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_held_by_links,
 )
-from .abd.diff import func_copy_next_to_curr, func_integrate_dq_entity, kernel_copy_next_to_curr_clear_coupling
+from .abd.diff import func_integrate_dq_entity, kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
-    func_clear_coupling_wrench,
-    func_forward_dynamics,
-    func_integrate,
-    func_update_acc,
-    func_vel_at_point,
     kernel_compute_smooth_qacc,
     kernel_forward_dynamics_without_qacc,
     kernel_integrate,
@@ -92,8 +87,6 @@ from .abd.forward_dynamics import (
     update_qvel,
 )
 from .abd.forward_kinematics import (
-    func_forward_velocity,
-    func_update_cartesian_space,
     kernel_forward_kinematics_links_geoms,
     kernel_masked_forward_kinematics_links_geoms,
     kernel_update_cartesian_space,
@@ -467,10 +460,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         ):
             self._geoms_offset_pos = torch.from_numpy(geoms_offset_pos).to(device=gs.device, dtype=gs.tc_float)
             self._geoms_offset_quat = torch.from_numpy(geoms_offset_quat).to(device=gs.device, dtype=gs.tc_float)
-
-        # FIXME: when the migration is finished, we will remove the about two lines
-        self._func_vel_at_point = func_vel_at_point
-        self._func_apply_coupling_force = func_apply_coupling_force
 
         if self.is_active:
             self._build_substep()

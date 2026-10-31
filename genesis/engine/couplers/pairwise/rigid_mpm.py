@@ -1,6 +1,5 @@
 """The coupling of the rigid geoms with the material point method (MPM) solver."""
 
-from collections.abc import Iterator
 from typing import Annotated
 
 import numpy as np
@@ -21,7 +20,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.step import Integration, Preparation
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
-from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
+from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.misc import broadcast_tensor
 from genesis.utils.sdf import SDF, SDFInfo
 

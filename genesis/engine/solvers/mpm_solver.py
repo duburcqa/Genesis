@@ -9,7 +9,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.boundaries.boundaries import CubeBoundaryBox
 from genesis.engine.entities import MPMEntity
@@ -23,10 +22,9 @@ from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ENVS, ConfigItem, Data, DataItem, DataKind, Label, Size, StaticConfig, field, iter_data
-from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_isfinite, qd_to_torch, qd_zero_grad
+from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch, qd_zero_grad
 
 from .particle_solver import ParticleSolver, kernel_add_vverts
-from .rigid.abd import func_collide_in_rigid_geom
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene

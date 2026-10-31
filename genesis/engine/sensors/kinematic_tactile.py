@@ -16,7 +16,7 @@ from genesis.options.sensors import (
     ContactProbe as ContactProbeOptions,
     KinematicTaxel as KinematicTaxelOptions,
 )
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.misc import concat_with_tensor, make_tensor_field
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 
@@ -43,7 +43,6 @@ from .tactile_shared import (
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
-    from genesis.options.sensors import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
 

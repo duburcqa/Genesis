@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -9,7 +8,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
 from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, GeomsState, RigidInfo
-from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
+from genesis.utils.data import Data, DataKind, Size, field
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription

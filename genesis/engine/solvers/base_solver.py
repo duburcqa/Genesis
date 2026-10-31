@@ -18,7 +18,7 @@ from genesis.engine.states import SystemCheckpoint
 from genesis.engine.step import Dynamics, Integration
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, Size, fill_data
+from genesis.utils.data import ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, Size, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,

@@ -1,6 +1,5 @@
 """The coupling of the rigid geoms with the position based dynamics (PBD) particles."""
 
-from collections.abc import Iterator
 from typing import Annotated
 
 import quadrants as qd
@@ -15,7 +14,7 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, Geom
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
+from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 from genesis.utils.sdf import SDF, SDFInfo
 

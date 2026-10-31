@@ -31,7 +31,6 @@ from genesis.engine.solvers.fem_solver import (
     FEMInfo,
     FEMState,
     FEMVertexConstraintsInfo,
-    FEMVerticesProperties,
     func_compute_element_mapping_matrix,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import (
@@ -42,7 +41,6 @@ from genesis.engine.solvers.rigid.abd.forward_dynamics import (
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.data import (
     DOFS,
-    ColliderInfo,
     DofsState,
     DynState,
     EntitiesInfo,
