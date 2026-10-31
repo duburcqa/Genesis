@@ -1,7 +1,38 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+
+
+# Most chunks the terms of the items of one environment split into for a fixed-order sum (see FixedOrderSums). It
+# bounds the serial sum over the partial sums that closes the sum, while leaving enough threads to the chunks for many
+# thousand items.
+SUM_MAX_CHUNKS = 256
+
+
+# The items of a fixed-order sum, its sums, and the chunks of items it sums apart (see FixedOrderSums)
+SUM_ITEMS = Size("sum_items")
+SUMS = Size("sums")
+SUM_CHUNKS = Size("sum_chunks")
+
+
+class FixedOrderSums(Data, kind=DataKind.SCRATCH):
+    """
+    The terms of fixed-order sums over the items of each environment, and their partial sums.
+
+    A sum runs in three steps, so that it is bitwise reproducible whatever the scheduling of the threads. Each item
+    writes its term of sum k into `terms[i_item, k, i_b]`, func_reduce_terms in genesis/utils/linalg.py sums the terms
+    over contiguous chunks of the items into `partials[i_chunk, k, i_b]`, and func_sum_chunks sums the partials of an
+    environment in order. Items no more numerous than SUM_MAX_CHUNKS are their own chunks.
+    """
+
+    terms: qd.Tensor = field(float, shape=(SUM_ITEMS, SUMS, ENVS))
+    partials: qd.Tensor = field(float, shape=(SUM_CHUNKS, SUMS, ENVS))
+
+    @staticmethod
+    def sizes(n_items: int, n_sums: int) -> dict[str, int]:
+        """Return the sizes of the sums over some items, under the name of their member (see 'sizes' in Data)."""
+        return dict(sum_items=n_items, sums=n_sums, sum_chunks=min(n_items, SUM_MAX_CHUNKS))
 
 
 @qd.func
@@ -114,11 +145,11 @@ def func_chunk_range(i_start: int, i_chunk: int, n_items: int, n_chunks: int):
 
 
 @qd.func(requires_top_level=True)
-def func_reduce_terms(sums: array_class.FixedOrderSums, mask: qd.template()):
+def func_reduce_terms(sums: FixedOrderSums, mask: qd.template()):
     """
     Sum in order the terms of each environment whose mask is set over contiguous chunks of its items.
 
-    See FixedOrderSums in genesis/utils/array_class.py. The chunks are summed in parallel.
+    See FixedOrderSums. The chunks are summed in parallel.
     """
     for i_chunk, k, i_b in qd.ndrange(sums.partials.shape[0], sums.terms.shape[1], sums.terms.shape[2]):
         if mask[i_b]:
@@ -130,8 +161,8 @@ def func_reduce_terms(sums: array_class.FixedOrderSums, mask: qd.template()):
 
 
 @qd.func
-def func_sum_chunks(i_b: int, k: int, sums: array_class.FixedOrderSums):
-    """Sum in order the partial sums of the sum `k` of an environment (see FixedOrderSums in array_class.py)."""
+def func_sum_chunks(i_b: int, k: int, sums: FixedOrderSums):
+    """Sum in order the partial sums of the sum `k` of an environment (see FixedOrderSums)."""
     value_sum = gs.qd_float(0.0)
     for i_chunk in range(sums.partials.shape[0]):
         value_sum += sums.partials[i_chunk, k, i_b]

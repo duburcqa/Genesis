@@ -1,20 +1,134 @@
 """Linear bounding volume hierarchies (LBVH) over sets of axis-aligned boxes: build and box queries.
 
 A set holds one tree per batch over the same number of leaves. The caller writes the box of each leaf into the state,
-builds the set, and traverses the trees it gets back (see BVHTreeState in array_class). The build follows
+builds the set, and traverses the trees it gets back (see BVHTreeState). The build follows
 Karras (2012, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees").
 
 A leaf carries two indices: i_a names it by its box, in the order the caller wrote them, and i_leaf by its slot in the
 sorted order the tree is laid out in, the one leaves_idx maps back to i_a.
 """
 
+from enum import IntEnum
 from typing import NamedTuple
 
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
-from genesis.utils.sort import func_sort_segments, get_segment_sort_data
+from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, field
+from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
+
+
+class BVH_FIT_KIND(IntEnum):
+    """The bottom-up fit of the node boxes of a BVH set.
+
+    See genesis.engine.bvh.
+    """
+
+    # One thread per leaf walking to the root, the arrival counters sequentially consistent (CPU)
+    LEAF_WALK = 0
+    # The leaf walk with a device fence on each side of the relaxed arrival atomic (GPU)
+    FENCED_LEAF_WALK = 1
+    # One block per tree sweeping the nodes level by level, every barrier uniform (Metal, see quadrants#925)
+    BLOCK_SWEEP = 2
+
+
+@qd.data_oriented
+class BVHStaticConfig(StaticConfig):
+    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh. The leaf keys pack the tree, the morton code and the leaf index in that order, so one flat
+    sort orders every tree.
+    """
+
+    # The bits of a morton code, three interleaved coordinates of the same width
+    morton_bits: int
+    # The sort of the leaf keys, one segment per tree
+    sort_config: SegmentSortStaticConfig
+    # BVH_FIT_KIND
+    fit_kind: int
+
+
+# Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree and the lanes of its
+# extent reduction
+BVH_TREES = Size("bvh_trees")
+BVH_LEAVES = Size("bvh_leaves")
+EXTENT_LANES = Size("extent_lanes")
+# The scratch of the fit sweeping the nodes level by level (see BVH_FIT_KIND)
+BLOCK_SWEEP_FIT = Label("block_sweep_fit")
+
+
+class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
+    """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh for the build. The n_leaves - 1 internal nodes come first, then the leaves, so node
+    n_leaves - 1 + i holds the i-th sorted leaf, whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
+    """
+
+    nodes_left: qd.Tensor = field(int)
+    nodes_right: qd.Tensor = field(int)
+    nodes_min: qd.Tensor = field((float, 3))
+    nodes_max: qd.Tensor = field((float, 3))
+    leaves_idx: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES))
+
+
+class BVHLeaves(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, BVH_LEAVES)):
+    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh. The caller writes them before a build, and a box query tests them against a tree.
+    """
+
+    aabbs_min: qd.Tensor = field((float, 3))
+    aabbs_max: qd.Tensor = field((float, 3))
+
+
+class BVHState(Data, kind=DataKind.SCRATCH):
+    """The linear bounding volume hierarchies (LBVH) of a set of trees.
+
+    A build (see genesis.engine.bvh) takes the boxes of the leaves (see BVHLeaves) and produces the tree a traversal
+    reads (see BVHTreeState), with the sort of the leaf keys (one segment per tree), the parent of each node and the
+    scratch of the extent and the fit.
+    """
+
+    sort: SegmentSortBuffer
+    tree: BVHTreeState
+    leaves: BVHLeaves
+    nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
+    nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
+    fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)
+    lanes_min: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    lanes_max: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    trees_min: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+    trees_max: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+
+
+# The (tree, leaf, query) triplets a box query holds, and the leaves and the items a query filter reads
+QUERY_RESULTS = Size("query_results")
+FILTER_LEAVES = Size("filter_leaves")
+FILTER_ITEMS = Size("filter_items")
+
+
+class BVHQueryResults(Data, kind=DataKind.SCRATCH):
+    """The (tree, leaf, query) triplets a box query of a BVH collects, and their count, above the capacity on overflow.
+
+    See func_bvh_query_aabb in genesis.engine.bvh.
+    """
+
+    triplets: qd.Tensor = field((int, 3), shape=(QUERY_RESULTS,))
+    count: qd.Tensor = field(int, shape=(1,))
+
+
+class BVHQueryFilter(Data, kind=DataKind.CONSTANT):
+    """
+    The data the filter of a box query reads to drop the pairs it finds (see func_bvh_query_aabb in genesis.engine.bvh).
+
+    `leaves_map` holds up to four items of each leaf, and `pairs_table` what the filter reads of each pair of items. A
+    kernel taking the filter passes none of its buffers under another argument, so the filter owns them. Every filter
+    is of this one type, since the funcs of a query take the filter data by its declared type.
+    """
+
+    leaves_map: qd.Tensor = field((int, 4), shape=(FILTER_LEAVES,))
+    pairs_table: qd.Tensor = field(int, shape=(FILTER_ITEMS, FILTER_ITEMS))
+
 
 # Bits of a morton code: three interleaved 10-bit coordinates.
 MORTON_BITS = 30
@@ -28,7 +142,7 @@ class BVHData(NamedTuple):
     A struct holding the state (see BVHState) takes its sizes and its unused arrays under the name of its member.
     """
 
-    config: array_class.BVHStaticConfig
+    config: BVHStaticConfig
     sizes: dict
     unused: dict
 
@@ -55,14 +169,14 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
     elif gs.backend == gs.metal:
         fit_kind = BVH_FIT_KIND.BLOCK_SWEEP
     else:
-        fit_kind = array_class.BVH_FIT_KIND.FENCED_LEAF_WALK
-    bvh_config = array_class.BVHStaticConfig(morton_bits=MORTON_BITS, sort_config=sort.config, fit_kind=fit_kind)
+        fit_kind = BVH_FIT_KIND.FENCED_LEAF_WALK
+    bvh_config = BVHStaticConfig(morton_bits=MORTON_BITS, sort_config=sort.config, fit_kind=fit_kind)
     # A set switched off leaves every array unused, else the scratch of the sort and of the fit it runs alone
     unused = {None: True}
     if is_active:
         unused = {
-            array_class.BVHState.sort: sort.unused,
-            array_class.BLOCK_SWEEP_FIT: fit_kind != array_class.BVH_FIT_KIND.BLOCK_SWEEP,
+            BVHState.sort: sort.unused,
+            BLOCK_SWEEP_FIT: fit_kind != BVH_FIT_KIND.BLOCK_SWEEP,
         }
     sizes = dict(bvh_trees=n_trees, bvh_leaves=n_leaves, extent_lanes=EXTENT_LANES, sort=sort.sizes)
     return BVHData(bvh_config, sizes, unused)
@@ -335,7 +449,7 @@ def build_bvh(bvh_state: BVHState, bvh_config: qd.template(), eps: float):
 
 
 @qd.func
-def func_no_filter(i_t: int, i_a: int, i_q: int, filter_data: array_class.BVHQueryFilter) -> bool:
+def func_no_filter(i_t: int, i_a: int, i_q: int, filter_data: BVHQueryFilter) -> bool:
     """Keep every pair a box query finds."""
     return False
 
@@ -346,10 +460,10 @@ def func_bvh_query_aabb(
     i_q: int,
     query_min: qd.types.vector(3),
     query_max: qd.types.vector(3),
-    bvh_tree_state: array_class.BVHTreeState,
-    query_results: array_class.BVHQueryResults,
+    bvh_tree_state: BVHTreeState,
+    query_results: BVHQueryResults,
     filter: qd.template(),
-    filter_data: array_class.BVHQueryFilter,
+    filter_data: BVHQueryFilter,
 ):
     """Collect the leaves of a tree whose box meets a query box, as (tree, leaf, query) triplets.
 
@@ -390,11 +504,11 @@ def func_bvh_query_aabb(
 
 @qd.func
 def func_bvh_query_leaves(
-    bvh_leaves: array_class.BVHLeaves,
-    bvh_tree_state: array_class.BVHTreeState,
-    query_results: array_class.BVHQueryResults,
+    bvh_leaves: BVHLeaves,
+    bvh_tree_state: BVHTreeState,
+    query_results: BVHQueryResults,
     filter: qd.template(),
-    filter_data: array_class.BVHQueryFilter,
+    filter_data: BVHQueryFilter,
 ):
     """Query every leaf box of a set against the tree of the same index in another set.
 

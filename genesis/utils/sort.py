@@ -8,16 +8,77 @@ segment serve small segments and the host backend.
 
 import math
 import os
+from enum import IntEnum
 from typing import NamedTuple
 
 import quadrants as qd
 from quadrants.algorithms import sort, sort_scratch_slots
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.linalg as lu
-from genesis.utils.data import Label
+from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, field
 from genesis.utils.misc import get_gpu_core_count
+
+
+class SEGMENT_SORT_KIND(IntEnum):
+    """The sort ordering the keys of a segment sort.
+
+    See genesis.utils.sort.
+    """
+
+    # The device-wide radix sort of quadrants over every key of the set (GPU, large segments)
+    DEVICE_RADIX = 0
+    # The rank of each key among the keys of its segment (small segments)
+    RANK = 1
+    # A radix sort per segment, its chunks in parallel (CPU, large segments)
+    SEGMENT_RADIX = 2
+
+
+@qd.data_oriented
+class SegmentSortStaticConfig(StaticConfig):
+    """The compile-time shape of a sort of 64-bit keys per segment.
+
+    See genesis.utils.sort.
+    """
+
+    # The bits a sort must order, a multiple of 16 up to 64
+    end_bit: int
+    # Scan depth of the device-wide radix sort (see quadrants.algorithms.sort), 1 to 8
+    log256_max_n: int
+    # SEGMENT_SORT_KIND
+    sort_kind: int
+    # Whether each key carries a value the sort moves along
+    has_values: bool
+
+
+# Sizes of a sort per segment: its segments, its keys, the slots of the device-wide radix sort and the chunks of the
+# radix sort per segment
+SORT_SEGMENTS = Size("sort_segments")
+SORT_KEYS = Size("sort_keys")
+SORT_SLOTS = Size("sort_slots")
+SORT_CHUNKS = Size("sort_chunks")
+# The values moved along the keys, and the scratch of each sort (see SEGMENT_SORT_KIND)
+SORT_VALUES = Label("sort_values")
+DEVICE_RADIX_SORT = Label("device_radix_sort")
+SEGMENT_RADIX_SORT = Label("segment_radix_sort")
+
+
+class SegmentSortBuffer(Data, kind=DataKind.SCRATCH, shape=(SORT_KEYS,)):
+    """The keys of a sort per segment, their values, the segment bounds and the scratch of the sort.
+
+    See genesis.utils.sort. The first n_keys keys are sorted, segment i_s holding the keys from segments_start[i_s] to
+    segments_start[i_s + 1].
+    """
+
+    keys: qd.Tensor = field(qd.u64)
+    values: qd.Tensor = field(int, labels=SORT_VALUES)
+    keys_scratch: qd.Tensor = field(qd.u64)
+    values_scratch: qd.Tensor = field(int, labels=SORT_VALUES)
+    segments_start: qd.Tensor = field(int, shape=(SORT_SEGMENTS + 1,))
+    sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
+    sort_hist: qd.Tensor = field(int, shape=(SORT_SEGMENTS, SORT_CHUNKS, 256), labels=SEGMENT_RADIX_SORT)
+    n_keys: qd.Tensor = field(int, shape=())
+
 
 # The rank sort, quadratic per segment, beats the radix sort up to a key count per segment. On the CPU the segments sort
 # serially, so the bound holds at every segment count. On the GPU the passes of every segment run together and the
@@ -39,7 +100,7 @@ class SegmentSortData(NamedTuple):
     arrays among its own.
     """
 
-    config: array_class.SegmentSortStaticConfig
+    config: SegmentSortStaticConfig
     sizes: dict[str, int]
     unused: dict[Label, bool]
 
@@ -72,38 +133,36 @@ def get_segment_sort_data(
         end_bit = 64
         log256_max_n = max(log256_max_n, 4)
     if is_rank_sort:
-        sort_kind = array_class.SEGMENT_SORT_KIND.RANK
+        sort_kind = SEGMENT_SORT_KIND.RANK
     elif gs.backend == gs.cpu:
-        sort_kind = array_class.SEGMENT_SORT_KIND.SEGMENT_RADIX
+        sort_kind = SEGMENT_SORT_KIND.SEGMENT_RADIX
     else:
-        sort_kind = array_class.SEGMENT_SORT_KIND.DEVICE_RADIX
-    sort_config = array_class.SegmentSortStaticConfig(
+        sort_kind = SEGMENT_SORT_KIND.DEVICE_RADIX
+    sort_config = SegmentSortStaticConfig(
         end_bit=end_bit, log256_max_n=log256_max_n, sort_kind=sort_kind, has_values=has_values
     )
 
-    n_sort_scratch = (
-        sort_scratch_slots(n_keys, log256_max_n) if sort_kind == array_class.SEGMENT_SORT_KIND.DEVICE_RADIX else 0
-    )
+    n_sort_scratch = sort_scratch_slots(n_keys, log256_max_n) if sort_kind == SEGMENT_SORT_KIND.DEVICE_RADIX else 0
     n_sort_chunks = max(1, min(SORT_MAX_CHUNKS, (os.cpu_count() or 1) // n_segments))
     return SegmentSortData(
         sort_config,
         dict(sort_segments=n_segments, sort_keys=n_keys, sort_slots=n_sort_scratch, sort_chunks=n_sort_chunks),
         {
-            array_class.SORT_VALUES: not has_values,
-            array_class.DEVICE_RADIX_SORT: sort_kind != array_class.SEGMENT_SORT_KIND.DEVICE_RADIX,
-            array_class.SEGMENT_RADIX_SORT: sort_kind != array_class.SEGMENT_SORT_KIND.SEGMENT_RADIX,
+            SORT_VALUES: not has_values,
+            DEVICE_RADIX_SORT: sort_kind != SEGMENT_SORT_KIND.DEVICE_RADIX,
+            SEGMENT_RADIX_SORT: sort_kind != SEGMENT_SORT_KIND.SEGMENT_RADIX,
         },
     )
 
 
 @qd.func(requires_top_level=True)
-def func_sort_segments(sort_buffer: array_class.SegmentSortBuffer, sort_config: qd.template()):
+def func_sort_segments(sort_buffer: SegmentSortBuffer, sort_config: qd.template()):
     """Sort the keys of every segment in increasing order, with their values.
 
     The caller writes the keys, their values, the segment bounds and the key count first. Equal keys keep their input
     order, so the result is a pure function of the input.
     """
-    if qd.static(sort_config.sort_kind == array_class.SEGMENT_SORT_KIND.DEVICE_RADIX):
+    if qd.static(sort_config.sort_kind == SEGMENT_SORT_KIND.DEVICE_RADIX):
         # Without values, the keys stand in for the placeholder values the sort leaves untouched
         sort(
             sort_buffer.keys,
@@ -117,7 +176,7 @@ def func_sort_segments(sort_buffer: array_class.SegmentSortBuffer, sort_config: 
             end_bit=qd.static(sort_config.end_bit),
             log256_max_n=qd.static(sort_config.log256_max_n),
         )
-    elif qd.static(sort_config.sort_kind == array_class.SEGMENT_SORT_KIND.RANK):
+    elif qd.static(sort_config.sort_kind == SEGMENT_SORT_KIND.RANK):
         # Each key ranks itself among the keys of its segment, found by a binary search over the segment bounds
         n_segments = sort_buffer.segments_start.shape[0] - 1
         n_search_steps = 32 - qd.cast(qd.math.clz(qd.u32(n_segments)), gs.qd_int)

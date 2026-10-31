@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
@@ -17,18 +16,13 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_inverse_kinematics_entity,
     kernel_set_ik_targets,
 )
+from genesis.engine.solvers.rigid.data import DataManager, DynInfo, DynState, RigidInfo, RigidSimStaticConfig
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SystemCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
-from genesis.utils.misc import (
-    assign_indexed_tensor,
-    broadcast_tensor,
-    indices_to_mask,
-    qd_to_numpy,
-    qd_to_torch,
-)
+from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from .base_solver import Solver
 from .rigid.abd.accessor import (
@@ -171,9 +165,9 @@ class KinematicSolver(Solver):
     _entity_classes = ((Morph, KinematicEntity),)
 
     # The Data the solver owns, which other Systems may depend on (see 'assemble_systems')
-    rigid_info: array_class.RigidInfo
-    dyn_info: array_class.DynInfo
-    dyn_state: array_class.DynState
+    rigid_info: RigidInfo
+    dyn_info: DynInfo
+    dyn_state: DynState
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
         super().__init__(scene, sim, options)
@@ -339,7 +333,7 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in array_class.py. A link no dof moves,
+        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in rigid/data.py. A link no dof moves,
         # its own or an ancestor's, is static and belongs to no tree. A moving link roots the tree of its parent, or its
         # own when its parent is static or absent. The parents precede the children.
         self._n_roots = len({link.root_idx for link in self.links})
@@ -357,7 +351,7 @@ class KinematicSolver(Solver):
         self.n_trees_ = max(1, self._n_trees)
 
         # The level of a link in its root and in its tree is its number of ancestors below the root link of either (see
-        # trees_levels_links_idx in array_class.py). Each pass moves every link one ancestor up, so the depth of a link
+        # trees_levels_links_idx in rigid/data.py). Each pass moves every link one ancestor up, so the depth of a link
         # is the number of passes it takes to run out of parents.
         links_depth = np.zeros(self.n_links, dtype=gs.np_int)
         links_ancestor_idx = self._links_parent_idx
@@ -426,7 +420,7 @@ class KinematicSolver(Solver):
         )
 
     def _create_data_manager(self):
-        self.data_manager = RigidData(self, kinematic_only=True)
+        self.data_manager = DataManager(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
@@ -480,13 +474,13 @@ class KinematicSolver(Solver):
 
     def _init_tree_fields(self):
         """Initialize the fields describing the kinematic roots and trees (see roots_link_idx and trees_root_idx in
-        array_class.py).
+        rigid/data.py).
 
         The links come parent first and each branch occupies a contiguous index range, so the dofs of a tree form one
         contiguous range and the trees are disjoint in dof space.
         """
         # A static link belongs to no tree, and a scene without any tree keeps its padded tree slot empty (see
-        # trees_root_idx in array_class.py)
+        # trees_root_idx in rigid/data.py)
         links_tree_idx = np.full(self.n_links_, -1, dtype=gs.np_int)
         if self._n_roots:
             roots_link_idx, links_root_rank = np.unique(self._links_root_idx, return_inverse=True)
@@ -529,7 +523,7 @@ class KinematicSolver(Solver):
         self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
 
         # Fill the level tables of every tree and root for the level sweep (see trees_levels_links_idx in
-        # array_class.py). A scene without any tree keeps its padded tree slot at zero levels.
+        # rigid/data.py). A scene without any tree keeps its padded tree slot at zero levels.
         if self._n_roots and self.rigid_config.enable_level_sweep:
             for links_group_idx, links_group_level, n_groups, groups_fields in (
                 (

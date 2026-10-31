@@ -4,10 +4,9 @@ from typing import Annotated
 
 import quadrants as qd
 
-import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
-from genesis.engine.solvers.sph_solver import SPHSolver
+from genesis.engine.solvers.sph_solver import SPHSolver, SPHState
 from genesis.options.solvers import LegacyCouplerOptions
 
 from .fem_surface import FEMSurface, SurfaceCoupling
@@ -22,7 +21,7 @@ def func_fem_sph(
     vel: qd.types.vector(3),
     mass: float,
     surface_normal: qd.types.vector(3),
-    sph_state: array_class.SPHState,
+    sph_state: SPHState,
 ) -> qd.types.vector(3):
     """
     Return the velocity of a surface vertex whose normal velocity is set to the mean velocity of the SPH particles of the

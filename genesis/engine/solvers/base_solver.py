@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from enum import IntEnum
 from typing import TYPE_CHECKING, NamedTuple, overload
 
 import numpy as np
@@ -9,24 +10,15 @@ import numba as nb
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFieldsDispatcher
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
-from genesis.engine.step import Dynamics, Integration
 from genesis.engine.states import SystemCheckpoint
+from genesis.engine.step import Dynamics, Integration
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import (
-    CHECKPOINT_KINDS,
-    ArrayItem,
-    ConfigItem,
-    DataItem,
-    DataKind,
-    ScalarItem,
-    fill_data,
-)
+from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, Size, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -46,6 +38,16 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+
+
+class SolverErrorCode(IntEnum):
+    """The error flags every solver tracking gradients reserves in its errno, apart from its own (see 'register_errors')."""
+
+    INVALID_GRAD_NAN = 0b00000000000000000000000010000000
+
+
+# The frames of a step the differentiable solvers keep
+FRAMES = Size("frames")
 
 
 class TimeBasedMixin:
@@ -445,7 +447,7 @@ class Solver(RBC, Dynamics, Integration):
             self._errno_host = torch.zeros((self._B,), dtype=gs.tc_int, pin_memory=True)
             self._errno_event = torch.cuda.Event()
         if self._requires_grad:
-            self._error_messages[ErrorCode.INVALID_GRAD_NAN] = (
+            self._error_messages[SolverErrorCode.INVALID_GRAD_NAN] = (
                 "The backward pass produced a 'nan' or 'inf' gradient of the state. The rollout is likely too stiff to "
                 "differentiate over this horizon: shorten it, or decrease the simulation timestep."
             )
@@ -696,7 +698,7 @@ class Solver(RBC, Dynamics, Integration):
 @qd.kernel
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
     # The qd.Tensor annotation accepts both backends the buffer may be allocated with, a field or an ndarray (see V in
-    # genesis/utils/array_class.py)
+    # genesis/utils/data.py)
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]

@@ -9,10 +9,29 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
-from genesis.utils.data import DataItem, iter_data
+from genesis.engine.solvers.rigid.data import GEOMS, ColliderState, DynInfo
+from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+
+# The cells of the support tables and their candidate vertices (see SupportFieldInfo)
+SUPPORT_CELLS = Size("support_cells")
+SUPPORT_CANDIDATES = Size("support_candidates")
+
+
+class SupportFieldInfo(Data, kind=DataKind.CONSTANT):
+    # First cell of the table of each geom, the geoms of one trimesh sharing one table
+    support_cell_start: qd.Tensor = field(int, shape=(GEOMS,))
+    # First extra candidate of each cell, past those of its record, its extras ending where those of the next start
+    support_list_start: qd.Tensor = field(int, shape=(SUPPORT_CELLS + 1,))
+    # Mesh-frame position and index of each candidate vertex, among the vertices of its geom: the record of every cell
+    # at twice the index of the cell, holding the first two candidates of the cell (a single candidate twice), then the
+    # extra candidates of all cells
+    support_v: qd.Tensor = field((float, 3), shape=(SUPPORT_CANDIDATES,))
+    support_vid: qd.Tensor = field(int, shape=(SUPPORT_CANDIDATES,))
+    support_res: qd.Tensor = field(int, shape=())
 
 
 class SupportField(System):
@@ -34,7 +53,7 @@ class SupportField(System):
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
-    support_field_info: array_class.SupportFieldInfo | None
+    support_field_info: SupportFieldInfo | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         self._solver = rigid_solver
@@ -65,7 +84,7 @@ class SupportField(System):
         n_support_cells = n_geom_cells * len(tables_geom)
         tables = [geom.mesh.get_support_table(self._support_res) for geom in tables_geom]
         n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
-        self.support_field_info = array_class.SupportFieldInfo(
+        self.support_field_info = SupportFieldInfo(
             sizes=dict(
                 geoms=self._solver.n_geoms,
                 support_cells=n_support_cells,
@@ -153,8 +172,8 @@ def _func_support_world(
     d: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
     exhaustive: qd.template() = False,
 ):
     """Support position for a world direction.
@@ -179,7 +198,7 @@ def _func_support_world(
 
 
 @qd.func
-def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo):
+def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_info: SupportFieldInfo):
     """
     Cell of the support table of a geom that a mesh-frame direction falls in.
 
@@ -225,8 +244,8 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_inf
 def _func_support_mesh(
     i_g: int,
     d_mesh: qd.types.vector(3),
-    dyn_info: array_class.DynInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
 ):
     """Support vertex of a mesh-frame direction, the best of the candidates listed by the cell it falls in."""
     i_v_start = dyn_info.geoms.vert_start[i_g]
@@ -275,7 +294,12 @@ def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info
 
 @qd.func
 def _func_support_sphere(
-    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: DynInfo,
+    shrink: bool,
 ):
     sphere_center = pos
     sphere_radius = dyn_info.geoms.data[i_g][0]
@@ -317,7 +341,12 @@ def _func_support_ellipsoid(
 
 @qd.func
 def _func_support_capsule(
-    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: DynInfo,
+    shrink: bool,
 ):
     """
     Support function for capsule geometry.
@@ -345,7 +374,12 @@ def _func_support_capsule(
 
 @qd.func
 def _func_support_cylinder(
-    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: DynInfo,
+    shrink: bool,
 ):
     """
     Support function for cylinder geometry.
@@ -409,7 +443,7 @@ def _func_support_box(
 
 @qd.func
 def _func_count_supports_world(
-    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), support_field_info: array_class.SupportFieldInfo
+    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), support_field_info: SupportFieldInfo
 ):
     """
     Count the number of valid support points for the given world direction.
@@ -420,7 +454,7 @@ def _func_count_supports_world(
 
 
 @qd.func
-def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo):
+def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), support_field_info: SupportFieldInfo):
     """Count the vertices tied for the support of a mesh-frame direction, all of them listed by the cell holding it."""
     i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)
     dot_max = support_field_info.support_v[2 * i_cell].dot(d_mesh)

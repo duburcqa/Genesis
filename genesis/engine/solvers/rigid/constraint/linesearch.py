@@ -2,7 +2,7 @@
 
 The island partition (see island.py) makes the mass matrix, the Jacobian and hence the cost block-diagonal, so each
 island owns a line search, a convergence test and a search direction of its own, measured against the trace of its own
-mass block (IslandState.inertia in array_class.py), and a converged island stands still while the others iterate. The
+mass block (IslandState.inertia in rigid/data.py), and a converged island stands still while the others iterate. The
 monolith arm (one thread per env) takes the islands one after the other, each search sweeping its own dofs and rows
 through the island-ordered dof_id / constraint_id lists with its state in registers. The decomposed arm runs all the
 islands of a group of _K in lockstep with the lanes of the env's block, sweeping the group's range of those lists in
@@ -24,7 +24,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd.misc import func_list_item, func_list_range_start
-from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, RigidInfo
 
 from . import solver as constraint_solver
 
@@ -119,7 +119,7 @@ def func_row_alpha_terms(
     """The (const, linear, quad) coefficient triple of one constraint row at each pending candidate step.
 
     The triples are taken at the first n_alphas candidates of alphas, in the shifted convention cost(alpha) - cost(0)
-    (see ls_improvement in IslandState, array_class.py): an equality row contributes nothing (its terms sit in the
+    (see ls_improvement in IslandState, rigid/data.py): an equality row contributes nothing (its terms sit in the
     initialization sums), an elliptic cone contributes through its head row only. row_kind names the row's class when
     the caller knows it (2 friction loss, 3 elliptic cone head, 4 contact or limit), 0 when the row's class is tested
     at runtime.
@@ -262,7 +262,11 @@ def func_cone_head_kinks(
 
 @qd.func
 def func_dof_p0_terms(
-    i_d: int, i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template()
+    i_d: int,
+    i_b: int,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
 ):
     """Per-dof terms of the line search initialization along the search direction.
 
@@ -433,7 +437,7 @@ def func_ls_state_advance(
 
     if phase == 0:
         p1_alpha, p1_cost, p1_deriv_0, p1_deriv_1, p1_kink = alphas[0], costs[0], grads[0], hess[0], kinks[0]
-        # Costs are shifted deltas from alpha = 0 (see ls_improvement in array_class.py): a positive one means no
+        # Costs are shifted deltas from alpha = 0 (see ls_improvement in rigid/data.py): a positive one means no
         # improvement over alpha = 0, which takes its place.
         if p1_cost > 0.0:
             p1_alpha = 0.0
@@ -561,7 +565,11 @@ def func_ls_state_advance(
 
 @qd.func
 def func_exit_decision(
-    terms: qd.types.vector(7), improvement: float, inertia: float, rigid_info: RigidInfo, rigid_config: qd.template()
+    terms: qd.types.vector(7),
+    improvement: float,
+    inertia: float,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Convergence test of one island from its exit terms (see func_dof_exit_terms) and the improvement of its last line
     search, on the island's own inertia scale: a flat gradient or a stalled improvement stops the iteration, and for
@@ -757,6 +765,7 @@ def func_search_single_island(
     stride: int,
     dyn_state: DynState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_coop: qd.template(),
@@ -951,7 +960,12 @@ def func_exit_single_island(
 
 @qd.func
 def func_linesearch_islands_serial(
-    i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Line search of every island of one env by a single thread, then the step applied.
 
@@ -1183,6 +1197,7 @@ def func_linesearch_islands_coop(
     sh_alpha,
     dyn_state: DynState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):

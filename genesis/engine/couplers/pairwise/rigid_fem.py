@@ -7,13 +7,13 @@ import torch
 
 import quadrants as qd
 
-import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.fem_solver import FEMSolver
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.sdf import SDF
+from genesis.utils.sdf import SDF, SDFInfo
 
 from .fem_surface import FEMSurface, SurfaceCoupling
 from .rigid_contact import func_collide_with_rigid
@@ -53,10 +53,10 @@ def func_fem_rigid(
     vel: qd.types.vector(3),
     mass: float,
     surface_normal: qd.types.vector(3),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """

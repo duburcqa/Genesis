@@ -10,12 +10,17 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 
 @qd.func
 def func_forward_kinematics_link_bw(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_l: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Reverse the forward kinematics of link i_l of env i_b.
 
@@ -231,7 +236,10 @@ def func_forward_kinematics_link_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_forward_kinematics_bw(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Manual reverse of kernel_forward_kinematics_replay: link pos / quat grads back to qpos and parent-pose grads.
 
@@ -259,7 +267,14 @@ def kernel_manual_forward_kinematics_bw(
 
 
 @qd.func
-def func_cd_contraction_bw(i_b: int, i_l: int, i_slot: int, dof_lo: int, dof_hi: int, dyn_state: DynState):
+def func_cd_contraction_bw(
+    i_b: int,
+    i_l: int,
+    i_slot: int,
+    dof_lo: int,
+    dof_hi: int,
+    dyn_state: DynState,
+):
     """Reverse of the forward-velocity contraction atomic_add(cd_*_bw[i_l, i_slot], cdof_*[i_d] * vel[i_d]) over
     dofs [dof_lo, dof_hi): accumulates cd_*_bw[i_slot].grad into cdof_{ang,vel}.grad and vel.grad."""
     g_cd_vel = dyn_state.links.cd_vel_bw.grad[i_l, i_slot, i_b]
@@ -282,7 +297,12 @@ def func_cd_contraction_bw(i_b: int, i_l: int, i_slot: int, dof_lo: int, dof_hi:
 
 @qd.func
 def func_forward_velocity_link_bw(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
+    i_l: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Reverse the forward velocity of link i_l of env i_b.
 
@@ -403,7 +423,10 @@ def func_forward_velocity_link_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_forward_velocity_bw(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Manual reverse of kernel_forward_velocity: link velocity grads back to dof velocity and cdof grads.
 
@@ -426,7 +449,11 @@ def kernel_manual_forward_velocity_bw(
 
 
 @qd.kernel(fastcache=True)
-def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
+def kernel_manual_compute_qacc_bw(
+    dyn_state: DynState,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     """Manual backward for func_compute_qacc via the implicit function theorem (IFT).
 
     Forward chain (func_compute_qacc):
@@ -446,7 +473,7 @@ def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, ri
     backward path populates it, and kernel_forward_dynamics_without_qacc.grad then reverses it into link poses.
 
     Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks of
-    each kinematic tree (see dofs_mass_block_start in array_class.py): elimination never crosses a block, and
+    each kinematic tree (see dofs_mass_block_start in rigid/data.py): elimination never crosses a block, and
     cross-block mass entries are structural zeros whose grads must stay zero.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

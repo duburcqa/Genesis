@@ -13,25 +13,441 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.constants import IntEnum
-from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
+from genesis.engine.bvh import (
+    BVHLeaves,
+    BVHQueryFilter,
+    BVHQueryResults,
+    BVHState,
+    BVHStaticConfig,
+    build_bvh,
+    func_bvh_query_leaves,
+    func_no_filter,
+    get_bvh_data,
+)
 from genesis.engine.pipeline import Coupler, Phase
-from genesis.engine.solvers.fem_solver import func_compute_element_mapping_matrix
+from genesis.engine.solvers.fem_solver import (
+    ELEMENTS,
+    VERTICES,
+    FEMInfo,
+    FEMState,
+    FEMVertexConstraintsInfo,
+    FEMVerticesProperties,
+    func_compute_element_mapping_matrix,
+)
 from genesis.engine.solvers.rigid.abd.forward_dynamics import (
     func_solve_mass_batch,
     update_qacc_from_qvel_delta,
     update_qvel,
 )
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
+from genesis.engine.solvers.rigid.data import (
+    DOFS,
+    ColliderInfo,
+    DofsState,
+    DynState,
+    EntitiesInfo,
+    EqualitiesInfo,
+    FacesInfo,
+    GeomsInfo,
+    GeomsState,
+    JointsInfo,
+    LinksInfo,
+    LinksState,
+    RigidInfo,
+    VertsInfo,
+    VertsState,
+)
 from genesis.engine.solvers.rigid.rigid_solver import RigidConstraints, RigidSolver
 from genesis.engine.step import Coupling, Integration, Preparation
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import FixedOrderSums, SAPState
+from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
+from genesis.utils.linalg import SUM_MAX_CHUNKS, FixedOrderSums
 from genesis.utils.misc import qd_to_numpy, qd_to_torch
-from genesis.utils.sort import func_sort_segments, get_segment_sort_data
+from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
+
+
+# Most FEM vertices a contact pair of the SAP coupler applies its impulse to, the vertices of two tetrahedra. The
+# kernels read it as the size of the vector of slots of a pair (`fem_slots_vert` in SAPContactPairs), since a module
+# global read in a kernel breaks its fast cache.
+SAP_N_FEM_SLOTS = 8
+
+
+# Sizes of the SAP coupler, besides the vertices and the elements of the FEM solver (see VERTICES): the tetrahedral
+# volume of the rigid geoms, the equality constraints of every environment and their chunks, the contact pairs, those
+# applying impulses to rigid dofs, the contact handlers, those applying impulses to rigid dofs, the vertex slots the
+# pairs apply to, the chunks of the pairs of a handler, the candidates of a handler, and the rows of the marching
+# tetrahedra tables
+SAP_VOLUME_VERTS = Size("volume_verts")
+SAP_VOLUME_ELEMS = Size("volume_elems")
+SAP_EQUALITIES = Size("equality_constraints")
+SAP_EQUALITY_CHUNKS = Size("equality_chunks")
+SAP_PAIRS = Size("contact_pairs")
+SAP_RIGID_PAIRS = Size("rigid_contact_pairs")
+SAP_HANDLERS = Size("handlers")
+SAP_RIGID_HANDLERS = Size("rigid_handlers")
+SAP_ENTRIES = Size("entries")
+SAP_PAIR_CHUNKS = Size("pair_chunks")
+SAP_CANDIDATES = Size("handler_candidates")
+SAP_MARCHING_TETS_CASES = Size("marching_tets_cases")
+SAP_TET_EDGES = Size("tet_edges")
+
+
+class SAPContactQueries(Data, kind=DataKind.SCRATCH):
+    """
+    The box queries of the contact handlers of the SAP coupler traversing a tree of SAPState.
+
+    The leaves of the surface tets of the FEM entities serve both the self-contact query and the query of the rigid
+    triangles. The filter of the self-contact query maps each leaf to the vertices of its tet, and the filter of the
+    rigid tets maps each leaf to its geom in its first item, its table holding the collision pair of each pair of geoms,
+    -1 for none (see collision_pair_idx in ColliderInfo). The query of the rigid triangles keeps every pair, its filter
+    reading nothing.
+    """
+
+    fem_self_results: BVHQueryResults
+    rigid_tri_results: BVHQueryResults
+    rigid_tet_results: BVHQueryResults
+    fem_self_filter: BVHQueryFilter
+    rigid_tri_filter: BVHQueryFilter
+    rigid_tet_filter: BVHQueryFilter
+
+
+class SAPHydroelasticFEM(Data, kind=DataKind.CONSTANT):
+    """The pressure field of the FEM entities for hydroelastic contact, its value at each vertex and its gradient in
+    each element."""
+
+    pressure: qd.Tensor = field(float, shape=(VERTICES,))
+    pressure_gradient: qd.Tensor = field((float, 3), shape=(ELEMENTS, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPRigidVolume(Data, kind=DataKind.CONSTANT):
+    """
+    The tetrahedral volume meshes of the rigid geoms for hydroelastic contact, and their pressure field.
+
+    The vertices move with their geom in every environment from their rest position `verts_rest`, and so does the
+    gradient of the pressure field in each element from `pressure_gradient_rest`.
+    """
+
+    verts_rest: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_VERTS,))
+    verts: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_VERTS, ENVS), kind=DataKind.SCRATCH)
+    elems: qd.Tensor = field((int, 4), shape=(SAP_VOLUME_ELEMS,))
+    verts_geom_idx: qd.Tensor = field(int, shape=(SAP_VOLUME_VERTS,))
+    elems_geom_idx: qd.Tensor = field(int, shape=(SAP_VOLUME_ELEMS,))
+    pressure: qd.Tensor = field(float, shape=(SAP_VOLUME_VERTS,))
+    pressure_gradient_rest: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_ELEMS,))
+    pressure_gradient: qd.Tensor = field((float, 3), shape=(SAP_VOLUME_ELEMS, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The unknowns of the SAP solve at the FEM vertices, and the scratch of its conjugate gradient and line search.
+
+    `v` is the velocity being solved for, `v_diff` its change from the free velocity, `gradient` the gradient of the
+    cost and `impulse` the contact impulse. `corners` holds the elastic contribution of each element to each of its
+    four vertices, which the vertices sum in a fixed order (see FEMVerticesProperties).
+    """
+
+    v: qd.Tensor = field((float, 3))
+    v_diff: qd.Tensor = field((float, 3))
+    gradient: qd.Tensor = field((float, 3))
+    impulse: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    prec: qd.Tensor = field((float, (3, 3)))
+    x: qd.Tensor = field((float, 3))
+    r: qd.Tensor = field((float, 3))
+    z: qd.Tensor = field((float, 3))
+    p: qd.Tensor = field((float, 3))
+    Ap: qd.Tensor = field((float, 3))
+    x_prev: qd.Tensor = field((float, 3))
+    dp: qd.Tensor = field((float, 3))
+    corners: qd.Tensor = field((float, 3), shape=(ELEMENTS, 4, ENVS))
+    sums_v: FixedOrderSums
+    sums_el: FixedOrderSums
+
+
+class SAPRigidDofs(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
+    """The unknowns of the SAP solve at the rigid dofs, and the scratch of its conjugate gradient and line search (see
+    SAPFEMVertices)."""
+
+    v: qd.Tensor = field(float)
+    v_diff: qd.Tensor = field(float)
+    mass_v_diff: qd.Tensor = field(float)
+    gradient: qd.Tensor = field(float)
+    impulse: qd.Tensor = field(float)
+    x: qd.Tensor = field(float)
+    r: qd.Tensor = field(float)
+    z: qd.Tensor = field(float)
+    p: qd.Tensor = field(float)
+    Ap: qd.Tensor = field(float)
+    x_prev: qd.Tensor = field(float)
+    dp: qd.Tensor = field(float)
+    sums: FixedOrderSums
+
+
+class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """
+    The scalars of the SAP solve of each environment: its Newton iterations, its conjugate gradient and its exact line
+    search.
+
+    The line search finds the root of the derivative of the cost along the search direction by safeguarded Newton
+    steps within the bracket [`alpha_min`, `alpha_max`], `f` being that derivative scaled by `dell_scale`, unless the
+    slope at the start is small enough for the full step (`is_full_step`).
+    """
+
+    is_active: qd.Tensor = field(bool)
+    is_pcg_active: qd.Tensor = field(bool)
+    is_linesearch_active: qd.Tensor = field(bool)
+    is_full_step: qd.Tensor = field(bool)
+    gradient_norm: qd.Tensor = field(float)
+    momentum_norm: qd.Tensor = field(float)
+    impulse_norm: qd.Tensor = field(float)
+    rTr: qd.Tensor = field(float)
+    rTz: qd.Tensor = field(float)
+    rTr_new: qd.Tensor = field(float)
+    rTz_new: qd.Tensor = field(float)
+    pTAp: qd.Tensor = field(float)
+    alpha: qd.Tensor = field(float)
+    beta: qd.Tensor = field(float)
+    energy_prev: qd.Tensor = field(float)
+    step_size: qd.Tensor = field(float)
+    m: qd.Tensor = field(float)
+    dell_dalpha: qd.Tensor = field(float)
+    d2ellA_dalpha2: qd.Tensor = field(float)
+    d2ell_dalpha2: qd.Tensor = field(float)
+    dell_scale: qd.Tensor = field(float)
+    alpha_min: qd.Tensor = field(float)
+    alpha_max: qd.Tensor = field(float)
+    alpha_tol: qd.Tensor = field(float)
+    f_lower: qd.Tensor = field(float)
+    f_upper: qd.Tensor = field(float)
+    f: qd.Tensor = field(float)
+    df: qd.Tensor = field(float)
+    minus_dalpha: qd.Tensor = field(float)
+    minus_dalpha_prev: qd.Tensor = field(float)
+
+
+class SAPEqualityConstraints(Data, kind=DataKind.CONSTANT, shape=(SAP_EQUALITIES,)):
+    """
+    The joint equality constraints of the rigid solver, which the SAP coupler regularizes and solves with the contacts.
+
+    The constraints are ordered by environment, those of environment i_b being from `batch_start[i_b]` to
+    `batch_start[i_b + 1]`. Each one ties the dof `dof1_idx` to the dof `dof2_idx`, its Jacobian row being `Jt`. The SAP
+    regularization of a constraint is `k`, `R` and `v_hat`, its impulse `gamma` and its Hessian `G`. `vec` holds the
+    impulse each constraint applies, and `partials` the partial sums over the chunks of the constraints of each
+    environment.
+    """
+
+    batch_idx: qd.Tensor = field(int)
+    dof1_idx: qd.Tensor = field(int)
+    dof2_idx: qd.Tensor = field(int)
+    batch_start: qd.Tensor = field(int, shape=(ENVS + 1,))
+    Jt: qd.Tensor = field(float, shape=(SAP_EQUALITIES, DOFS))
+    k: qd.Tensor = field(float)
+    R: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    R_inv: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    v_hat: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    gamma: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    G: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    dvc: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    vec: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    partials: qd.Tensor = field(float, shape=(SAP_EQUALITY_CHUNKS, 2, ENVS), kind=DataKind.SCRATCH)
+
+
+class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(SAP_PAIRS,)):
+    """
+    The contact pairs every contact handler of the SAP coupler detects, which one generic solve handles.
+
+    Handler i_h owns the pairs from `handlers_offset[i_h]` to `handlers_offset[i_h] + handlers_capacity[i_h]`, the
+    first `handlers_n_pairs[i_h]` of which are detected, `handlers_is_overflow[i_h]` telling whether its candidates or
+    its box query overflowed. The handlers applying impulses to rigid dofs come first, so that their pairs alone take a
+    Jacobian `Jt` (see SAPContactsLayout). A pair applies its impulse to up to SAP_N_FEM_SLOTS FEM vertices
+    `fem_slots_vert` (-1 for an unused slot), with the weights `fem_slots_weight`, and to the chains of the links
+    `link_idx` (-1 for none), with the signs `link_sign`. A pair with a contact frame (`normal`, `tangent0`, `tangent1`)
+    solves in that frame, the others in the world frame.
+
+    The pairs are appended concurrently during the detection, in an order that changes from run to run. The key of a
+    pair identifies it uniquely among the pairs of its handler and environment, and `sort` orders the pairs by
+    environment, then by handler, then by key, as one segment per environment and handler. Every sum over the pairs,
+    whether into a scalar of an environment or into a vertex or a dof, runs in that order, chunk by chunk for each
+    handler (see SUM_MAX_CHUNKS), so that the result is bitwise reproducible. The slots applying to vertex i_v of
+    environment i_b, encoded as i_s * SAP_N_FEM_SLOTS + i_slot for the slot i_slot of the pair at the sorted position
+    i_s, are `vertices_entry[vertices_entry_start[i_v, i_b]:vertices_entry_start[i_v + 1, i_b]]` in increasing order.
+
+    The SAP regularization of a pair is `k`, `phi0`, `Rn`, `Rt`, `vn_hat`, `mu` and their derived values, its impulse
+    `gamma` and its Hessian `G` in its frame, and `dvc` the change of its velocity along the search direction. `vec` and
+    `mat` hold its impulse and its Hessian in the world frame, and `pairs_partials` and `dofs_partials` the partial sums
+    over the chunks of the sorted pairs of each handler and environment.
+    """
+
+    handler_idx: qd.Tensor = field(int)
+    batch_idx: qd.Tensor = field(int)
+    key: qd.Tensor = field(qd.u64)
+    has_frame: qd.Tensor = field(bool)
+    normal: qd.Tensor = field((float, 3))
+    tangent0: qd.Tensor = field((float, 3))
+    tangent1: qd.Tensor = field((float, 3))
+    contact_pos: qd.Tensor = field((float, 3))
+    fem_slots_vert: qd.Tensor = field((int, SAP_N_FEM_SLOTS))
+    fem_slots_weight: qd.Tensor = field((float, SAP_N_FEM_SLOTS))
+    link_idx: qd.Tensor = field((int, 2))
+    link_sign: qd.Tensor = field((float, 2))
+    k: qd.Tensor = field(float)
+    phi0: qd.Tensor = field(float)
+    Rn: qd.Tensor = field(float)
+    Rt: qd.Tensor = field(float)
+    Rn_inv: qd.Tensor = field(float)
+    Rt_inv: qd.Tensor = field(float)
+    vn_hat: qd.Tensor = field(float)
+    mu: qd.Tensor = field(float)
+    mu_hat: qd.Tensor = field(float)
+    mu_factor: qd.Tensor = field(float)
+    gamma: qd.Tensor = field((float, 3))
+    G: qd.Tensor = field((float, (3, 3)))
+    dvc: qd.Tensor = field((float, 3))
+    vec: qd.Tensor = field((float, 3))
+    mat: qd.Tensor = field((float, (3, 3)))
+    Jt: qd.Tensor = field((float, 3), shape=(SAP_RIGID_PAIRS, DOFS))
+    M_inv_Jt: qd.Tensor = field((float, 3), shape=(SAP_RIGID_PAIRS, DOFS))
+    handlers_n_pairs: qd.Tensor = field(int, shape=(SAP_HANDLERS,))
+    handlers_is_overflow: qd.Tensor = field(bool, shape=(SAP_HANDLERS,))
+    segments_n_pairs: qd.Tensor = field(int, shape=(SAP_HANDLERS * ENVS,))
+    sort: SegmentSortBuffer
+    vertices_n_entries: qd.Tensor = field(int, shape=(VERTICES, ENVS))
+    vertices_entry_start: qd.Tensor = field(int, shape=(VERTICES + 1, ENVS))
+    vertices_entry: qd.Tensor = field(int, shape=(SAP_ENTRIES,))
+    pairs_partials: qd.Tensor = field(float, shape=(SAP_PAIR_CHUNKS, 2, SAP_HANDLERS, ENVS))
+    dofs_partials: qd.Tensor = field(float, shape=(SAP_PAIR_CHUNKS, DOFS, SAP_RIGID_HANDLERS, ENVS))
+
+
+class SAPContactsLayout(Data, kind=DataKind.CONSTANT, shape=(SAP_HANDLERS,)):
+    """
+    The layout of the contact pairs of every handler of the SAP coupler (see SAPContactPairs).
+
+    `handlers_n_chunks` is the number of chunks the sorted pairs of a handler split into for the sums over them,
+    `handlers_rigid_rank` the rank of a handler among those applying impulses to rigid dofs (-1 for none), and
+    `key_bits` the bits of the keys of the pairs of a handler.
+    """
+
+    handlers_offset: qd.Tensor = field(int)
+    handlers_capacity: qd.Tensor = field(int)
+    handlers_n_chunks: qd.Tensor = field(int)
+    handlers_rigid_rank: qd.Tensor = field(int)
+    key_bits: qd.Tensor = field(int, shape=())
+
+
+class SAPTetPlaneCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """The tetrahedra crossing a plane, with the signed distance of their vertices to it and the code of the edges it
+    cuts (see the marching tetrahedra table of SAPInfo)."""
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx: qd.Tensor = field(int)
+    intersection_code: qd.Tensor = field(int)
+    distance: qd.Tensor = field((float, 4))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPTetTetCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """
+    The pairs of tetrahedra crossing their plane of equal pressure, with the normal of the plane, the signed distance of
+    the vertices of the first one to it and the code of the edges it cuts.
+    """
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx0: qd.Tensor = field(int)
+    elem_idx1: qd.Tensor = field(int)
+    intersection_code0: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3))
+    distance0: qd.Tensor = field((float, 4))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPTriTetCandidates(Data, kind=DataKind.SCRATCH, shape=(SAP_CANDIDATES,)):
+    """The pairs of a FEM tetrahedron and a rigid triangle crossing the plane of the triangle, of normal `normal`."""
+
+    batch_idx: qd.Tensor = field(int)
+    elem_idx: qd.Tensor = field(int)
+    face_idx: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3))
+    n_candidates: qd.Tensor = field(int, shape=(1,))
+
+
+class SAPContactCandidates(Data, kind=DataKind.SCRATCH):
+    """The candidates of the contact handlers detecting their pairs in two passes, one member per handler."""
+
+    fem_floor_tet: SAPTetPlaneCandidates
+    fem_self_tet: SAPTetTetCandidates
+    rigid_floor_tet: SAPTetPlaneCandidates
+    rigid_fem_tri_tet: SAPTriTetCandidates
+    rigid_rigid_tet: SAPTetTetCandidates
+
+
+class SAPState(Data, kind=DataKind.SCRATCH):
+    """Runtime state of the SAP coupler, with the trees of the surface tets of the FEM entities, of the triangles and of
+    the tets of the rigid geoms its box queries traverse."""
+
+    fem_surface_tet_bvh: BVHState
+    rigid_tri_bvh: BVHState
+    rigid_tet_bvh: BVHState
+    fem: SAPFEMVertices
+    rigid: SAPRigidDofs
+    solver: SAPSolverScalars
+    hydroelastic_fem: SAPHydroelasticFEM
+    rigid_volume: SAPRigidVolume
+    equalities: SAPEqualityConstraints
+    pairs: SAPContactPairs
+    candidates: SAPContactCandidates
+    queries: SAPContactQueries
+
+
+class SAPInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """
+    Model parameters of the SAP coupler.
+
+    The SAP solve stops once the norm of the gradient of its cost falls below `convergence_atol` plus
+    `convergence_rtol` times the norm of the momentum or of the impulse. `taud`, `beta` and `sigma` set the
+    regularization of the contacts and of the constraints, and `hydroelastic_stiffness`, `point_contact_stiffness` and
+    `rigid_floor_vert_stiffness` the stiffness of the contacts of each model. A hydroelastic contact smaller than
+    `hydroelastic_eps` in area, stiffness or gap is dropped. The tables `marching_tets_edge_table` and `tet_edges` give
+    the edges a plane cuts in a tetrahedron from the sign of the distance of its vertices to it.
+    """
+
+    contacts: SAPContactsLayout
+    substep_dt: qd.Tensor = field(float)
+    convergence_atol: qd.Tensor = field(float)
+    convergence_rtol: qd.Tensor = field(float)
+    taud: qd.Tensor = field(float)
+    beta: qd.Tensor = field(float)
+    sigma: qd.Tensor = field(float)
+    pcg_threshold: qd.Tensor = field(float)
+    linesearch_ftol: qd.Tensor = field(float)
+    linesearch_max_step_size: qd.Tensor = field(float)
+    hydroelastic_stiffness: qd.Tensor = field(float)
+    point_contact_stiffness: qd.Tensor = field(float)
+    equality_stiffness: qd.Tensor = field(float)
+    rigid_floor_vert_stiffness: qd.Tensor = field(float)
+    hydroelastic_eps: qd.Tensor = field(float)
+    floor_height: qd.Tensor = field(float)
+    marching_tets_edge_table: qd.Tensor = field((int, 4), shape=(SAP_MARCHING_TETS_CASES,))
+    tet_edges: qd.Tensor = field((int, 2), shape=(SAP_TET_EDGES,))
+    EPS: qd.Tensor = field(float)
+
+
+class SAPStaticConfig(StaticConfig):
+    """The compile-time configuration of the kernels of the SAP coupler."""
+
+    # Whether the solve has FEM vertices, rigid dofs and equality constraints among its unknowns
+    has_fem: bool
+    has_rigid: bool
+    has_equalities: bool
+    # Whether some pairs apply their impulse to rigid dofs, through a rigid Jacobian
+    has_rigid_contacts: bool
+    # Whether the vertices of the FEM solver may be constrained, which drops them from the solve. The name matches the
+    # one of FEMStaticConfig, the FEM funcs the SAP kernels call reading it from either config.
+    enable_vertex_constraints: bool
+
 
 MARCHING_TETS_EDGE_TABLE = (
     (-1, -1, -1, -1),
@@ -194,13 +610,13 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
 
         self.contact_handlers: list[SAPContactHandler] = []
         # The static configs of the trees of SAPState
-        self.fem_surface_tet_bvh_config: array_class.BVHStaticConfig | None = None
-        self.rigid_tri_bvh_config: array_class.BVHStaticConfig | None = None
-        self.rigid_tet_bvh_config: array_class.BVHStaticConfig | None = None
-        self.sap_state: array_class.SAPState | None = None
-        self.sap_info: array_class.SAPInfo | None = None
-        self.sap_static_config: array_class.SAPStaticConfig | None = None
-        self._pairs_sort_config: array_class.SegmentSortStaticConfig | None = None
+        self.fem_surface_tet_bvh_config: BVHStaticConfig | None = None
+        self.rigid_tri_bvh_config: BVHStaticConfig | None = None
+        self.rigid_tet_bvh_config: BVHStaticConfig | None = None
+        self.sap_state: SAPState | None = None
+        self.sap_info: SAPInfo | None = None
+        self.sap_static_config: SAPStaticConfig | None = None
+        self._pairs_sort_config: SegmentSortStaticConfig | None = None
         self._is_fem_hydroelastic = False
         self._is_rigid_hydroelastic = False
         self._has_fem_surface_tet_tree = False
@@ -309,8 +725,8 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                     n_pairs += handler.capacity
             if is_rigid:
                 n_rigid_pairs = n_pairs
-        n_entries = array_class.SAP_N_FEM_SLOTS * max(n_pairs, 1) if fem_solver.is_active else 0
-        handlers_n_chunks = np.clip(handlers_capacity, 1, array_class.SUM_MAX_CHUNKS)
+        n_entries = SAP_N_FEM_SLOTS * max(n_pairs, 1) if fem_solver.is_active else 0
+        handlers_n_chunks = np.clip(handlers_capacity, 1, SUM_MAX_CHUNKS)
 
         # The pairs sort by environment, then by handler, then by key, one segment per environment and handler
         key_bits = max([max(1, (handler.n_keys - 1).bit_length()) for handler in self.contact_handlers] + [1])
@@ -363,7 +779,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 "volume_verts": n_rigid_volume_verts,
                 "volume_elems": n_rigid_volume_elems,
                 "equality_constraints": rigid_solver.n_equalities * B,
-                "equality_chunks": min(rigid_solver.n_equalities, array_class.SUM_MAX_CHUNKS),
+                "equality_chunks": min(rigid_solver.n_equalities, SUM_MAX_CHUNKS),
                 "contact_pairs": n_pairs,
                 "rigid_contact_pairs": n_rigid_pairs,
                 "handlers": n_handlers,
@@ -419,7 +835,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
             )
 
         options = self.options
-        self.sap_info = array_class.SAPInfo(
+        self.sap_info = SAPInfo(
             sizes=dict(
                 handlers=n_handlers,
                 marching_tets_cases=len(MARCHING_TETS_EDGE_TABLE),
@@ -445,7 +861,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 EPS=gs.EPS,
             ),
         )
-        self.sap_static_config = array_class.SAPStaticConfig(
+        self.sap_static_config = SAPStaticConfig(
             has_fem=fem_solver.is_active,
             has_rigid=rigid_solver.is_active,
             has_rigid_contacts=n_rigid_pairs > 0,
@@ -923,7 +1339,7 @@ def func_tet_plane_section(
     intersection_code: int,
     tet_vertices: qd.types.matrix(3, 4),
     distance: qd.types.vector(4),
-    sap_info: array_class.SAPInfo,
+    sap_info: SAPInfo,
 ):
     """
     Return the section of a tetrahedron by a plane, and its number of vertices.
@@ -997,7 +1413,7 @@ def func_equal_pressure_plane(
 
 
 @qd.func
-def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, filter_data: array_class.BVHQueryFilter) -> bool:
+def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, filter_data: BVHQueryFilter) -> bool:
     """
     Drop a pair of FEM surface tets once per unordered pair, and the pairs sharing a vertex.
 
@@ -1013,7 +1429,7 @@ def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, filter_data: arra
 
 
 @qd.func
-def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, filter_data: array_class.BVHQueryFilter) -> bool:
+def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, filter_data: BVHQueryFilter) -> bool:
     """
     Drop a pair of rigid tets whose geoms hold no collision pair.
 
@@ -1040,8 +1456,8 @@ def func_append_pair(
     k: float,
     phi0: float,
     mu: float,
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
 ):
     """
     Append a pair to the segment of a handler, and return its index, -1 when the segment is full.
@@ -1072,7 +1488,7 @@ def func_contact_velocity(
     i_p: int,
     x_fem: qd.template(),
     x_rigid: qd.template(),
-    sap_state: array_class.SAPState,
+    sap_state: SAPState,
     static_config: qd.template(),
 ):
     """
@@ -1123,8 +1539,8 @@ def func_contact_mode(mu: float, mu_hat: float, yr: float, yn: float):
 def func_contact_gamma(
     i_p: int,
     vc: qd.types.vector(3),
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
     compute_hessian: qd.template(),
 ):
     """
@@ -1183,8 +1599,8 @@ def func_contact_gamma(
 def func_fem_contacts_Jt(
     i_v: int,
     i_b: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
     static_config: qd.template(),
     compute_hessian: qd.template(),
 ):
@@ -1204,7 +1620,7 @@ def func_fem_contacts_Jt(
         Jt_vec_handler = qd.Vector.zero(gs.qd_float, 3)
         Jt_A_J_handler = qd.Matrix.zero(gs.qd_float, 3, 3)
         i_h_cur = -1
-        # See SAP_N_FEM_SLOTS in array_class.py for the slots of a pair
+        # See SAP_N_FEM_SLOTS for the slots of a pair
         fem_slots_vert = sap_state.pairs.fem_slots_vert[0]
         n_slots = fem_slots_vert.n
         for i_entry in range(
@@ -1238,10 +1654,10 @@ def func_fem_contacts_Jt(
 @qd.kernel(fastcache=True)
 def kernel_compute_fem_pressure_gradient(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
 ):
     """Compute the gradient of the pressure field of the FEM entities in every element, at the positions of a frame."""
     for i_e, i_b in qd.ndrange(
@@ -1266,7 +1682,7 @@ def kernel_compute_fem_pressure_gradient(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_rigid_pressure_gradient_rest(sap_state: array_class.SAPState, sap_info: array_class.SAPInfo):
+def kernel_compute_rigid_pressure_gradient_rest(sap_state: SAPState, sap_info: SAPInfo):
     """Compute the gradient of the pressure field of the rigid geoms in every element of their volume, at rest."""
     for i_e in range(sap_state.rigid_volume.elems.shape[0]):
         elem = sap_state.rigid_volume.elems[i_e]
@@ -1288,9 +1704,7 @@ def kernel_compute_rigid_pressure_gradient_rest(sap_state: array_class.SAPState,
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_rigid_volume(
-    sap_state: array_class.SAPState, geoms_state: array_class.GeomsState, sap_info: array_class.SAPInfo
-):
+def kernel_update_rigid_volume(sap_state: SAPState, geoms_state: GeomsState, sap_info: SAPInfo):
     """Move the volume meshes of the rigid geoms and the gradient of their pressure field to the pose of their geom."""
     for i_v, i_b in qd.ndrange(sap_state.rigid_volume.verts.shape[0], sap_state.rigid_volume.verts.shape[1]):
         i_g = sap_state.rigid_volume.verts_geom_idx[i_v]
@@ -1306,9 +1720,7 @@ def kernel_update_rigid_volume(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_fem_surface_tet_aabb(
-    f: int, bvh_leaves: array_class.BVHLeaves, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo
-):
+def kernel_compute_fem_surface_tet_aabb(f: int, bvh_leaves: BVHLeaves, fem_state: FEMState, fem_info: FEMInfo):
     """Compute the boxes of the surface tetrahedra of the FEM entities in a frame, the leaves of their tree."""
     for i_b, i_se in qd.ndrange(bvh_leaves.aabbs_min.shape[0], bvh_leaves.aabbs_min.shape[1]):
         i_e = fem_info.surface.elements_idx[i_se]
@@ -1327,10 +1739,10 @@ def kernel_compute_fem_surface_tet_aabb(
 def func_rigid_face_vertices(
     i_f: int,
     i_b: int,
-    free_verts_state: array_class.VertsState,
-    fixed_verts_state: array_class.VertsState,
-    verts_info: array_class.VertsInfo,
-    faces_info: array_class.FacesInfo,
+    free_verts_state: VertsState,
+    fixed_verts_state: VertsState,
+    verts_info: VertsInfo,
+    faces_info: FacesInfo,
 ):
     """Return the vertices of a face of the rigid geoms in an environment, as the columns of a matrix."""
     tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1346,11 +1758,11 @@ def func_rigid_face_vertices(
 
 @qd.kernel(fastcache=True)
 def kernel_compute_rigid_tri_aabb(
-    bvh_leaves: array_class.BVHLeaves,
-    free_verts_state: array_class.VertsState,
-    fixed_verts_state: array_class.VertsState,
-    verts_info: array_class.VertsInfo,
-    faces_info: array_class.FacesInfo,
+    bvh_leaves: BVHLeaves,
+    free_verts_state: VertsState,
+    fixed_verts_state: VertsState,
+    verts_info: VertsInfo,
+    faces_info: FacesInfo,
 ):
     """Compute the boxes of the faces of the rigid geoms, the leaves of their tree."""
     for i_b, i_f in qd.ndrange(bvh_leaves.aabbs_min.shape[0], bvh_leaves.aabbs_min.shape[1]):
@@ -1361,7 +1773,7 @@ def kernel_compute_rigid_tri_aabb(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_rigid_tet_aabb(sap_state: array_class.SAPState):
+def kernel_compute_rigid_tet_aabb(sap_state: SAPState):
     """Compute the boxes of the elements of the volume meshes of the rigid geoms, the leaves of their tree."""
     for i_b, i_e in qd.ndrange(
         sap_state.rigid_tet_bvh.leaves.aabbs_min.shape[0], sap_state.rigid_tet_bvh.leaves.aabbs_min.shape[1]
@@ -1381,7 +1793,7 @@ def kernel_compute_rigid_tet_aabb(sap_state: array_class.SAPState):
 
 
 @qd.func
-def func_clamp_to_capacity(i_h: int, n_items: int, capacity: int, sap_state: array_class.SAPState):
+def func_clamp_to_capacity(i_h: int, n_items: int, capacity: int, sap_state: SAPState):
     """Return the items of a handler within the capacity of their buffer, flagging the handler on overflow."""
     if n_items > capacity:
         sap_state.pairs.handlers_is_overflow[i_h] = True
@@ -1394,7 +1806,7 @@ def func_append_tet_plane_candidate(
     i_b: int,
     intersection_code: int,
     distance: qd.types.vector(4),
-    candidates: array_class.SAPTetPlaneCandidates,
+    candidates: SAPTetPlaneCandidates,
 ):
     """Append a tetrahedron crossing a plane to the candidates of a handler, dropped when they are full."""
     i_c = qd.atomic_add(candidates.n_candidates[0], 1)
@@ -1413,7 +1825,7 @@ def func_append_tet_tet_candidate(
     intersection_code0: int,
     normal: qd.types.vector(3),
     distance0: qd.types.vector(4),
-    candidates: array_class.SAPTetTetCandidates,
+    candidates: SAPTetTetCandidates,
 ):
     """Append a pair of tetrahedra crossing their plane of equal pressure to the candidates of a handler."""
     i_c = qd.atomic_add(candidates.n_candidates[0], 1)
@@ -1432,7 +1844,7 @@ def func_tet_floor_contact(
     tet_vertices: qd.types.matrix(3, 4),
     tet_pressures: qd.types.vector(4),
     distance: qd.types.vector(4),
-    sap_info: array_class.SAPInfo,
+    sap_info: SAPInfo,
 ):
     """
     Return the area and the centroid of the section of a tetrahedron by the floor, and the barycentric coordinates and
@@ -1457,7 +1869,7 @@ def func_tet_tet_contact(
     distance0: qd.types.vector(4),
     tet_vertices1: qd.types.matrix(3, 4),
     normal: qd.types.vector(3),
-    sap_info: array_class.SAPInfo,
+    sap_info: SAPInfo,
 ):
     """
     Return whether two tetrahedra contact on their plane of equal pressure, over the section of the first one clipped by
@@ -1546,7 +1958,7 @@ def func_clip_polygon_by_tet(
 
 
 @qd.kernel(fastcache=True)
-def kernel_reset_contacts(sap_state: array_class.SAPState):
+def kernel_reset_contacts(sap_state: SAPState):
     """Empty the pairs of every handler, each handler emptying its candidates and its box query itself."""
     for i_h in range(sap_state.pairs.handlers_n_pairs.shape[0]):
         sap_state.pairs.handlers_n_pairs[i_h] = 0
@@ -1557,10 +1969,10 @@ def kernel_reset_contacts(sap_state: array_class.SAPState):
 def kernel_detect_fem_floor_tet(
     f: int,
     i_h: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
 ):
     """
     Detect the contact of the tetrahedra of the FEM entities with the floor, by the hydroelastic model.
@@ -1625,10 +2037,10 @@ def kernel_detect_fem_floor_tet(
 def kernel_detect_fem_floor_vert(
     f: int,
     i_h: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
 ):
     """
     Detect the contact of the surface vertices of the FEM entities with the floor, by the point contact model.
@@ -1658,10 +2070,10 @@ def kernel_detect_fem_floor_vert(
 def kernel_detect_fem_self_tet(
     f: int,
     i_h: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
 ):
     """
     Detect the contact between the surface tetrahedra of the FEM entities, by the hydroelastic model.
@@ -1792,11 +2204,11 @@ def kernel_detect_fem_self_tet(
 @qd.kernel(fastcache=True)
 def kernel_detect_rigid_floor_vert(
     i_h: int,
-    sap_state: array_class.SAPState,
-    free_verts_state: array_class.VertsState,
-    sap_info: array_class.SAPInfo,
-    verts_info: array_class.VertsInfo,
-    geoms_info: array_class.GeomsInfo,
+    sap_state: SAPState,
+    free_verts_state: VertsState,
+    sap_info: SAPInfo,
+    verts_info: VertsInfo,
+    geoms_info: GeomsInfo,
 ):
     """Detect the contact of the free vertices of the rigid geoms with the floor, by the point contact model."""
     for i_v, i_b in qd.ndrange(verts_info.is_fixed.shape[0], free_verts_state.pos.shape[1]):
@@ -1825,10 +2237,10 @@ def kernel_detect_rigid_floor_vert(
 @qd.kernel(fastcache=True)
 def kernel_detect_rigid_floor_tet(
     i_h: int,
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
-    links_info: array_class.LinksInfo,
-    geoms_info: array_class.GeomsInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
+    links_info: LinksInfo,
+    geoms_info: GeomsInfo,
     rigid_config: qd.template(),
 ):
     """
@@ -1892,9 +2304,7 @@ def kernel_detect_rigid_floor_tet(
 
 
 @qd.kernel(fastcache=True)
-def kernel_detect_rigid_rigid_tet(
-    i_h: int, sap_state: array_class.SAPState, sap_info: array_class.SAPInfo, geoms_info: array_class.GeomsInfo
-):
+def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPInfo, geoms_info: GeomsInfo):
     """
     Detect the contact between the tetrahedra of the volume meshes of the rigid geoms, by the hydroelastic model.
 
@@ -2022,15 +2432,15 @@ def kernel_detect_rigid_rigid_tet(
 def kernel_detect_rigid_fem_tri_tet(
     f: int,
     i_h: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    free_verts_state: array_class.VertsState,
-    fixed_verts_state: array_class.VertsState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
-    verts_info: array_class.VertsInfo,
-    faces_info: array_class.FacesInfo,
-    geoms_info: array_class.GeomsInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    free_verts_state: VertsState,
+    fixed_verts_state: VertsState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
+    verts_info: VertsInfo,
+    faces_info: FacesInfo,
+    geoms_info: GeomsInfo,
 ):
     """
     Detect the contact of the triangles of the rigid geoms with the surface tetrahedra of the FEM entities, by the
@@ -2159,8 +2569,8 @@ def kernel_detect_rigid_fem_tri_tet(
 
 @qd.kernel(fastcache=True)
 def kernel_sort_contacts(
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
     static_config: qd.template(),
     sort_config: qd.template(),
 ) -> tuple[bool, bool]:
@@ -2219,7 +2629,7 @@ def kernel_sort_contacts(
     # The slots of the sorted pairs applying to each FEM vertex, a handful at most per vertex, sorted by insertion
     if qd.static(static_config.has_fem):
         n_vertices = sap_state.pairs.vertices_n_entries.shape[0]
-        # See SAP_N_FEM_SLOTS in array_class.py for the slots of a pair
+        # See SAP_N_FEM_SLOTS for the slots of a pair
         fem_slots_vert = sap_state.pairs.fem_slots_vert[0]
         n_slots = fem_slots_vert.n
         for i_v, i_b in qd.ndrange(n_vertices, sap_state.pairs.vertices_n_entries.shape[1]):
@@ -2270,10 +2680,10 @@ def kernel_sort_contacts(
 # add_collision_constraints in rigid/constraint/solver.py).
 @qd.kernel(fastcache=True)
 def kernel_compute_jacobian(
-    sap_state: array_class.SAPState,
-    dofs_state: array_class.DofsState,
-    links_state: array_class.LinksState,
-    links_info: array_class.LinksInfo,
+    sap_state: SAPState,
+    dofs_state: DofsState,
+    links_state: LinksState,
+    links_info: LinksInfo,
     rigid_config: qd.template(),
 ):
     """
@@ -2306,10 +2716,10 @@ def kernel_compute_jacobian(
 
 @qd.kernel(fastcache=True)
 def kernel_build_equality_constraints(
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
-    joints_info: array_class.JointsInfo,
-    equalities_info: array_class.EqualitiesInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
+    joints_info: JointsInfo,
+    equalities_info: EqualitiesInfo,
     rigid_config: qd.template(),
     n_equalities: int,
 ):
@@ -2353,9 +2763,7 @@ def kernel_build_equality_constraints(
 # FIXME: The solve duplicates func_solve_mass_block in rigid/abd/forward_dynamics.py, which solves one right-hand side
 # per environment instead of the three columns of the rigid Jacobian of every pair.
 @qd.func(requires_top_level=True)
-def func_rigid_solve_jacobian(
-    sap_state: array_class.SAPState, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo
-):
+def func_rigid_solve_jacobian(sap_state: SAPState, entities_info: EntitiesInfo, rigid_info: RigidInfo):
     """
     Compute M^-1 J^T for the rigid Jacobian of the pairs, by the LDL^T factor of the mass matrix of their environment.
     """
@@ -2396,12 +2804,12 @@ def func_rigid_solve_jacobian(
 
 @qd.kernel(fastcache=True)
 def kernel_compute_regularization(
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
-    sap_info: array_class.SAPInfo,
-    entities_info: array_class.EntitiesInfo,
-    rigid_info: array_class.RigidInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
+    sap_info: SAPInfo,
+    entities_info: EntitiesInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
 ):
     """
@@ -2469,14 +2877,14 @@ def kernel_compute_regularization(
 # ------------------------------------------------------------------------------------
 
 # Every sum over the vertices, the elements or the dofs of an environment runs in fixed order, so that it is bitwise
-# reproducible (see FixedOrderSums in array_class.py): the loop updating the items writes their terms, and the loop
+# reproducible (see FixedOrderSums in linalg.py): the loop updating the items writes their terms, and the loop
 # over the environments that follows sums the partial sums in order. The sums over the constraints or the pairs of an
 # environment, a segment of a flat array, run one thread per chunk of the segment, which sums its items in order into
 # a partial sum (see lu.func_chunk_range).
 
 
 @qd.func
-def func_sum_vertices_dofs(i_b: int, k: int, sap_state: array_class.SAPState, static_config: qd.template()):
+def func_sum_vertices_dofs(i_b: int, k: int, sap_state: SAPState, static_config: qd.template()):
     """Return the sum k over the FEM vertices and the rigid dofs of an environment."""
     value_sum = gs.qd_float(0.0)
     if qd.static(static_config.has_fem):
@@ -2488,7 +2896,7 @@ def func_sum_vertices_dofs(i_b: int, k: int, sap_state: array_class.SAPState, st
 
 @qd.func
 def func_sum_constraints_contacts(
-    i_b: int, k: int, sap_state: array_class.SAPState, sap_info: array_class.SAPInfo, static_config: qd.template()
+    i_b: int, k: int, sap_state: SAPState, sap_info: SAPInfo, static_config: qd.template()
 ):
     """Return the sum k over the equality constraints and the pairs of an environment, the handlers in order."""
     value_sum = gs.qd_float(0.0)
@@ -2507,7 +2915,7 @@ def func_sum_constraints_contacts(
 
 @qd.func
 def func_rigid_contacts_Jt_vec(
-    i_d: int, i_b: int, sap_state: array_class.SAPState, sap_info: array_class.SAPInfo, static_config: qd.template()
+    i_d: int, i_b: int, sap_state: SAPState, sap_info: SAPInfo, static_config: qd.template()
 ):
     """
     Return the transposed Jacobian of the equality constraints and of the pairs times their impulses at a rigid dof.
@@ -2533,7 +2941,7 @@ def func_rigid_contacts_Jt_vec(
 
 
 @qd.func(requires_top_level=True)
-def func_sum_rigid_Jt_vec(sap_state: array_class.SAPState, sap_info: array_class.SAPInfo):
+def func_sum_rigid_Jt_vec(sap_state: SAPState, sap_info: SAPInfo):
     """
     Compute the partial sums of the transposed rigid Jacobian times the impulses of the pairs over chunks of the sorted
     pairs of each handler, per dof.
@@ -2567,8 +2975,8 @@ def func_compute_elastic_products(
     i_b: int,
     S: qd.types.matrix(4, 3),
     src: qd.template(),
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
 ):
     """Return S^T x of an element, x being the values of a field at its vertices, and its Hessian times it."""
     el2v = fem_info.elements.el2v[i_e]
@@ -2589,10 +2997,10 @@ def func_compute_fem_matrix_vector_product(
     src: qd.template(),
     dst: qd.template(),
     active: qd.template(),
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
     add_contacts: qd.template(),
     sum_dot: qd.template(),
@@ -2642,9 +3050,9 @@ def func_compute_rigid_mass_mat_vec_product(
     vec: qd.template(),
     out: qd.template(),
     active: qd.template(),
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
-    rigid_info: array_class.RigidInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
     add_contacts: qd.template(),
     sum_dot: qd.template(),
@@ -2672,8 +3080,8 @@ def func_compute_rigid_mass_mat_vec_product(
 
 @qd.func(requires_top_level=True)
 def func_compute_constraints_contacts_line_terms(
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
     static_config: qd.template(),
     compute_energy: qd.template(),
 ):
@@ -2745,9 +3153,9 @@ def func_compute_constraints_contacts_line_terms(
 @qd.kernel(fastcache=True)
 def kernel_init_sap_solve(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
     static_config: qd.template(),
 ):
     """Start the SAP solve of every environment from the free velocities of the substep."""
@@ -2764,10 +3172,10 @@ def kernel_init_sap_solve(
 @qd.kernel(fastcache=True)
 def kernel_init_unconstrained_gradient_diag(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
-    fem_info: array_class.FEMInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
 ):
     """Reset the gradient, and set the diagonal blocks of the free motion Hessian and the change from the free
@@ -2786,12 +3194,12 @@ def kernel_init_unconstrained_gradient_diag(
 
 @qd.kernel(fastcache=True)
 def kernel_compute_unconstrained_gradient(
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
-    rigid_info: array_class.RigidInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
 ):
     """Compute the free motion part of the gradient, A (v - v*), A being the mass matrix of the free motion."""
@@ -2824,9 +3232,9 @@ def kernel_compute_unconstrained_gradient(
 
 @qd.kernel(fastcache=True)
 def kernel_compute_constraint_contact_gradient_hessian_diag_prec(
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
     static_config: qd.template(),
 ):
     """
@@ -2884,10 +3292,10 @@ def kernel_compute_constraint_contact_gradient_hessian_diag_prec(
 
 @qd.kernel(fastcache=True)
 def kernel_check_sap_convergence(
-    sap_state: array_class.SAPState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
-    rigid_info: array_class.RigidInfo,
+    sap_state: SAPState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
 ):
     """Stop the SAP solve of the environments whose gradient is small enough relative to their momentum or impulse."""
@@ -2920,10 +3328,10 @@ def kernel_check_sap_convergence(
 
 @qd.kernel(fastcache=True)
 def kernel_init_pcg_solve(
-    sap_state: array_class.SAPState,
-    dyn_state: array_class.DynState,
-    sap_info: array_class.SAPInfo,
-    rigid_info: array_class.RigidInfo,
+    sap_state: SAPState,
+    dyn_state: DynState,
+    sap_info: SAPInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
     rigid_config: qd.template(),
 ):
@@ -2965,13 +3373,13 @@ def kernel_init_pcg_solve(
 
 @qd.kernel(fastcache=True)
 def kernel_one_pcg_iter(
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dyn_state: array_class.DynState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
-    rigid_info: array_class.RigidInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dyn_state: DynState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
     rigid_config: qd.template(),
 ):
@@ -3089,10 +3497,10 @@ def kernel_one_pcg_iter(
 @qd.func(requires_top_level=True)
 def func_compute_line_gradient_hessian(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
+    sap_info: SAPInfo,
     static_config: qd.template(),
 ):
     """
@@ -3123,9 +3531,7 @@ def func_compute_line_gradient_hessian(
 
 
 @qd.func
-def func_sum_line_gradient_hessian(
-    i_b: int, sap_state: array_class.SAPState, sap_info: array_class.SAPInfo, static_config: qd.template()
-):
+def func_sum_line_gradient_hessian(i_b: int, sap_state: SAPState, sap_info: SAPInfo, static_config: qd.template()):
     """Sum the first and the second derivative of the energy along the search direction of an environment."""
     d2ellA_dalpha2 = sap_state.solver.d2ellA_dalpha2[i_b]
     dellA_dalpha = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
@@ -3139,13 +3545,13 @@ def func_sum_line_gradient_hessian(
 @qd.kernel(fastcache=True)
 def kernel_init_exact_linesearch(
     f: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
-    sap_info: array_class.SAPInfo,
-    fem_info: array_class.FEMInfo,
-    rigid_info: array_class.RigidInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
+    sap_info: SAPInfo,
+    fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     static_config: qd.template(),
 ):
     """
@@ -3334,10 +3740,10 @@ def kernel_init_exact_linesearch(
 @qd.kernel(fastcache=True)
 def kernel_one_exact_linesearch_iter(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
-    sap_info: array_class.SAPInfo,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
+    sap_info: SAPInfo,
     static_config: qd.template(),
 ):
     """
@@ -3387,9 +3793,9 @@ def kernel_one_exact_linesearch_iter(
 @qd.kernel(fastcache=True)
 def kernel_update_vel(
     f: int,
-    sap_state: array_class.SAPState,
-    fem_state: array_class.FEMState,
-    dofs_state: array_class.DofsState,
+    sap_state: SAPState,
+    fem_state: FEMState,
+    dofs_state: DofsState,
     static_config: qd.template(),
 ):
     """Write the velocities the SAP solve found back to the FEM vertices and the rigid dofs."""

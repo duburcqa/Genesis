@@ -3,8 +3,23 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.data import Data, DataKind, field
 from genesis.utils.repr import brief
+
+
+class CubeBoundaryBox(Data, kind=DataKind.CONSTANT, shape=()):
+    """An axis-aligned box confining the particles, which bounce off its walls with the given restitution."""
+
+    lower: qd.Tensor = field((float, 3))
+    upper: qd.Tensor = field((float, 3))
+    restitution: qd.Tensor = field(float)
+
+
+class FloorBoundaryPlane(Data, kind=DataKind.CONSTANT, shape=()):
+    """The floor of the FEM solver, at a height and with a restitution (see FloorBoundary in boundaries.py)."""
+
+    height: qd.Tensor = field(float)
+    restitution: qd.Tensor = field(float)
 
 
 class CubeBoundary:
@@ -46,7 +61,7 @@ class FloorBoundary:
 
 
 @qd.func
-def func_impose_cube_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), boundary: array_class.CubeBoundaryBox):
+def func_impose_cube_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), boundary: CubeBoundaryBox):
     """Clamp a position inside a cube boundary, the velocity bouncing off any wall it crosses or presses against."""
     lower = boundary.lower[None]
     upper = boundary.upper[None]
@@ -62,9 +77,7 @@ def func_impose_cube_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), 
 
 
 @qd.func
-def func_impose_floor_boundary(
-    pos: qd.types.vector(3), vel: qd.types.vector(3), boundary: array_class.FloorBoundaryPlane
-):
+def func_impose_floor_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), boundary: FloorBoundaryPlane):
     """Clamp a position above a floor boundary, the velocity bouncing off it when it crosses or presses against it."""
     height = boundary.height[None]
     if pos[2] <= height and vel[2] <= 0:

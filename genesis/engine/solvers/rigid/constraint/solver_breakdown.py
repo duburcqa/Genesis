@@ -3,10 +3,10 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, RigidInfo
 from genesis.utils.misc import qd_to_torch
-from . import linesearch
-from . import solver
+
+from . import linesearch, solver
 
 # Shared-memory reduction block size for the _jv path.
 _JV_BLOCK = 32
@@ -126,7 +126,10 @@ def _func_update_constraint_forces_batch(
 
 @qd.func
 def _func_update_qfrc_constraint_per_dof(
-    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template(), update_gradient: qd.template()
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
+    update_gradient: qd.template(),
 ):
     """Compute qfrc_constraint = J^T @ efc_force with one thread per (dof, env).
 
@@ -173,11 +176,15 @@ def _func_update_qfrc_constraint_per_dof(
 
 @qd.func
 def _func_update_gradient(
-    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Step 5: update the gradient of every env still iterating, one env per thread.
 
-    Where the solve is seeded one env per thread (see has_per_env_solve_seed in array_class.py), the Hessian of the env
+    Where the solve is seeded one env per thread (see has_per_env_solve_seed in rigid/data.py), the Hessian of the env
     is assembled and factored first.
     """
     _B = constraint_state.grad.shape[1]
@@ -194,6 +201,7 @@ def _func_islands_linesearch_and_apply(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
     dyn_state: DynState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -269,6 +277,7 @@ def _func_islands_linesearch_and_apply(
 @qd.func
 def _func_islands_update_search_direction(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
+    dyn_state: DynState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -322,6 +331,7 @@ def _kernel_solve_graph(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
     dyn_state: DynState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -366,7 +376,7 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
 
     The per-iteration factor/solve runs per island over the (env, island) work-list, an unpartitioned env being a
     single island spanning every dof, except where the solve is seeded one env per thread (see has_per_env_solve_seed
-    in array_class.py): the seed and every factor then run one env per thread.
+    in rigid/data.py): the seed and every factor then run one env per thread.
     """
     # The graph maintains the assembled Hessian in nt_H, so the seed leaves it there (write_L=False).
     solver.func_solve_init(dyn_state, constraint_state, rigid_info, rigid_config, write_L=False)

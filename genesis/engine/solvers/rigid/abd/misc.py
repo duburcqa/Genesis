@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ConstraintState, DynInfo, DynState, GeomsInitAABB, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, LinksState, RigidInfo
 
 
 @qd.func
@@ -93,7 +93,7 @@ def func_wakeup_link(
     rigid_config: qd.template(),
 ):
     """Wake link i_l of env i_b where it sleeps: its dofs and geoms are revived, the owning entity's flag cleared, the
-    link taken off its daisy chain, and its dofs counted awake (see n_awake_dofs in array_class.py)."""
+    link taken off its daisy chain, and its dofs counted awake (see n_awake_dofs in rigid/data.py)."""
     # Atomically claim the link by clearing its hibernation flag and reading the previous value. Only the caller that
     # observes the True->False transition counts its dofs awake. A plain read-check-set would let several wake threads
     # targeting the same link (redundant grid threads a backend may launch, or several triggers in one step) all pass
@@ -149,10 +149,15 @@ def func_is_awake_tree(i_t: int, i_b: int, dyn_state: DynState, rigid_info: Rigi
 
 @qd.func
 def func_hibernate_link(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_l: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Put link i_l of env i_b to sleep: the link, its dofs and its geoms are flagged, the dof and link velocities and
-    accelerations zeroed, and its dofs counted asleep (see n_awake_dofs in array_class.py).
+    accelerations zeroed, and its dofs counted asleep (see n_awake_dofs in rigid/data.py).
 
     The next-velocity buffer is zeroed too: the integration copy runs over every dof, so a stale value there would be
     restored as the sleeper's velocity on the following substep. The link Cartesian velocity is zeroed as well: the
@@ -188,7 +193,7 @@ def func_hibernate_island_if_settled(
     rigid_config: qd.template(),
 ):
     """Put awake island i_island of env i_b to sleep once every one of its links has stayed below the hibernation speed
-    tolerance for hibernation_min_steps consecutive steps (see awake_steps in array_class.py).
+    tolerance for hibernation_min_steps consecutive steps (see awake_steps in rigid/data.py).
 
     The island sleeps as a unit: every link is flagged (see func_hibernate_link) and daisy-chained to the next, so the
     partition build keeps the component one island for as long as it sleeps. An entity is hibernated once every one of
@@ -346,6 +351,7 @@ def kernel_init_link_fields(
     links_quat: qd.types.ndarray(),
     dyn_state: DynState,
     dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     n_links = links_parent_idx.shape[0]
@@ -604,7 +610,7 @@ def kernel_init_geom_fields(
     geoms_coup_restitution: qd.types.ndarray(),
     geoms_is_fixed: qd.types.ndarray(),
     geoms_is_hollow: qd.types.ndarray(),
-    geoms_init_AABB: GeomsInitAABB,  # TODO: move to rigid global info
+    geoms_init_AABB: qd.Tensor,  # TODO: move to rigid global info
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_config: qd.template(),
@@ -745,8 +751,10 @@ def kernel_init_entity_fields(
     entities_geom_start: qd.types.ndarray(),
     entities_geom_end: qd.types.ndarray(),
     entities_gravity_compensation: qd.types.ndarray(),
+    entities_is_local_collision_mask: qd.types.ndarray(),
     dyn_state: DynState,
     dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     n_entities = entities_dof_start.shape[0]
@@ -939,7 +947,7 @@ def func_apply_link_external_wrench(
 
 
 @qd.func
-def func_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
+def func_clear_external_force(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
@@ -990,8 +998,8 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
-    func_clear_external_force(dyn_state, rigid_config)
+def kernel_clear_external_force(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
+    func_clear_external_force(dyn_state, rigid_info, rigid_config)
 
 
 @qd.func
@@ -1000,7 +1008,7 @@ def func_list_range_start(ids: qd.Tensor, lo: int, hi: int, i_b: int):
     an empty range).
 
     A sweep over a consecutive range indexes its items directly, see func_list_item. The constraint list ascends by
-    construction, and the dof list only where dof_range_start (array_class.py) says so, since the CPU skyline path
+    construction, and the dof list only where dof_range_start (rigid/data.py) says so, since the CPU skyline path
     reorders it.
     """
     start = 0

@@ -11,18 +11,20 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 import genesis.utils.simt as su
-from genesis.utils.array_class import (
+from genesis.engine.solvers.rigid.collider.mpr import MPRInfo, MPRState
+from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
+from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     DiffContactInput,
     DynInfo,
     DynState,
-    ErrorCode,
+    GJKInfo,
     GJKState,
-    GeomsInitAABB,
-    MPRState,
+    RigidErrorCode,
     RigidInfo,
 )
+from genesis.utils.sdf import SDFInfo
 
 from . import capsule_contact, diff_gjk, gjk, mpr
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
@@ -46,10 +48,10 @@ def func_contact_sphere_sdf(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     is_col = False
@@ -93,13 +95,13 @@ def func_add_polytope_vertex_contacts_sdf(
     tolerance: float,
     n_prev: int,
     contacts_slot,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     block_dim: qd.template(),
@@ -854,13 +856,13 @@ def func_add_polytope_vertex_contacts_sdf_shell(
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     tolerance: float,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -1253,10 +1255,10 @@ def func_contact_vertex_sdf(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     is_col = False
@@ -1306,11 +1308,11 @@ def func_contact_nonconvex_convex_sdf(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     # Contact between geoms in a mixed-convexity pair where A is the smaller-AABB side (whether convex or not) and B
@@ -1384,11 +1386,11 @@ def func_contact_convex_convex_sdf(
     i_gb: int,
     i_b: int,
     i_va_ws: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
     enable_edge_detection_fallback: qd.template(),
 ):
@@ -1521,15 +1523,15 @@ def func_contact_mpr_terrain(
     i_scratch: int,
     i_b: int,
     tid: int,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     block_dim: qd.template(),
@@ -1841,13 +1843,13 @@ def func_recompute_perturbed_contact(
     ga_quat_original: qd.types.vector(4),
     gb_pos_original: qd.types.vector(3),
     gb_quat_original: qd.types.vector(4),
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
     rigid_config: qd.template(),
     geom_pair_scale: float,
     used_gjk: bool,
@@ -2141,12 +2143,12 @@ def func_prefer_gjk_refinement(
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     geom_pair_scale: float,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    mpr_info: array_class.MPRInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -2230,11 +2232,11 @@ def func_contact_overlap_axes(
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     axes: qd.types.matrix(4, 3),
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     geom_pair_scale: float,
@@ -2769,18 +2771,18 @@ def func_convex_convex_contact(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    diff_contact_input: array_class.DiffContactInput,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    diff_contact_input: DiffContactInput,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -3305,17 +3307,17 @@ def _func_multicontact_run_detection(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -3454,17 +3456,17 @@ def _func_multicontact_detect(
     i_det_end: int,
     overlap_axes: qd.types.matrix(4, 3),
     overlap_merge_tolerance: float,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -3480,7 +3482,7 @@ def _func_multicontact_detect(
     past 0 requires contact 0 in slot 0.
 
     Without the contact patch, detection i stores its contact in slot i of the entry (see NarrowphaseWorkQueue in
-    array_class.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
+    rigid/data.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
     contact 0 when there is one, which skips perturbation, accepts each contact as it comes and writes those of the
     pair itself once its last detection ran.
     """
@@ -3915,12 +3917,12 @@ def _func_multicontact_write(
         # atomic_add below may still overshoot; in that case we write only the contacts that fit and set errno.
         max_candidate_contacts = collider_info.max_candidate_contacts[None]
         if collider_state.n_contacts[i_b] + n_con > max_candidate_contacts:
-            errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_COLLISION_PAIRS
+            errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
         else:
             start_idx = qd.atomic_add(collider_state.n_contacts[i_b], n_con)
             n_con = qd.math.clamp(max_candidate_contacts - start_idx, 0, n_con)
             if n_con == 0:
-                errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_COLLISION_PAIRS
+                errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
             for i in range(n_con):
                 i_c = start_idx + i
                 pos_i = qd.Vector(
@@ -3948,7 +3950,7 @@ def _func_multicontact_write(
 def _func_multicontact_gather(
     i_work: int,
     overlap_merge_tolerance: float,
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -3960,7 +3962,7 @@ def _func_multicontact_gather(
 ):
     """Accept the candidate contacts of a queued pair in slot order and write those it keeps.
 
-    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in array_class.py) go through
+    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in rigid/data.py) go through
     _func_multicontact_accept in order, and the contacts kept are written by _func_multicontact_write.
     """
     i_b = collider_state.work_queue.i_b[i_work]
@@ -4026,17 +4028,17 @@ def _func_multicontact_gather(
 
 @qd.func
 def func_narrowphase_multicontact(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -4260,17 +4262,17 @@ def _func_enqueue_for_multicontact(
 
 @qd.func
 def func_narrowphase_contact0(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4528,17 +4530,17 @@ def func_narrowphase_contact0(
 
 @qd.func
 def func_narrow_phase_convex_vs_convex(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -4689,7 +4691,10 @@ def func_narrow_phase_diff_convex_vs_convex(
 
 @qd.func
 def func_fill_diff_contact_input_analytic(
-    dyn_state: DynState, collider_state: ColliderState, dyn_info: DynInfo, rigid_config: qd.template()
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     """Populate diff_contact_input for the contacts of analytic detection paths.
 
@@ -4735,7 +4740,7 @@ def func_fill_diff_contact_input_analytic(
 
 @qd.func
 def func_narrow_phase_convex_specializations(
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -4788,15 +4793,15 @@ def func_narrow_phase_convex_specializations(
 
 @qd.func
 def func_narrow_phase_any_vs_terrain(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    mpr_info: array_class.MPRInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    mpr_state: MPRState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4833,7 +4838,7 @@ def func_narrow_phase_any_vs_terrain(
                         collider_state.work_queue.i_ga[i_work] = i_ga
                         collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
-                        errno[i_b] = errno[i_b] | ErrorCode.UNSUPPORTED_COLLISION_PAIR
+                        errno[i_b] = errno[i_b] | RigidErrorCode.UNSUPPORTED_COLLISION_PAIR
 
         qd.loop_config(
             name="narrowphase_terrain",
@@ -4881,13 +4886,13 @@ def func_narrow_phase_any_vs_terrain(
 
 @qd.func
 def func_narrow_phase_nonconvex_vs_nonterrain(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,

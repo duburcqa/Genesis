@@ -6,35 +6,24 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import SolverErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
 from genesis.utils.data import CHECKPOINT_KINDS, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
-from .couplers import IPCCoupler, SAPCoupler
-from .pipeline import Coupler, System, assemble_systems
+from .couplers import IPCCoupler, SAPCoupler, pairwise
 from .entities import HybridEntity
+from .pipeline import Coupler, System, assemble_systems
 from .sensors import SensorManager
-from .solvers import (
-    FEMSolver,
-    KinematicSolver,
-    MPMSolver,
-    PBDSolver,
-    RigidSolver,
-    SFSolver,
-    SPHSolver,
-)
+from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SFSolver, SPHSolver
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SystemCheckpoint
 from .step import Step
-
-# The couplings between pairs of solvers register as Systems once imported
-from .couplers import pairwise  # noqa: F401
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
@@ -688,7 +677,7 @@ class StepOperation(Operation):
             ]
             if grads:
                 envs_finite = torch.stack([grad.isfinite().all(dim=tuple(range(1, grad.ndim))) for grad in grads])
-                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
+                solver.flag_errno(SolverErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
             solver.update_errno()
             solver.check_errno(
                 blocking=False, context=f"Backward pass of step {self._substep_start // self._sim._substeps}"

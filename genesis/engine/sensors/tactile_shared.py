@@ -3,16 +3,16 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Generic, NamedTuple, TypeVar
 
 import numpy as np
-import quadrants as qd
 import torch
 import torch.nn.functional as F
 
+import quadrants as qd
+
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
-from genesis.utils.sdf import SDF
+from genesis.utils.sdf import SDF, SDFInfo
 
 if TYPE_CHECKING:
     from genesis.utils.ring_buffer import TensorRingBuffer
@@ -521,7 +521,7 @@ class ContactDepthQueryMetadataMixin:
     contact_depth_query: str | None = None
     sensor_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
     # The signed distance fields (SDF) of the rigid geoms, which every query but the raycast one reads (see SDF)
-    sdf_info: "array_class.SDFInfo | None" = None
+    sdf_info: "SDFInfo | None" = None
 
 
 def resolve_contact_depth_query(metadata: ContactDepthQueryMetadataMixin, mode: str | None, sensor_name: str) -> None:

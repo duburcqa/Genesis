@@ -4,8 +4,9 @@ from contextlib import nullcontext
 from itertools import product
 
 import numpy as np
-import pytest
 import torch
+
+import pytest
 import trimesh
 from scipy.spatial import ConvexHull
 from scipy.spatial.qhull import QhullError
@@ -14,9 +15,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
+from .conftest import ellipsoid_mjcf
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
-from .conftest import ellipsoid_mjcf
 
 
 def _capsule_mjcf_path(tmp_path, radius, length, name="capsule"):
@@ -2039,7 +2040,7 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     #   - contact set    -> narrowphase / pruning
     #   - contact order  -> contact sort
     #   - dofs velocity  -> constraint solve
-    from genesis.utils.array_class import RigidSimStaticConfig
+    from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
 
     if prefer_decomposed_solver is not None:
         init_orig = RigidSimStaticConfig.__init__

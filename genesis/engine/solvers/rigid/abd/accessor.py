@@ -15,7 +15,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
 from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
@@ -207,7 +207,7 @@ def kernel_wake_up_entities_held_by_links(
     """Wake up the hibernated islands resting on or constrained to the specified links.
 
     A fixed link never sleeps, so moving it wakes nothing by itself, while the links it holds would stay asleep where
-    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in array_class.py) and the
+    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in rigid/data.py) and the
     equality constraints.
     """
     n_links = rigid_info.links_tree_idx.shape[0]
@@ -781,7 +781,10 @@ def kernel_set_dofs_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_set_dofs_zero_velocity(
-    dofs_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), dyn_state: DynState, rigid_config: qd.template()
+    dofs_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
@@ -922,7 +925,11 @@ def kernel_control_dofs_position_velocity(
 
 @qd.func
 def func_link_offset_shift(
-    i_l: int, i_b: int, links_offset_pos: qd.types.ndarray(), links_offset_quat: qd.types.ndarray(), dyn_state: DynState
+    i_l: int,
+    i_b: int,
+    links_offset_pos: qd.types.ndarray(),
+    links_offset_quat: qd.types.ndarray(),
+    dyn_state: DynState,
 ):
     """World-frame displacement from the authored link origin to the internal one.
 
@@ -1147,7 +1154,10 @@ def kernel_set_geom_friction_rolling(geoms_idx: qd.i32, friction_rolling: float,
 
 @qd.kernel(fastcache=True)
 def kernel_set_geoms_friction(
-    geoms_idx: qd.types.ndarray(), friction: qd.types.ndarray(), dyn_info: DynInfo, rigid_config: qd.template()
+    geoms_idx: qd.types.ndarray(),
+    friction: qd.types.ndarray(),
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_ in range(geoms_idx.shape[0]):
@@ -1168,7 +1178,10 @@ def kernel_set_geoms_friction_torsional(
 
 @qd.kernel(fastcache=True)
 def kernel_set_geoms_friction_rolling(
-    geoms_idx: qd.types.ndarray(), friction_rolling: qd.types.ndarray(), dyn_info: DynInfo, rigid_config: qd.template()
+    geoms_idx: qd.types.ndarray(),
+    friction_rolling: qd.types.ndarray(),
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_ in range(geoms_idx.shape[0]):

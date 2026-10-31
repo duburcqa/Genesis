@@ -3,12 +3,15 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
+from genesis.engine.boundaries.boundaries import CubeBoundaryBox
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
+from genesis.engine.solvers.particle_solver import PARTICLES, Particles, ParticlesParams, ParticlesRender
 from genesis.engine.states.solvers import SPHSolverState
+from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.geom import (
+    SpatialHashGrid,
     func_cubic_kernel,
     func_cubic_kernel_derivative,
     func_hash_compute_reordered_idx,
@@ -23,6 +26,72 @@ from .particle_solver import (
     kernel_set_particles_vel,
     kernel_update_particles_render,
 )
+
+
+class SPHParticles(Particles):
+    """
+    Runtime state of the SPH particles, one value per particle and environment.
+
+    `p` is the pressure, `dfsph_factor` the factor of the divergence-free and density solves of divergence-free smoothed
+    particle hydrodynamics (DFSPH), and `drho` the rate of change of the density they correct. `reordered_idx` is the
+    index of the particle once sorted by hash grid cell.
+    """
+
+    acc: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    rho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    p: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    dfsph_factor: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    drho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    reordered_idx: qd.Tensor = field(int, kind=DataKind.DERIVED)
+
+
+class SPHParticlesParams(ParticlesParams):
+    """
+    Model parameters of the SPH particles, one value per particle (and per environment once sorted).
+
+    `rho` is the rest density, `stiffness` and `exponent` the parameters of the equation of state, `mu` the viscosity
+    and `gamma` the surface tension.
+    """
+
+    rho: qd.Tensor = field(float)
+    stiffness: qd.Tensor = field(float)
+    exponent: qd.Tensor = field(float)
+    mu: qd.Tensor = field(float)
+    gamma: qd.Tensor = field(float)
+
+
+class SPHState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the SPH solver.
+
+    The substep runs on the copies of the particles sorted by hash grid cell, `particles_reordered` and
+    `particles_info_reordered`, which the particles take back at its end.
+    """
+
+    particles: SPHParticles
+    particles_reordered: SPHParticles = field(kind=DataKind.SCRATCH)
+    particles_info_reordered: SPHParticlesParams = field(shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
+    particles_render: ParticlesRender
+
+
+class SPHInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the SPH solver.
+
+    `support_radius` is the radius of the smoothing kernels, `particle_volume` the volume a particle stands for, and
+    `density0` the rest density the incompressibility solves of divergence-free smoothed particle hydrodynamics (DFSPH)
+    target.
+    """
+
+    particles: SPHParticlesParams
+    boundary: CubeBoundaryBox
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float, shape=())
+    particle_size: qd.Tensor = field(float, shape=())
+    particle_volume: qd.Tensor = field(float, shape=())
+    support_radius: qd.Tensor = field(float, shape=())
+    density0: qd.Tensor = field(float, shape=())
 
 
 class SPHSolver(ParticleSolver):
@@ -62,8 +131,8 @@ class SPHSolver(ParticleSolver):
         # TODO: Support per-particle density
         self._density0: float | None = None
 
-        self.sph_state: array_class.SPHState | None = None
-        self.sph_info: array_class.SPHInfo | None = None
+        self.sph_state: SPHState | None = None
+        self.sph_info: SPHInfo | None = None
 
     def build(self):
         super().build()
@@ -79,12 +148,12 @@ class SPHSolver(ParticleSolver):
             self._density0 = float(gs.np_float(self.entities[0].material.rho))
         sizes = dict(envs=self._B, particles=self._n_particles)
         unused = {None: not self.is_active}
-        self.sph_state = array_class.SPHState(
+        self.sph_state = SPHState(
             sizes=dict(sizes, hash_slots=np.prod(self._hash_grid_res)),
             values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
             unused=unused,
         )
-        self.sph_info = array_class.SPHInfo(
+        self.sph_info = SPHInfo(
             sizes=sizes,
             values=dict(
                 boundary=self.boundary.values,
@@ -325,8 +394,8 @@ def func_for_all_neighbors(
     i_p: int,
     i_b: int,
     ret: qd.template(),
-    sph_state: array_class.SPHState,
-    sph_info: array_class.SPHInfo,
+    sph_state: SPHState,
+    sph_info: SPHInfo,
     task: qd.template(),
 ):
     """
@@ -346,7 +415,7 @@ def func_for_all_neighbors(
 
 
 @qd.kernel(fastcache=True)
-def kernel_reorder_particles(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_reorder_particles(sph_state: SPHState, sph_info: SPHInfo):
     """Sort the particles by the cell of the hash grid they lie in, into the copies the substep runs on."""
     func_hash_compute_reordered_idx(
         sph_state.particles.pos, sph_state.particles.is_active, sph_state.particles.reordered_idx, sph_state.hash_grid
@@ -372,8 +441,8 @@ def func_copy_particle(
     i_p_src: int,
     i_p_dst: int,
     i_b: int,
-    particles_src: array_class.SPHParticles,
-    particles_dst: array_class.SPHParticles,
+    particles_src: SPHParticles,
+    particles_dst: SPHParticles,
 ):
     """Copy the dynamic state of a particle onto another slot of the same environment."""
     particles_dst.pos[i_p_dst, i_b] = particles_src.pos[i_p_src, i_b]
@@ -386,7 +455,7 @@ def func_copy_particle(
 
 
 @qd.kernel(fastcache=True)
-def kernel_copy_from_reordered(sph_state: array_class.SPHState):
+def kernel_copy_from_reordered(sph_state: SPHState):
     """Give the active particles back the state of their sorted copy."""
     for i_p, i_b in qd.ndrange(sph_state.particles.pos.shape[0], sph_state.particles.pos.shape[1]):
         if sph_state.particles.is_active[i_p, i_b]:
@@ -395,15 +464,13 @@ def kernel_copy_from_reordered(sph_state: array_class.SPHState):
 
 
 @qd.func
-def func_task_compute_rho(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
-):
+def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
     d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     ret += sph_info.particle_volume[None] * func_cubic_kernel(d_ij.norm(), sph_info.support_radius[None])
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_rho(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo):
     """Compute the density of the sorted particles from their neighbours."""
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
@@ -421,7 +488,7 @@ def kernel_compute_rho(sph_state: array_class.SPHState, sph_info: array_class.SP
 
 @qd.func
 def func_task_compute_non_pressure_forces(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     dist = d_ij.norm()
@@ -463,9 +530,7 @@ def func_task_compute_non_pressure_forces(
 
 
 @qd.kernel
-def kernel_compute_non_pressure_forces(
-    t: float, sph_state: array_class.SPHState, sph_info: array_class.SPHInfo, force_fields: qd.template()
-):
+def kernel_compute_non_pressure_forces(t: float, sph_state: SPHState, sph_info: SPHInfo, force_fields: qd.template()):
     """Compute the acceleration of the sorted particles from gravity, surface tension, viscosity and force fields."""
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
@@ -481,7 +546,7 @@ def kernel_compute_non_pressure_forces(
 
 @qd.func
 def func_task_compute_pressure_forces(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     dp_i = sph_state.particles_reordered.p[i_p, i_b] / sph_state.particles_reordered.rho[i_p, i_b] ** 2
     rho_j = (
@@ -502,7 +567,7 @@ def func_task_compute_pressure_forces(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_pressure_forces(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_compute_pressure_forces(sph_state: SPHState, sph_info: SPHInfo):
     """
     Add the acceleration of the pressure of the equation of state to the sorted particles.
 
@@ -528,7 +593,7 @@ def kernel_compute_pressure_forces(sph_state: array_class.SPHState, sph_info: ar
 
 
 @qd.kernel(fastcache=True)
-def kernel_advect_velocity(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_advect_velocity(sph_state: SPHState, sph_info: SPHInfo):
     """Advance the velocity of the sorted particles by their acceleration."""
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
@@ -538,7 +603,7 @@ def kernel_advect_velocity(sph_state: array_class.SPHState, sph_info: array_clas
 
 
 @qd.kernel(fastcache=True)
-def kernel_advect_position(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
     """Advance the position of the sorted particles by their velocity, inside the boundary."""
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
@@ -557,7 +622,7 @@ def kernel_advect_position(sph_state: array_class.SPHState, sph_info: array_clas
 
 @qd.func
 def func_task_compute_dfsph_factor(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     grad_j = -sph_info.particle_volume[None] * func_cubic_kernel_derivative(d_ij, sph_info.support_radius[None])
@@ -568,7 +633,7 @@ def func_task_compute_dfsph_factor(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_dfsph_factor(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo):
     """
     Compute the factor of the divergence-free and density solves of the sorted particles.
 
@@ -595,7 +660,7 @@ def kernel_compute_dfsph_factor(sph_state: array_class.SPHState, sph_info: array
 
 @qd.func
 def func_task_compute_density_time_derivative(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     v_i = sph_state.particles_reordered.vel[i_p, i_b]
     v_j = sph_state.particles_reordered.vel[j_p, i_b]
@@ -610,7 +675,7 @@ def func_task_compute_density_time_derivative(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_density_time_derivative(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_compute_density_time_derivative(sph_state: SPHState, sph_info: SPHInfo):
     """Compute the rate of change of the density of the sorted particles, its positive part alone."""
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
@@ -630,7 +695,7 @@ def kernel_compute_density_time_derivative(sph_state: array_class.SPHState, sph_
 
 @qd.func
 def func_task_divergence_solver_iteration(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     b_j = sph_state.particles_reordered.drho[j_p, i_b]
     k_j = b_j * sph_state.particles_reordered.dfsph_factor[j_p, i_b]
@@ -644,7 +709,7 @@ def func_task_divergence_solver_iteration(
 
 
 @qd.kernel(fastcache=True)
-def kernel_divergence_solver_iteration(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_divergence_solver_iteration(sph_state: SPHState, sph_info: SPHInfo):
     """
     Run one Jacobi iteration of the divergence-free solve on the velocity of the sorted particles.
 
@@ -660,9 +725,7 @@ def kernel_divergence_solver_iteration(sph_state: array_class.SPHState, sph_info
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_density_error(
-    offset: float, sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
-) -> float:
+def kernel_compute_density_error(offset: float, sph_state: SPHState, sph_info: SPHInfo) -> float:
     """
     Return the sum of the density errors of the sorted particles.
 
@@ -677,7 +740,7 @@ def kernel_compute_density_error(
 
 @qd.func
 def func_task_compute_density_star(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     v_i = sph_state.particles_reordered.vel[i_p, i_b]
     v_j = sph_state.particles_reordered.vel[j_p, i_b]
@@ -689,9 +752,7 @@ def func_task_compute_density_star(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_density_star(
-    dfsph_factor_scale: float, sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
-):
+def kernel_compute_density_star(dfsph_factor_scale: float, sph_state: SPHState, sph_info: SPHInfo):
     """
     Predict the relative density of the sorted particles at the end of the substep, at least one.
 
@@ -712,7 +773,7 @@ def kernel_compute_density_star(
 
 @qd.func
 def func_task_density_solve_iteration(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: array_class.SPHState, sph_info: array_class.SPHInfo
+    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     b_j = sph_state.particles_reordered.drho[j_p, i_b] - 1.0
     k_j = b_j * sph_state.particles_reordered.dfsph_factor[j_p, i_b]
@@ -727,7 +788,7 @@ def func_task_density_solve_iteration(
 
 
 @qd.kernel(fastcache=True)
-def kernel_density_solve_iteration(sph_state: array_class.SPHState, sph_info: array_class.SPHInfo):
+def kernel_density_solve_iteration(sph_state: SPHState, sph_info: SPHInfo):
     """
     Run one Jacobi iteration of the density solve on the velocity of the sorted particles.
 
@@ -752,9 +813,7 @@ def kernel_density_solve_iteration(sph_state: array_class.SPHState, sph_info: ar
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_state(
-    pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: array_class.SPHState
-):
+def kernel_set_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: SPHState):
     for i_p, i_b in qd.ndrange(sph_state.particles.pos.shape[0], sph_state.particles.pos.shape[1]):
         sph_state.particles.pos[i_p, i_b] = qd.Vector([pos[i_b, i_p, 0], pos[i_b, i_p, 1], pos[i_b, i_p, 2]])
         sph_state.particles.vel[i_p, i_b] = qd.Vector([vel[i_b, i_p, 0], vel[i_b, i_p, 1], vel[i_b, i_p, 2]])
@@ -762,9 +821,7 @@ def kernel_set_state(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_state(
-    pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: array_class.SPHState
-):
+def kernel_get_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: SPHState):
     for i_p, i_b in qd.ndrange(sph_state.particles.pos.shape[0], sph_state.particles.pos.shape[1]):
         for k in qd.static(range(3)):
             pos[i_b, i_p, k] = sph_state.particles.pos[i_p, i_b][k]
@@ -782,8 +839,8 @@ def kernel_add_particles(
     mat_mu: float,
     mat_gamma: float,
     pos: qd.types.ndarray(),
-    sph_state: array_class.SPHState,
-    sph_info: array_class.SPHInfo,
+    sph_state: SPHState,
+    sph_info: SPHInfo,
 ):
     for i_p_, i_b in qd.ndrange(pos.shape[0], sph_state.particles.pos.shape[1]):
         i_p = i_p_ + particle_start
@@ -803,9 +860,7 @@ def kernel_add_particles(
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_particles_acc(
-    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), sph_state: array_class.SPHState
-):
+def kernel_clear_particles_acc(particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), sph_state: SPHState):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]

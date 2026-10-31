@@ -8,9 +8,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.engine.pipeline as pipeline
 from genesis.engine.pipeline import System, assemble_systems, register_system
+from genesis.engine.solvers.rigid.data import DynState
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Integration
-from genesis.utils.array_class import DynState
 from genesis.utils.data import V
 from genesis.utils.misc import qd_to_numpy
 

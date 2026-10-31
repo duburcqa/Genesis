@@ -4,17 +4,17 @@ from typing import Annotated
 
 import quadrants as qd
 
-import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
 from genesis.engine.pipeline import Enabled, register_system
 from genesis.engine.solvers.particle_solver import func_set_particle_vel
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
-from genesis.engine.solvers.sph_solver import SPHSolver
+from genesis.engine.solvers.sph_solver import SPHInfo, SPHSolver, SPHState
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.geom import func_cubic_kernel_plane_integral
-from genesis.utils.sdf import SDF
+from genesis.utils.sdf import SDF, SDFInfo
 
 
 @qd.func
@@ -25,13 +25,13 @@ def func_collide_with_rigid_geom_pressure(
     vel: qd.types.vector(3),
     mass: float,
     pressure: float,
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
-    sph_info: array_class.SPHInfo,
-    geoms_info: array_class.GeomsInfo,
-    links_info: array_class.LinksInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    sph_info: SPHInfo,
+    geoms_info: GeomsInfo,
+    links_info: LinksInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -80,12 +80,12 @@ def func_collide_with_rigid_geom_pressure(
 
 @qd.kernel(fastcache=True)
 def kernel_sph_rigid(
-    sph_state: array_class.SPHState,
-    dyn_state: array_class.DynState,
-    sph_info: array_class.SPHInfo,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    sph_state: SPHState,
+    dyn_state: DynState,
+    sph_info: SPHInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):

@@ -2,9 +2,10 @@
 
 import quadrants as qd
 
-import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.rigid.abd import func_collide_in_rigid_geom
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksState, RigidInfo
+from genesis.utils.sdf import SDFInfo
 
 
 @qd.func
@@ -14,11 +15,11 @@ def func_collide_with_rigid_geom(
     pos_world: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -48,11 +49,11 @@ def func_collide_with_rigid(
     pos_world: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """Return the velocity of a point colliding with every coupled rigid geom in turn.

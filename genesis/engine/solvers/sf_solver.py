@@ -1,9 +1,37 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.data import Data, DataKind, Size, field
 
 from .base_solver import Solver, TimeBasedMixin
+
+
+# Sizes of the stable fluid: the cells along each axis of its grid, and its jets
+SF_GRID = Size("sf_grid")
+JETS = Size("jets")
+
+
+class SFState(Data, kind=DataKind.STATE, shape=(SF_GRID, SF_GRID, SF_GRID)):
+    """
+    Runtime state of the stable fluid, one value per cell of its grid.
+
+    `smoke` holds the concentration of the smoke of each jet. `pressure` holds the two buffers the Jacobi iterations of
+    the pressure projection alternate between, the first one keeping the pressure of the last substep as warm start.
+    """
+
+    vel: qd.Tensor = field((float, 3))
+    vel_advected: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    div: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    pressure: qd.Tensor = field(float, shape=(2, SF_GRID, SF_GRID, SF_GRID))
+    smoke: qd.Tensor = field((float, JETS))
+
+
+class SFInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """Model parameters of the stable fluid: the jets inject their smoke at speed `inlet_s`, which `decay` fades."""
+
+    substep_dt: qd.Tensor = field(float)
+    inlet_s: qd.Tensor = field(float)
+    decay: qd.Tensor = field(float)
 
 
 class SFSolver(TimeBasedMixin, Solver):
@@ -30,18 +58,16 @@ class SFSolver(TimeBasedMixin, Solver):
 
         self.jets = ()
 
-        self.sf_state: array_class.SFState | None = None
-        self.sf_info: array_class.SFInfo | None = None
+        self.sf_state: SFState | None = None
+        self.sf_info: SFInfo | None = None
 
     def build(self):
         super().build()
 
         if self.is_active:
             self.t = 0.0
-            self.sf_state = array_class.SFState(sizes=dict(sf_grid=self.n_grid, jets=len(self.jets)))
-            self.sf_info = array_class.SFInfo(
-                values=dict(substep_dt=self.substep_dt, inlet_s=self.inlet_s, decay=self.decay)
-            )
+            self.sf_state = SFState(sizes=dict(sf_grid=self.n_grid, jets=len(self.jets)))
+            self.sf_info = SFInfo(values=dict(substep_dt=self.substep_dt, inlet_s=self.inlet_s, decay=self.decay))
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -82,9 +108,7 @@ class SFSolver(TimeBasedMixin, Solver):
 
 
 @qd.kernel
-def kernel_advect_and_impulse(
-    t: float, sf_state: array_class.SFState, sf_info: array_class.SFInfo, jets: qd.template()
-):
+def kernel_advect_and_impulse(t: float, sf_state: SFState, sf_info: SFInfo, jets: qd.template()):
     """Advect the velocity and the smoke along the velocity, then let every jet inject its smoke and its momentum."""
     n_grid = sf_state.vel.shape[0]
     substep_dt = sf_info.substep_dt[None]
@@ -111,7 +135,7 @@ def kernel_advect_and_impulse(
 
 
 @qd.kernel(fastcache=True)
-def kernel_divergence(sf_state: array_class.SFState):
+def kernel_divergence(sf_state: SFState):
     """Compute the divergence of the advected velocity, mirrored at the walls of the grid."""
     n_grid = sf_state.vel.shape[0]
     for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
@@ -140,7 +164,7 @@ def kernel_divergence(sf_state: array_class.SFState):
 
 
 @qd.kernel(fastcache=True)
-def kernel_pressure_jacobi(i_src: int, sf_state: array_class.SFState):
+def kernel_pressure_jacobi(i_src: int, sf_state: SFState):
     """
     Run one Jacobi iteration of the pressure projection, from one pressure buffer to the other.
 
@@ -159,7 +183,7 @@ def kernel_pressure_jacobi(i_src: int, sf_state: array_class.SFState):
 
 
 @qd.kernel(fastcache=True)
-def kernel_subtract_gradient(i_src: int, sf_state: array_class.SFState):
+def kernel_subtract_gradient(i_src: int, sf_state: SFState):
     """
     Make the advected velocity divergence-free by subtracting the gradient of the pressure.
 

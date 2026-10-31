@@ -1,8 +1,18 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
+from genesis.engine.solvers.rigid.data import (
+    ColliderInfo,
+    ColliderState,
+    DiffContactInput,
+    DynInfo,
+    DynState,
+    GJKInfo,
+    GJKState,
+    RigidInfo,
+)
 
 from . import contact, epa, gjk
 from .gjk import GJK
@@ -20,16 +30,16 @@ def func_gjk_contact(
     gb_quat: qd.types.vector(4),
     pos_tol: float,
     normal_tol: float,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    diff_contact_input: array_class.DiffContactInput,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    diff_contact_input: DiffContactInput,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -360,12 +370,12 @@ def func_extended_epa(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     max_iter: int,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -571,11 +581,11 @@ def func_add_diff_contact_input(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -673,7 +683,7 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -845,7 +855,13 @@ def func_differentiable_contact(
 
 
 @qd.func
-def func_plane_contact_frame(i_b: int, i_ga: int, i_gb: int, dyn_state: DynState, dyn_info: DynInfo):
+def func_plane_contact_frame(
+    i_b: int,
+    i_ga: int,
+    i_gb: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+):
     """World contact normal and convex-side radius of a plane [i_ga] vs convex [i_gb] pair: normal =
     -normalize(R(quat_plane) @ plane_local_dir), radius = data[0] for SPHERE / CAPSULE and 0 otherwise.
 
@@ -864,7 +880,12 @@ def func_plane_contact_frame(i_b: int, i_ga: int, i_gb: int, dyn_state: DynState
 
 @qd.func
 def func_differentiable_sphere_contact(
-    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """Differentiable sphere-sphere contact reconstruction.
 

@@ -6,11 +6,13 @@ import torch
 
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
-from genesis.utils.array_class import GeomsInfo, LinksState
+from genesis.utils.data import Data, DataKind, Size, field
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -23,6 +25,28 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+
+
+# Sizes of the particle solvers: the particles, the slots of the hash grid and the support particles of a visual vertex
+PARTICLES = Size("particles")
+# The muscle groups of the soft part of a hybrid entity
+GROUPS = Size("groups")
+
+
+class HybridSoftPartInfo(Data, kind=DataKind.CONSTANT, shape=(GROUPS,)):
+    """
+    The binding of the particles of the soft part of a hybrid entity to the links of its rigid part.
+
+    The particles of each muscle group follow the geom `groups_geom_idx` of the link `groups_link_idx`. The rest
+    position `particles_init_pos` of each particle is expressed in the frame `groups_frame_pos`, `groups_frame_quat` of
+    its group.
+    """
+
+    groups_link_idx: qd.Tensor = field(int)
+    groups_geom_idx: qd.Tensor = field(int)
+    groups_frame_pos: qd.Tensor = field((float, 3))
+    groups_frame_quat: qd.Tensor = field((float, 4))
+    particles_init_pos: qd.Tensor = field((float, 3), shape=(PARTICLES,))
 
 
 class HybridEntity(Entity):
@@ -54,7 +78,7 @@ class HybridEntity(Entity):
 
         # The binding of the soft part to the rigid part, which drives it after each substep unless the default coupling
         # applies (see RigidMPMHybrid)
-        self._soft_part_info: array_class.HybridSoftPartInfo | None = None
+        self._soft_part_info: HybridSoftPartInfo | None = None
         self._muscle_group_cache: np.ndarray | None = None
 
         material_rigid = material.material_rigid
@@ -133,7 +157,7 @@ class HybridEntity(Entity):
             material_soft.n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
-            self._soft_part_info = array_class.HybridSoftPartInfo(
+            self._soft_part_info = HybridSoftPartInfo(
                 sizes=dict(groups=material_soft.n_groups, particles=part_soft.init_particles.shape[0])
             )
             self._soft_part_info.groups_link_idx.from_numpy(np.array(link_idcs, dtype=gs.np_int))
@@ -356,7 +380,7 @@ class HybridEntity(Entity):
         return self._part_rigid.morph.fixed
 
     @property
-    def soft_part_info(self) -> "array_class.HybridSoftPartInfo | None":
+    def soft_part_info(self) -> "HybridSoftPartInfo | None":
         """The binding of the soft part to the links of the rigid part, None with the default coupling."""
         return self._soft_part_info
 

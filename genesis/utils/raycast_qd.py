@@ -2,9 +2,17 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import func_build_bvh
+from genesis.engine.bvh import BVHState, BVHTreeState, func_build_bvh
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
-from genesis.utils.array_class import BVHState, BVHTreeState, DynInfo, DynState, RaycastResult
+from genesis.engine.solvers.rigid.data import DynInfo, DynState
+from genesis.utils.data import ENVS, Data, DataKind, field
+
+
+class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    distance: qd.Tensor = field(float)
+    geom_idx: qd.Tensor = field(int)
+    hit_point: qd.Tensor = field((float, 3))
+    normal: qd.Tensor = field((float, 3))
 
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
@@ -395,7 +403,15 @@ def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_in
 
 @qd.func
 def bvh_ray_cast_visual(
-    i_t, i_b, ray_start, ray_dir, max_range, dyn_state: DynState, bvh_tree_state: BVHTreeState, dyn_info: DynInfo, eps
+    i_t,
+    i_b,
+    ray_start,
+    ray_dir,
+    max_range,
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
+    eps,
 ):
     """Cast a single ray against the visual-mesh BVH; returns (hit_face, distance, normal).
 

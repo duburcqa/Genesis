@@ -1,21 +1,24 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.bvh import BVHTreeState
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
-from genesis.options.sensors import ContactDepthProbe as ContactDepthProbeOptions
-from genesis.options.sensors import ContactProbe as ContactProbeOptions
-from genesis.options.sensors import KinematicTaxel as KinematicTaxelOptions
-from genesis.utils.array_class import BVHTreeState, ColliderInfo, ColliderState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, DynState, RigidInfo
+from genesis.options.sensors import (
+    ContactDepthProbe as ContactDepthProbeOptions,
+    ContactProbe as ContactProbeOptions,
+    KinematicTaxel as KinematicTaxelOptions,
+)
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
-
-from .raycaster import RaycastContext
+from genesis.utils.sdf import SDFInfo
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 from .contact_force import ContactFilterMetadataMixin, _func_link_is_filtered
@@ -26,6 +29,7 @@ from .probe import (
     func_noised_probe_radius,
     get_measured_bufs,
 )
+from .raycaster import RaycastContext
 from .tactile_shared import (
     ContactDepthQueryMetadataMixin,
     ContactDepthQuerySensorMixin,
@@ -55,9 +59,9 @@ def _func_query_contact_depth_penetration(
     probe_radius_gt: float,
     probe_radius_m: float,
     sensor_n_geoms: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Max probe penetration from SDF over the sensor link's unique opposing geoms, dual-radius.
@@ -191,10 +195,10 @@ def _func_query_contact_depth(
     probe_radius_gt: float,
     probe_radius_m: float,
     sensor_n_geoms: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
     eps: float,
 ):
@@ -316,10 +320,10 @@ def _kernel_kinematic_taxel(
     sensor_n_geoms: qd.types.ndarray(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
     eps: float,
     measured_equals_gt: int,
@@ -446,9 +450,9 @@ def _kernel_contact_depth_probe(
     sensor_n_geoms: qd.types.ndarray(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
     eps: float,
 ):
     total_n_probes = probe_positions_local.shape[0]

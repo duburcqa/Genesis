@@ -17,11 +17,11 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import Enabled, Phase, Stages, System, register_system
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, ColliderStaticConfig
 from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -85,9 +85,9 @@ class Collider(System):
         is_launched_apart=True,
     )
 
-    collider_config: array_class.ColliderStaticConfig
-    collider_info: array_class.ColliderInfo
-    collider_state: array_class.ColliderState
+    collider_config: ColliderStaticConfig
+    collider_info: ColliderInfo
+    collider_state: ColliderState
 
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
@@ -267,7 +267,7 @@ class Collider(System):
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
-        self.collider_config = array_class.ColliderStaticConfig(
+        self.collider_config = ColliderStaticConfig(
             gpu_cores=get_gpu_core_count(),
             has_terrain=has_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
@@ -349,7 +349,7 @@ class Collider(System):
 
         # Initialize [info], which stores every data that must be considered mutable from Quadrants's perspective,
         # i.e. unknown at compile time, but IMMUTABLE from Genesis scene's perspective after build.
-        self.collider_info = array_class.ColliderInfo(
+        self.collider_info = ColliderInfo(
             sizes=dict(
                 geoms=self._solver.n_geoms,
                 links=self._solver.n_links,
@@ -402,7 +402,7 @@ class Collider(System):
         # Initialize [state], which stores every data that are may be updated at every single simulation step
         config = self._solver.rigid_config
         is_split = self.narrowphase_layout is Queued
-        self.collider_state = array_class.ColliderState(
+        self.collider_state = ColliderState(
             sizes=dict(
                 envs=self._solver._B,
                 links=self._solver.n_links_,
@@ -414,7 +414,7 @@ class Collider(System):
                 contact_slots=1 if self._solver._options.enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
-            env_first={array_class.ColliderState.contact_sort_key: True, "pruning": True},
+            env_first={ColliderState.contact_sort_key: True, "pruning": True},
             unused=dict(
                 box_box=not config.box_box_detection,
                 contact_cache=not self.collider_config.has_non_box_plane_convex_convex,

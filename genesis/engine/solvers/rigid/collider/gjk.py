@@ -7,6 +7,16 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
+from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
+from genesis.engine.solvers.rigid.data import (
+    ColliderState,
+    DynInfo,
+    DynState,
+    GJKInfo,
+    GJKState,
+    GJKStaticConfig,
+    RigidInfo,
+)
 from genesis.utils.data import ConfigItem, DataItem, iter_data
 
 from . import support_field
@@ -45,9 +55,9 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
     request of its users (see 'reserve'). An instance without EPA leaves the arrays of the EPA unallocated.
     """
 
-    gjk_config: array_class.GJKStaticConfig
-    gjk_info: array_class.GJKInfo
-    gjk_state: array_class.GJKState | None
+    gjk_config: GJKStaticConfig
+    gjk_info: GJKInfo
+    gjk_state: GJKState | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         # Resolved by the collider (see '_init_static_config')
@@ -76,7 +86,7 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
         self.gjk_config = GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
         float_min, float_max = 1e-15, 1e15
-        self.gjk_info = array_class.GJKInfo(
+        self.gjk_info = GJKInfo(
             values=dict(
                 max_contacts_per_pair=max_contacts_per_pair,
                 max_contact_polygon_verts=max_contact_polygon_verts,
@@ -131,7 +141,7 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
         unused = {("epa", "diff_contacts"): True}
         if self.template_args[CapabilityT] is WithEPA:
             unused = dict(diff_contacts=not self._requires_grad)
-        self.gjk_state = array_class.GJKState(
+        self.gjk_state = GJKState(
             sizes=dict(workers=self._n_workers, **self._sizes), unused=unused, requires_grad=self._requires_grad
         )
 
@@ -160,13 +170,13 @@ def func_gjk_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -443,11 +453,11 @@ def func_gjk(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -686,11 +696,11 @@ def func_gjk_intersect(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -811,9 +821,7 @@ def func_gjk_intersect(
 
 
 @qd.func
-def func_gjk_triangle_info(
-    i_b: int, i_va: int, i_vb: int, i_vc: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo
-):
+def func_gjk_triangle_info(i_b: int, i_va: int, i_vb: int, i_vc: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Compute normal and signed distance of the triangle face on the simplex from the origin.
     """
@@ -836,7 +844,7 @@ def func_gjk_triangle_info(
 
 
 @qd.func
-def func_gjk_subdistance(i_b: int, n: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo):
+def func_gjk_subdistance(i_b: int, n: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Compute the barycentric coordinates of the closest point to the origin in the n-simplex.
 
@@ -957,9 +965,7 @@ def func_gjk_subdistance_3d(i_b: int, i_s1: int, i_s2: int, i_s3: int, i_s4: int
 
 
 @qd.func
-def func_gjk_subdistance_2d(
-    i_b: int, i_s1: int, i_s2: int, i_s3: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo
-):
+def func_gjk_subdistance_2d(i_b: int, i_s1: int, i_s2: int, i_s3: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Compute the barycentric coordinates of the closest point to the origin in the 2-simplex (triangle).
     """
@@ -1168,12 +1174,12 @@ def func_safe_gjk(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -1359,8 +1365,8 @@ def func_is_new_simplex_vertex_valid(
     id1: int,
     id2: int,
     mink: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
 ):
     """
     Check validity of the incoming simplex vertex (defined by id1, id2 and mink).
@@ -1392,9 +1398,7 @@ def func_is_new_simplex_vertex_duplicate(i_b: int, id1: int, id2: int, gjk_state
 
 
 @qd.func
-def func_is_new_simplex_vertex_degenerate(
-    i_b: int, mink: qd.types.vector(3), gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo
-):
+def func_is_new_simplex_vertex_degenerate(i_b: int, mink: qd.types.vector(3), gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Check if the simplex becomes degenerate after inserting a new vertex, assuming that the current simplex is okay.
     """
@@ -1428,9 +1432,7 @@ def func_is_new_simplex_vertex_degenerate(
 
 
 @qd.func
-def func_is_colinear(
-    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: array_class.GJKInfo
-):
+def func_is_colinear(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: GJKInfo):
     """
     Check if three points are collinear.
 
@@ -1448,7 +1450,7 @@ def func_is_coplanar(
     v2: qd.types.vector(3),
     v3: qd.types.vector(3),
     v4: qd.types.vector(3),
-    gjk_info: array_class.GJKInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Check if four points are coplanar.
@@ -1471,9 +1473,9 @@ def func_search_valid_simplex_vertex(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Search the vertex pairs of two discrete geometries for a valid simplex vertex (non-duplicate, non-degenerate).
@@ -1608,12 +1610,12 @@ def func_safe_gjk_support(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     dir: qd.types.vector(3),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -1721,8 +1723,8 @@ def count_support_driver(
     i_g: int,
     d: qd.types.vector(3),
     quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
 ):
     """
     Count the number of possible support points in the given direction,
@@ -1744,8 +1746,8 @@ def func_count_support(
     quat_a: qd.types.vector(4),
     quat_b: qd.types.vector(4),
     dir: qd.types.vector(3),
-    dyn_info: array_class.DynInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
 ):
     """
     Count the number of possible pairs of support points on the two objects

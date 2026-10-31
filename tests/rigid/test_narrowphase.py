@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, cast
 
 import numpy as np
+
 import pytest
 import trimesh
 from scipy.spatial import ConvexHull
@@ -49,7 +50,8 @@ from genesis.engine.solvers.rigid.collider import collider, gjk_support, support
 from genesis.engine.solvers.rigid.collider.collider import Collider, ConvexConvex, ConvexConvexFirstContact
 from genesis.engine.solvers.rigid.collider.constants import PerEnv, Queued
 from genesis.engine.solvers.rigid.collider.gjk import GJK
-from genesis.engine.solvers.rigid.collider.support_field import SupportField
+from genesis.engine.solvers.rigid.collider.support_field import SupportField, SupportFieldInfo
+from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, GJKInfo, GJKState
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -1180,8 +1182,8 @@ def test_mesh_support_exactness(show_viewer, tol):
         supports: qd.types.ndarray(),
         supports_count: qd.types.ndarray(),
         supports_idx: qd.types.ndarray(),
-        dyn_info: array_class.DynInfo,
-        support_field_info: array_class.SupportFieldInfo,
+        dyn_info: DynInfo,
+        support_field_info: SupportFieldInfo,
     ):
         for i_d in range(directions.shape[0]):
             direction = qd.Vector([directions[i_d, 0], directions[i_d, 1], directions[i_d, 2]], dt=gs.qd_float)
@@ -1197,11 +1199,11 @@ def test_mesh_support_exactness(show_viewer, tol):
         directions: qd.types.ndarray(),
         supports_world: qd.types.ndarray(),
         supports_local: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
-        gjk_state: array_class.GJKState,
-        dyn_info: array_class.DynInfo,
-        gjk_info: array_class.GJKInfo,
-        support_field_info: array_class.SupportFieldInfo,
+        collider_state: ColliderState,
+        gjk_state: GJKState,
+        dyn_info: DynInfo,
+        gjk_info: GJKInfo,
+        support_field_info: SupportFieldInfo,
         rigid_config: qd.template(),
         collider_config: qd.template(),
     ):

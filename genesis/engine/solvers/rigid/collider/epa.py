@@ -10,9 +10,10 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKState, RigidInfo
+from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
+from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, GJKInfo, GJKState, RigidInfo
 
-from .constants import EPA_POLY_INIT_RETURN_CODE, RETURN_CODE
+from .constants import EPA_POLY_INIT_RETURN_CODE, GJK_RETURN_CODE, RETURN_CODE
 from .gjk_support import func_support
 from .gjk_utils import (
     func_origin_tetra_intersection,
@@ -33,11 +34,11 @@ def func_epa(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -222,7 +223,7 @@ def func_epa(
 
 
 @qd.func
-def func_epa_witness(i_b: int, i_f: int, gjk_state: GJKState):
+def func_epa_witness(i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: GJKState):
     """
     Compute the witness points from the geometries for the face i_f of the polytope.
     """
@@ -258,8 +259,8 @@ def func_epa_horizon(
     i_b: int,
     i_f_nearest: int,
     i_w: int,
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
     rounding_eps: float,
 ):
     """
@@ -437,12 +438,12 @@ def func_epa_init_polytope_2d(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -585,11 +586,11 @@ def func_epa_init_polytope_3d(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -723,9 +724,7 @@ def func_epa_init_polytope_3d(
 
 
 @qd.func
-def func_epa_init_polytope_4d(
-    i_ga: int, i_gb: int, i_b: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo
-):
+def func_epa_init_polytope_4d(i_ga: int, i_gb: int, i_b: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Create the polytope for EPA from a 3-simplex (tetrahedron).
 
@@ -818,11 +817,11 @@ def func_epa_support(
     quat_b: qd.types.vector(4),
     dir: qd.types.vector(3),
     dir_norm: float,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -890,8 +889,8 @@ def func_attach_face_to_polytope(
     i_a1: int,
     i_a2: int,
     i_a3: int,
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
 ):
     """
     Attach a face to the polytope.
@@ -971,12 +970,12 @@ def func_safe_epa(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -1219,9 +1218,7 @@ def func_safe_epa(
 
 
 @qd.func
-def func_safe_epa_witness(
-    i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo
-):
+def func_safe_epa_witness(i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Compute the witness points from the geometries for the face i_f of the polytope.
     """
@@ -1281,7 +1278,7 @@ def func_safe_epa_witness(
 
 
 @qd.func
-def func_safe_epa_init(i_ga: int, i_gb: int, i_b: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo):
+def func_safe_epa_init(i_ga: int, i_gb: int, i_b: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Create the polytope for safe EPA from a 3-simplex (tetrahedron).
 
@@ -1336,8 +1333,8 @@ def func_safe_attach_face_to_polytope(
     i_a1: int,
     i_a2: int,
     i_a3: int,
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
 ):
     """
     Attach a face to the polytope.
@@ -1413,9 +1410,7 @@ def func_safe_attach_face_to_polytope(
 
 
 @qd.func
-def func_plane_normal(
-    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: array_class.GJKInfo
-):
+def func_plane_normal(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: GJKInfo):
     """
     Compute the reliable normal of the plane defined by three points.
     """

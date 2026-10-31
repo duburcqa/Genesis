@@ -10,14 +10,13 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import (
+from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     ConstraintState,
     DynInfo,
     DynState,
-    ErrorCode,
-    GeomsInitAABB,
+    RigidErrorCode,
     RigidInfo,
 )
 
@@ -63,7 +62,7 @@ def func_check_links_collision_valid(
 
 @qd.func
 def func_collision_clear(
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -273,7 +272,7 @@ def _func_broad_phase_links_all_vs_all(
 
 @qd.func
 def func_broad_phase_geoms(
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -320,12 +319,12 @@ def func_broad_phase_geoms(
                                     collider_state.broad_collision_pairs[n_broad, i_b][0] = i_ga
                                     collider_state.broad_collision_pairs[n_broad, i_b][1] = i_gb
                                 else:
-                                    errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_CANDIDATE_CONTACTS
+                                    errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS
 
 
 @qd.func
 def func_broad_phase(
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,

@@ -10,9 +10,28 @@ import numba as nb
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.typing import Vec3FType
 from genesis.utils.cache import register_cache_clear
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+
+
+HASH_SLOTS = Size("hash_slots")
+
+
+class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
+    """
+    The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
+
+    A cell of integer coordinates hashes to one of the slots, whose particles take the indices from `slot_start` to
+    `slot_start + slot_size` once sorted (see func_hash_compute_reordered_idx in genesis/utils/geom.py).
+    """
+
+    slot_size: qd.Tensor = field(int)
+    slot_start: qd.Tensor = field(int)
+    cur_cnt: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.SCRATCH)
+    cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
+    grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
+
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- Quadrants ----------------------------------------
@@ -2507,7 +2526,7 @@ def default_dofs_kv(n=6):
 
 @qd.func(requires_top_level=True)
 def func_hash_compute_reordered_idx(
-    pos: qd.template(), active: qd.template(), reordered_idx: qd.template(), hash_grid: array_class.SpatialHashGrid
+    pos: qd.template(), active: qd.template(), reordered_idx: qd.template(), hash_grid: SpatialHashGrid
 ):
     """
     Sort the active elements of every environment by the slot of the hash grid their position falls in.
@@ -2550,14 +2569,14 @@ def func_hash_compute_reordered_idx(
 
 
 @qd.func
-def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: array_class.SpatialHashGrid):
+def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
     """Return the integer coordinates of the cell of the hash grid a position lies in."""
     return qd.floor(pos / hash_grid.cell_size[None], gs.qd_int)
 
 
 # The integer dtype is spelled out since the Genesis integer vector types only exist once Genesis is initialized
 @qd.func
-def func_hash_grid_to_slot(grid_id: qd.types.vector(3, qd.i32), hash_grid: array_class.SpatialHashGrid):
+def func_hash_grid_to_slot(grid_id: qd.types.vector(3, qd.i32), hash_grid: SpatialHashGrid):
     """Return the slot of the hash grid a cell of integer coordinates hashes to."""
     grid_res = hash_grid.grid_res[None]
     n_slots = hash_grid.slot_size.shape[0]

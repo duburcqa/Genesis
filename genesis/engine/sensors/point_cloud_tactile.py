@@ -3,12 +3,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Final, NamedTuple, TypeVar
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.bvh import BVHTreeState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
@@ -17,6 +20,7 @@ from genesis.utils.array_class import BVHTreeState, ColliderInfo, DynInfo, DynSt
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
+from genesis.utils.sdf import SDFInfo
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 from .probe import (
@@ -827,9 +831,9 @@ def _func_elastomer_min_sdf_over_active_geoms(
     point_world: qd.types.vector(3),
     geom_n: int,
     geom_active_envs_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ) -> float:
     min_sdf = float(1.0e6)
     geom_end = geom_start + geom_n
@@ -1226,9 +1230,9 @@ def _kernel_elastomer_probe_depth(
     sensor_track_geom_n: qd.types.ndarray(),
     track_geom_active_envs_mask: qd.types.ndarray(),
     probe_depth_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ):
     """Per-probe contact depth from track-geom SDF, parallel over (env, probe).
 
@@ -1358,9 +1362,9 @@ def _kernel_elastomer_surface_state_bvh(
     surface_depth_buf: qd.types.ndarray(),
     surface_initialized_buf: qd.types.ndarray(),
     surface_candidate_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
     aabb_margin: float,
     bvh_stack_size: qd.template(),
 ):

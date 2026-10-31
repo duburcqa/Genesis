@@ -6,19 +6,18 @@ from typing import Annotated
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.sdf as sdf
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.particle_solver import func_set_particle_pos, func_set_particle_vel
-from genesis.engine.solvers.pbd_solver import PBDSolver
+from genesis.engine.solvers.particle_solver import PARTICLES, func_set_particle_pos, func_set_particle_vel
+from genesis.engine.solvers.pbd_solver import PBDInfo, PBDSolver, PBDState
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, GeomsState, LinksState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
-from genesis.utils.array_class import ENVS, PARTICLES
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
+from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
-from genesis.utils.sdf import SDF
+from genesis.utils.sdf import SDF, SDFInfo
 
 # The largest inverse timestep at which the particles carried by a link catch up with it, which spares them jerks
 CLAMPED_INV_DT = 50.0
@@ -39,13 +38,13 @@ def func_pbd_collide_with_rigid_geom(
     pos_world: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    pbd_state: array_class.PBDState,
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
-    pbd_info: array_class.PBDInfo,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    pbd_state: PBDState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    pbd_info: PBDInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -74,12 +73,12 @@ def func_pbd_collide_with_rigid_geom(
 
 @qd.kernel(fastcache=True)
 def kernel_pbd_rigid_collide(
-    pbd_state: array_class.PBDState,
-    dyn_state: array_class.DynState,
-    pbd_info: array_class.PBDInfo,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    pbd_state: PBDState,
+    dyn_state: DynState,
+    pbd_info: PBDInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """Push the sorted position based dynamics particles out of the coupled rigid geoms.
@@ -115,8 +114,8 @@ def kernel_attach_pbd_to_rigid_link(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     link_idx: int,
-    pbd_state: array_class.PBDState,
-    links_state: array_class.LinksState,
+    pbd_state: PBDState,
+    links_state: LinksState,
     rigid_pbd_info: RigidPBDInfo,
 ):
     """Carry some position based dynamics (PBD) particles along with a link, where they lie now in its frame."""
@@ -146,8 +145,8 @@ def kernel_detach_pbd_from_rigid_link(
 @qd.kernel(fastcache=True)
 def kernel_drive_pbd_particles_by_link(
     clamped_inv_dt: float,
-    pbd_state: array_class.PBDState,
-    dyn_state: array_class.DynState,
+    pbd_state: PBDState,
+    dyn_state: DynState,
     rigid_pbd_info: RigidPBDInfo,
 ):
     """

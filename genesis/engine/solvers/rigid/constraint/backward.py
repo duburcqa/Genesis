@@ -2,13 +2,19 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
 
 from . import solver
 
 
 @qd.func
-def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo):
+def func_matvec_Ap(
+    i_b: int,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     """
     Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
 
@@ -43,7 +49,11 @@ def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInf
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo
+    i_b: int,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Conjugate-gradient (CG) solve of A u = g for a single environment [i_b].
 
@@ -96,7 +106,10 @@ def func_solve_adjoint_u_cg_batch(
 
 @qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
-    constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     r"""
     Solve for the adjoint vector [u] from Au = g, where A = dF/dqacc (primal Hessian on the active set) and g = dL/dqacc.
@@ -212,7 +225,7 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
                 constraint_state.dL_djac[i_c, i_d, i_b] = dL_djac if is_active else gs.qd_float(0.0)
         constraint_state.efc_force.grad[i_c, i_b] = gs.qd_float(0.0)
 
-    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
+    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in rigid/data.py): an entry
     # outside them is structurally zero and moves nothing, so its gradient is zero.
     for i, i_b in qd.ndrange(n_dofs, _B):
         for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
@@ -223,7 +236,9 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
 
 @qd.kernel(fastcache=True)
 def kernel_load_dL_dqacc_from_acc_grad(
-    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template()
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
 ):
     """Copy the acc grad into constraint_state.dL_dqacc (the input buffer consumed by kernel_solve_adjoint_u) and
     zero the source grad so the downstream implicit-function-theorem path does not re-consume it.
@@ -241,7 +256,10 @@ def kernel_load_dL_dqacc_from_acc_grad(
 
 @qd.kernel(fastcache=True)
 def kernel_accumulate_constraint_solver_grads(
-    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
     dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce

@@ -9,21 +9,21 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.entities.hybrid_entity import HybridEntity
+from genesis.engine.entities.hybrid_entity import HybridEntity, HybridSoftPartInfo
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.mpm_solver import CellSeparation, CellVelocity, GridCoupling, MPMSolver
+from genesis.engine.solvers.mpm_solver import CellSeparation, CellVelocity, GridCoupling, MPMInfo, MPMSolver, MPMState
+from genesis.engine.solvers.particle_solver import PARTICLES
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
+from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, LinksState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.step import Integration, Preparation
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
-from genesis.utils.array_class import ENVS, GEOMS, PARTICLES
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
+from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import broadcast_tensor
-from genesis.utils.sdf import SDF
+from genesis.utils.sdf import SDF, SDFInfo
 
 from .rigid_contact import func_collide_with_rigid
 
@@ -47,10 +47,10 @@ def func_mpm_rigid(
     pos: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """Return the velocity of a cell of the grid colliding with the coupled rigid geoms (see func_collide_with_rigid)."""
@@ -77,10 +77,10 @@ def func_cpic_cell_separation(
     cell_pos: qd.types.vector(3),
     i_sep: int,
     rigid_mpm_cpic: RigidMPMCPICState,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ) -> int:
     """
@@ -112,12 +112,12 @@ def func_cpic_cell_velocity(
     i_c: int,
     weight: float,
     grid_vel: qd.types.vector(3),
-    mpm_state: array_class.MPMState,
+    mpm_state: MPMState,
     rigid_mpm_cpic: RigidMPMCPICState,
-    dyn_state: array_class.DynState,
-    mpm_info: array_class.MPMInfo,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    mpm_info: MPMInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ) -> qd.types.vector(3):
     """
     Return the velocity of a particle colliding with the thin rigid geom separating it from a cell of its stencil, in
@@ -143,12 +143,12 @@ def func_cpic_cell_velocity(
 @qd.kernel(fastcache=True)
 def kernel_update_cpic_rigid_normal(
     f: int,
-    mpm_state: array_class.MPMState,
+    mpm_state: MPMState,
     rigid_mpm_cpic: RigidMPMCPICState,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """Record the outward normal of every coupled rigid geom at the active material point method particles.
@@ -249,11 +249,11 @@ def kernel_update_soft_part_mpm(
     dt: float,
     damping: float,
     soft_dv_coef: float,
-    mpm_state: array_class.MPMState,
-    links_state: array_class.LinksState,
-    soft_part_info: array_class.HybridSoftPartInfo,
-    mpm_info: array_class.MPMInfo,
-    geoms_info: array_class.GeomsInfo,
+    mpm_state: MPMState,
+    links_state: LinksState,
+    soft_part_info: HybridSoftPartInfo,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
 ):
     """
     Couple the particles of the soft part of a hybrid entity with the links of its rigid part, once g2p advected them.
@@ -441,7 +441,7 @@ def kernel_attach_mpm_particles(
     particles_mask: qd.types.ndarray(),
     link_pos: qd.types.ndarray(element_dim=1),
     link_quat: qd.types.ndarray(element_dim=1),
-    mpm_state: array_class.MPMState,
+    mpm_state: MPMState,
     rigid_mpm_attachment_info: RigidMPMAttachmentInfo,
 ):
     """Attach the masked particles to a link, at the point of its frame where each one lies now."""
@@ -470,10 +470,10 @@ def kernel_detach_mpm_particles(
 @qd.kernel(fastcache=True)
 def kernel_apply_rigid_mpm_attachment(
     f: int,
-    mpm_state: array_class.MPMState,
-    dyn_state: array_class.DynState,
+    mpm_state: MPMState,
+    dyn_state: DynState,
     rigid_mpm_attachment_info: RigidMPMAttachmentInfo,
-    mpm_info: array_class.MPMInfo,
+    mpm_info: MPMInfo,
 ):
     """Pull the attached particles of the next frame toward the point of their link with a critically damped spring."""
     for i_p, i_b in qd.ndrange(

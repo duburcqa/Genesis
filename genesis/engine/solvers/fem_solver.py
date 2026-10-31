@@ -8,21 +8,243 @@ import igl
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.linalg as lu
 from genesis.engine.boundaries import FloorBoundary, func_impose_floor_boundary
+from genesis.engine.boundaries.boundaries import FloorBoundaryPlane
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.pipeline import RoleOf
+from genesis.engine.solvers.base_solver import FRAMES
+from genesis.engine.solvers.rigid.data import DynState, LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.engine.step import Dynamics
 from genesis.grad.bridge import no_grad
-from genesis.utils.data import ConfigItem, DataItem, iter_data
+from genesis.utils.data import ENVS, ConfigItem, Data, DataItem, DataKind, Size, StaticConfig, field, iter_data
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
+from genesis.utils.linalg import FixedOrderSums
 from genesis.utils.misc import broadcast_tensor, qd_to_torch, qd_zero_grad, tensor_to_array
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+
+
+VVERTS = Size("vverts")
+VFACES = Size("vfaces")
+# Sizes of the FEM solver: the vertices and the elements, the frames of the element contributions of the explicit
+# solver (one per substep with gradients), the corners of the elements, and the surface triangles with their vertices
+# and elements, its states spanning the frames of a step (see FRAMES)
+VERTICES = Size("vertices")
+ELEMENTS = Size("elements")
+CORNER_FRAMES = Size("corner_frames")
+CORNERS = Size("corners")
+SURFACES = Size("surfaces")
+SURFACE_VERTICES = Size("surface_vertices")
+SURFACE_ELEMENTS = Size("surface_elements")
+
+
+class FEMVerticesKinematics(Data, kind=DataKind.STATE, shape=(FRAMES, VERTICES, ENVS)):
+    """The position and velocity of the vertices, one per frame of the substeps of a step, vertex and environment."""
+
+    pos: qd.Tensor = field((float, 3), grad=True)
+    vel: qd.Tensor = field((float, 3), grad=True)
+
+
+class FEMElements(Data, kind=DataKind.CONSTANT, shape=(ELEMENTS,)):
+    """
+    Model parameters of the elements, one value per element.
+
+    `el2v` holds the four vertices of an element, `B` the inverse of its rest shape matrix, `V` its rest volume and
+    `mu`, `lam` its Lame parameters. The masses and volumes `*_scaled` are scaled up by `vol_scale` (see FEMInfo).
+    `material_idx` is the index of the material (see FEMMaterialDispatcher in fem_solver.py).
+    """
+
+    el2v: qd.Tensor = field((int, 4))
+    mu: qd.Tensor = field(float)
+    lam: qd.Tensor = field(float)
+    mass_scaled: qd.Tensor = field(float)
+    material_idx: qd.Tensor = field(int)
+    B: qd.Tensor = field((float, (3, 3)))
+    V: qd.Tensor = field(float)
+    V_scaled: qd.Tensor = field(float)
+    friction_mu: qd.Tensor = field(float)
+    muscle_group: qd.Tensor = field(int, kind=DataKind.INFO)
+    muscle_direction: qd.Tensor = field((float, 3), kind=DataKind.INFO)
+
+
+class FEMVerticesProperties(Data, kind=DataKind.CONSTANT, shape=(VERTICES,)):
+    """
+    Model parameters of the vertices.
+
+    `mass`, `mass_inv`, `mass_over_dt2` and `friction_mu` hold one value per vertex, the mass of a vertex lumping a
+    quarter of the mass of the elements it belongs to. `corner` lists the corners of the elements vertex after vertex,
+    each one encoded as i_e * 4 + i_corner in increasing order, the corners touching vertex i_v being
+    `corner[corner_start[i_v]:corner_start[i_v + 1]]`.
+    """
+
+    mass: qd.Tensor = field(float)
+    mass_inv: qd.Tensor = field(float)
+    mass_over_dt2: qd.Tensor = field(float)
+    friction_mu: qd.Tensor = field(float)
+    corner_start: qd.Tensor = field(int, shape=(VERTICES + 1,))
+    corner: qd.Tensor = field(int, shape=(CORNERS,))
+
+
+class FEMSurface(Data, kind=DataKind.CONSTANT):
+    """
+    The surface of the entities, which the other solvers couple with.
+
+    `tri2v` holds the vertices of each surface triangle and `tri2el` its element. `vertices_idx` lists the vertices of
+    the surface triangles, `vertices_mass` their lumped surface mass, and `elements_idx` the elements touching them.
+    """
+
+    tri2v: qd.Tensor = field((int, 3), shape=(SURFACES,))
+    tri2el: qd.Tensor = field(int, shape=(SURFACES,))
+    vertices_idx: qd.Tensor = field(int, shape=(SURFACE_VERTICES,))
+    vertices_mass: qd.Tensor = field(float, shape=(SURFACE_VERTICES,))
+    elements_idx: qd.Tensor = field(int, shape=(SURFACE_ELEMENTS,))
+
+
+class FEMVVerts(Data, kind=DataKind.CONSTANT):
+    """The visual vertices, each one drawn at the position of the simulated vertex `vert_idx`, and their faces."""
+
+    vert_idx: qd.Tensor = field(int, shape=(VVERTS,))
+    uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
+    vfaces_indices: qd.Tensor = field((int, 3), shape=(VFACES,))
+
+
+class FEMExplicitCorners(Data, kind=DataKind.SCRATCH, shape=(CORNER_FRAMES, ELEMENTS, 4, ENVS)):
+    """
+    The contribution of each element to each of its four vertices, for the explicit solver.
+
+    A vertex sums the contributions of its corners in the order of FEMVerticesProperties, so that the result does not
+    depend on the scheduling of the threads. With gradients, every substep of a step writes its own, which the
+    backward pass reads back.
+    """
+
+    force: qd.Tensor = field((float, 3), grad=True)
+    dv: qd.Tensor = field((float, 3), grad=True)
+
+
+class FEMImplicitCorners(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, 4, ENVS)):
+    """The contribution of each element to the force, the diagonal block of the Hessian and A * p of its vertices."""
+
+    force: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    Ap: qd.Tensor = field((float, 3))
+
+
+class FEMNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The scratch of the Newton solve of the implicit solver, its conjugate gradient and its line search.
+
+    Per element: the elastic `energy` density, its `gradient` with respect to the deformation gradient, the blocks
+    `hessian[i, j]` of its Hessian, and the `rotation` the linear corotated materials linearize around. Per vertex: the
+    `inertia` target, the `diag3x3` block of the Hessian and its inverse `prec`, the conjugate gradient vectors and the
+    position `x_prev` the line search starts from. Per environment: whether the conjugate gradient and the line search
+    are still running, and their scalars.
+
+    The Hessian of a material whose Hessian does not depend on the deformation is written once and read by every later
+    solve, hence its kind.
+    """
+
+    energy: qd.Tensor = field(float, shape=(ELEMENTS, ENVS))
+    gradient: qd.Tensor = field((float, (3, 3)), shape=(ELEMENTS, ENVS))
+    hessian: qd.Tensor = field((float, (3, 3)), shape=(3, 3, ELEMENTS, ENVS), kind=DataKind.STATE)
+    rotation: qd.Tensor = field((float, (3, 3)), shape=(ELEMENTS, ENVS))
+    inertia: qd.Tensor = field((float, 3))
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    prec: qd.Tensor = field((float, (3, 3)))
+    x: qd.Tensor = field((float, 3))
+    r: qd.Tensor = field((float, 3))
+    z: qd.Tensor = field((float, 3))
+    p: qd.Tensor = field((float, 3))
+    Ap: qd.Tensor = field((float, 3))
+    x_prev: qd.Tensor = field((float, 3))
+    is_pcg_active: qd.Tensor = field(bool, shape=(ENVS,))
+    is_linesearch_active: qd.Tensor = field(bool, shape=(ENVS,))
+    rTr: qd.Tensor = field(float, shape=(ENVS,))
+    rTz: qd.Tensor = field(float, shape=(ENVS,))
+    rTr_new: qd.Tensor = field(float, shape=(ENVS,))
+    rTz_new: qd.Tensor = field(float, shape=(ENVS,))
+    pTAp: qd.Tensor = field(float, shape=(ENVS,))
+    alpha: qd.Tensor = field(float, shape=(ENVS,))
+    beta: qd.Tensor = field(float, shape=(ENVS,))
+    prev_energy: qd.Tensor = field(float, shape=(ENVS,))
+    linesearch_energy: qd.Tensor = field(float, shape=(ENVS,))
+    step_size: qd.Tensor = field(float, shape=(ENVS,))
+    m: qd.Tensor = field(float, shape=(ENVS,))
+    corners: FEMImplicitCorners
+    sums_v: FixedOrderSums
+    sums_el: FixedOrderSums
+
+
+class FEMState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the FEM solver.
+
+    `vertices` and `actu`, the actuation of each element, hold one frame per substep of a step. `force` is the internal
+    force of each vertex, which the last substep computed.
+    """
+
+    vertices: FEMVerticesKinematics
+    actu: qd.Tensor = field(float, shape=(FRAMES, ELEMENTS, ENVS), grad=True)
+    force: qd.Tensor = field((float, 3), shape=(VERTICES, ENVS), kind=DataKind.DERIVED)
+    explicit_corners: FEMExplicitCorners
+    newton: FEMNewtonScratch = field(kind=DataKind.SCRATCH)
+    vverts_render: qd.Tensor = field((float, 3), shape=(VVERTS, ENVS), kind=DataKind.SCRATCH)
+
+
+class FEMVertexConstraintsInfo(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
+    """
+    The constraints of the vertices, one per vertex and environment.
+
+    A constrained vertex is held at `target_pos`, or pulled toward it by a critically damped spring of the given
+    stiffness when the constraint is soft. A vertex following the link `link_idx` (-1 for none) keeps the offset
+    `link_offset_pos` from it, rotated by the rotation of the link since `link_init_quat`.
+    """
+
+    is_constrained: qd.Tensor = field(bool)
+    target_pos: qd.Tensor = field((float, 3))
+    is_soft_constraint: qd.Tensor = field(bool)
+    stiffness: qd.Tensor = field(float)
+    link_idx: qd.Tensor = field(int)
+    link_offset_pos: qd.Tensor = field((float, 3))
+    link_init_quat: qd.Tensor = field((float, 4))
+
+
+class FEMInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """
+    Model parameters of the FEM solver.
+
+    `damping` damps the velocity of the explicit solver, and `damping_alpha`, `damping_beta` are the Rayleigh damping
+    coefficients of the implicit one, proportional to the mass and to the stiffness. `vol_scale` scales the volumes up
+    for numerical robustness, which the masses exchanged with the other solvers divide out.
+    """
+
+    elements: FEMElements
+    vertices: FEMVerticesProperties
+    surface: FEMSurface
+    vverts: FEMVVerts
+    boundary: FloorBoundaryPlane
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float)
+    damping: qd.Tensor = field(float)
+    damping_alpha: qd.Tensor = field(float)
+    damping_beta: qd.Tensor = field(float)
+    pcg_threshold: qd.Tensor = field(float)
+    linesearch_c: qd.Tensor = field(float)
+    linesearch_tau: qd.Tensor = field(float)
+    vol_scale: qd.Tensor = field(float)
+    EPS: qd.Tensor = field(float)
+
+
+class FEMStaticConfig(StaticConfig):
+    # Whether the vertices of the implicit solver may be constrained, which drops their rows from its Newton solve
+    enable_vertex_constraints: bool
+    # Whether a material linearizes its energy around the rotation of the deformation gradient of each element
+    has_rotation: bool
+    # Whether every substep of a step keeps its own element contributions (see FEMExplicitCorners)
+    requires_grad: bool
 
 
 @qd.data_oriented
@@ -157,12 +379,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # boundary
         self.boundary = FloorBoundary(height=self._floor_height)
 
-        self.fem_state: array_class.FEMState | None = None
-        self.fem_info: array_class.FEMInfo | None = None
-        self.fem_static_config: array_class.FEMStaticConfig | None = None
-        self.vertex_constraints: array_class.FEMVertexConstraintsInfo | None = None
+        self.fem_state: FEMState | None = None
+        self.fem_info: FEMInfo | None = None
+        self.fem_static_config: FEMStaticConfig | None = None
+        self.vertex_constraints: FEMVertexConstraintsInfo | None = None
         # See 'newton_vertex_constraints'
-        self._newton_vertex_constraints: array_class.FEMVertexConstraintsInfo | None = None
+        self._newton_vertex_constraints: FEMVertexConstraintsInfo | None = None
         self._material_dispatcher: FEMMaterialDispatcher | None = None
         self._n_surface_elements = 0
         # Whether the Hessian of the materials whose Hessian does not depend on the deformation is computed already
@@ -224,7 +446,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             surface_vertices_mass = mass.diagonal().astype(gs.np_float, copy=False)
 
         # The couplers take the data of the solver whether it holds entities or not
-        self.fem_static_config = array_class.FEMStaticConfig(
+        self.fem_static_config = FEMStaticConfig(
             enable_vertex_constraints=self._enable_vertex_constraints,
             has_rotation=any([material.has_rotation for material in self._materials]),
             requires_grad=self._sim.requires_grad,
@@ -235,22 +457,22 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_active:
             is_implicit = self._use_implicit_solver
             unused = {
-                array_class.FEMState.explicit_corners: is_implicit,
-                array_class.FEMState.newton: not is_implicit,
-                array_class.FEMState.newton.rotation: not (is_implicit and self.fem_static_config.has_rotation),
+                FEMState.explicit_corners: is_implicit,
+                FEMState.newton: not is_implicit,
+                FEMState.newton.rotation: not (is_implicit and self.fem_static_config.has_rotation),
             }
-        self.fem_state = array_class.FEMState(
+        self.fem_state = FEMState(
             sizes={
                 **sizes,
                 "frames": self.n_frames,
                 "corner_frames": self.n_frames - 1 if self._sim.requires_grad else 1,
-                array_class.FEMState.newton.sums_v: array_class.FixedOrderSums.sizes(self.n_vertices, 2),
-                array_class.FEMState.newton.sums_el: array_class.FixedOrderSums.sizes(self.n_elements, 1),
+                FEMState.newton.sums_v: FixedOrderSums.sizes(self.n_vertices, 2),
+                FEMState.newton.sums_el: FixedOrderSums.sizes(self.n_elements, 1),
             },
             unused=unused,
             requires_grad=self._sim.requires_grad,
         )
-        self.fem_info = array_class.FEMInfo(
+        self.fem_info = FEMInfo(
             sizes=dict(
                 sizes,
                 vfaces=self.n_vfaces,
@@ -274,11 +496,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             # The constants are filled whether the solver holds entities or not, since the couplers read them
             unused={
                 (
-                    array_class.FEMInfo.elements,
-                    array_class.FEMInfo.vertices,
-                    array_class.FEMInfo.surface,
-                    array_class.FEMInfo.vverts,
-                    array_class.FEMInfo.gravity,
+                    FEMInfo.elements,
+                    FEMInfo.vertices,
+                    FEMInfo.surface,
+                    FEMInfo.vverts,
+                    FEMInfo.gravity,
                 ): not self.is_active
             },
         )
@@ -289,13 +511,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # (see 'set_vertex_constraints')
         constraints_sizes = dict(envs=self._B, vertices=self.n_vertices)
         if self.is_active and self._enable_vertex_constraints:
-            self.vertex_constraints = array_class.FEMVertexConstraintsInfo(sizes=constraints_sizes)
+            self.vertex_constraints = FEMVertexConstraintsInfo(sizes=constraints_sizes)
             self.vertex_constraints.link_idx.fill(-1)
         self._newton_vertex_constraints = self.vertex_constraints
         if self._newton_vertex_constraints is None:
-            self._newton_vertex_constraints = array_class.FEMVertexConstraintsInfo(
-                sizes=constraints_sizes, unused={None: True}
-            )
+            self._newton_vertex_constraints = FEMVertexConstraintsInfo(sizes=constraints_sizes, unused={None: True})
         self._build_gravity(self.fem_info.gravity)
 
         if self.is_active:
@@ -647,9 +867,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 "Vertex constraints are not supported by a coupler computing the dynamics of FEM entities."
             )
         if self.vertex_constraints is None:
-            self.vertex_constraints = array_class.FEMVertexConstraintsInfo(
-                sizes=dict(vertices=self.n_vertices, envs=self._B)
-            )
+            self.vertex_constraints = FEMVertexConstraintsInfo(sizes=dict(vertices=self.n_vertices, envs=self._B))
             self.vertex_constraints.link_idx.fill(-1)
 
         is_target_current = target_poss is None
@@ -719,7 +937,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         kernel_remove_specific_constraints(verts_idx, envs_idx, self.vertex_constraints)
 
-    def update_linked_vertex_constraints(self, dyn_state: array_class.DynState):
+    def update_linked_vertex_constraints(self, dyn_state: DynState):
         """Move the target of the vertices following a rigid link with the link."""
         if self.vertex_constraints is not None:
             kernel_update_linked_vertex_constraints(self.vertex_constraints, dyn_state.links)
@@ -780,7 +998,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
 
 @qd.func
-def func_compute_ele_J_F(f: int, i_e: int, i_b: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def func_compute_ele_J_F(f: int, i_e: int, i_b: int, fem_state: FEMState, fem_info: FEMInfo):
     """Return the determinant and the deformation gradient of an element in a frame."""
     i_v0, i_v1, i_v2, i_v3 = fem_info.elements.el2v[i_e]
     pos_v0 = fem_state.vertices.pos[f, i_v0, i_b]
@@ -797,8 +1015,8 @@ def func_compute_ele_J_F(f: int, i_e: int, i_b: int, fem_state: array_class.FEMS
 def func_compute_element_mapping_matrix(
     i_e: int,
     i_b: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_info: FEMInfo,
     static_config: qd.template(),
 ):
     """
@@ -821,7 +1039,7 @@ def func_compute_element_mapping_matrix(
 
 @qd.func
 def func_damping_force_term(
-    f: int, i_e: int, i_b: int, S: qd.types.matrix(4, 3), fem_state: array_class.FEMState, fem_info: array_class.FEMInfo
+    f: int, i_e: int, i_b: int, S: qd.types.matrix(4, 3), fem_state: FEMState, fem_info: FEMInfo
 ):
     """
     Return the displacement of an element over the substep in deformation gradient space, and its Hessian product.
@@ -847,8 +1065,8 @@ def func_damping_force_term(
 @qd.kernel
 def kernel_compute_elements_force(
     f: int,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
     material_dispatcher: qd.template(),
 ):
@@ -883,9 +1101,7 @@ def kernel_compute_elements_force(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_vertices_vel(
-    f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo, static_config: qd.template()
-):
+def kernel_update_vertices_vel(f: int, fem_state: FEMState, fem_info: FEMInfo, static_config: qd.template()):
     """Add the internal force of the elements to the velocity of the vertices, then damp it and add gravity."""
     for i_v, i_b in qd.ndrange(fem_state.vertices.pos.shape[1], fem_state.vertices.pos.shape[2]):
         i_f = 0
@@ -908,9 +1124,7 @@ def kernel_update_vertices_vel(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_pos(
-    f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo, static_config: qd.template()
-):
+def kernel_compute_pos(f: int, fem_state: FEMState, fem_info: FEMInfo, static_config: qd.template()):
     """Advect the vertices into the next frame, carrying the actuation of the elements over with gradients."""
     for i_v, i_b in qd.ndrange(fem_state.vertices.pos.shape[1], fem_state.vertices.pos.shape[2]):
         fem_state.vertices.pos[f + 1, i_v, i_b] = (
@@ -924,9 +1138,7 @@ def kernel_compute_pos(
 
 
 @qd.kernel
-def kernel_precompute_material_data(
-    f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo, material_dispatcher: qd.template()
-):
+def kernel_precompute_material_data(f: int, fem_state: FEMState, fem_info: FEMInfo, material_dispatcher: qd.template()):
     """Compute the rotation the linear corotated materials linearize around, from the deformation of the last frame."""
     for i_e, i_b in qd.ndrange(fem_state.newton.rotation.shape[0], fem_state.newton.rotation.shape[1]):
         J, F = func_compute_ele_J_F(f, i_e, i_b, fem_state, fem_info)
@@ -936,9 +1148,9 @@ def kernel_precompute_material_data(
 @qd.kernel(fastcache=True)
 def kernel_init_pos_and_inertia(
     f: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
 ):
     """Start the Newton solve from the last position, toward the inertial target of the free vertices."""
@@ -964,8 +1176,8 @@ def kernel_init_pos_and_inertia(
 @qd.kernel
 def kernel_compute_ele_hessian_gradient(
     f: int,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
     material_dispatcher: qd.template(),
     is_hessian_ready: bool,
@@ -997,9 +1209,9 @@ def kernel_compute_ele_hessian_gradient(
 @qd.kernel(fastcache=True)
 def kernel_accumulate_vertex_force_preconditioner(
     f: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
 ):
     """Compute the force on the vertices and the diagonal Hessian blocks, whose inverse preconditions the solve."""
@@ -1044,7 +1256,7 @@ def kernel_accumulate_vertex_force_preconditioner(
 
 
 @qd.kernel(fastcache=True)
-def kernel_init_pcg_solve(fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_init_pcg_solve(fem_state: FEMState, fem_info: FEMInfo):
     """Start the conjugate gradient solve of the Newton step from zero, with the force as residual."""
     for i_b in range(fem_state.newton.is_pcg_active.shape[0]):
         fem_state.newton.is_pcg_active[i_b] = True
@@ -1066,9 +1278,9 @@ def kernel_init_pcg_solve(fem_state: array_class.FEMState, fem_info: array_class
 
 @qd.kernel(fastcache=True)
 def kernel_one_pcg_iter(
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
 ):
     """Run one iteration of the preconditioned conjugate gradient solve of the Newton step."""
@@ -1145,7 +1357,7 @@ def kernel_one_pcg_iter(
 
 
 @qd.func(requires_top_level=True)
-def func_sum_elements_energy(fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def func_sum_elements_energy(fem_state: FEMState, fem_info: FEMInfo):
     """Compute the partial sums of the elastic energy of the elements of each environment (see FixedOrderSums)."""
     for i_e, i_b in qd.ndrange(fem_state.newton.energy.shape[0], fem_state.newton.energy.shape[1]):
         if fem_state.newton.is_linesearch_active[i_b]:
@@ -1154,7 +1366,7 @@ def func_sum_elements_energy(fem_state: array_class.FEMState, fem_info: array_cl
 
 
 @qd.kernel(fastcache=True)
-def kernel_init_linesearch(f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_init_linesearch(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Start the line search of the Newton step from a unit step, with the energy and its slope at the iterate."""
     for i_b in range(fem_state.newton.is_linesearch_active.shape[0]):
         fem_state.newton.is_linesearch_active[i_b] = True
@@ -1179,9 +1391,9 @@ def kernel_init_linesearch(f: int, fem_state: array_class.FEMState, fem_info: ar
 @qd.kernel
 def kernel_one_linesearch_iter(
     f: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
     static_config: qd.template(),
     material_dispatcher: qd.template(),
 ):
@@ -1242,14 +1454,14 @@ def kernel_one_linesearch_iter(
 
 
 @qd.kernel(fastcache=True)
-def kernel_skip_linesearch(f: int, fem_state: array_class.FEMState):
+def kernel_skip_linesearch(f: int, fem_state: FEMState):
     """Take the full Newton step."""
     for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
         fem_state.vertices.pos[f + 1, i_v, i_b] += fem_state.newton.x[i_v, i_b]
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_vertices_vel(f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_compute_vertices_vel(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Derive the velocity of the vertices from their displacement over the substep."""
     for i_v, i_b in qd.ndrange(fem_state.vertices.pos.shape[1], fem_state.vertices.pos.shape[2]):
         fem_state.vertices.vel[f + 1, i_v, i_b] = (
@@ -1258,7 +1470,7 @@ def kernel_compute_vertices_vel(f: int, fem_state: array_class.FEMState, fem_inf
 
 
 @qd.kernel(fastcache=True)
-def kernel_copy_frame(source: int, target: int, fem_state: array_class.FEMState):
+def kernel_copy_frame(source: int, target: int, fem_state: FEMState):
     """Copy the position and velocity of the vertices from one frame to another."""
     for i_v, i_b in qd.ndrange(fem_state.vertices.pos.shape[1], fem_state.vertices.pos.shape[2]):
         fem_state.vertices.pos[target, i_v, i_b] = fem_state.vertices.pos[source, i_v, i_b]
@@ -1266,7 +1478,7 @@ def kernel_copy_frame(source: int, target: int, fem_state: array_class.FEMState)
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_vertices_mass(fem_info: array_class.FEMInfo):
+def kernel_compute_vertices_mass(fem_info: FEMInfo):
     """Lump a quarter of the mass of every element onto each of its vertices, summed in the order of corners."""
     for i_v in range(fem_info.vertices.mass.shape[0]):
         i_start = fem_info.vertices.corner_start[i_v]
@@ -1293,8 +1505,8 @@ def kernel_add_elements(
     mat_friction_mu: float,
     verts: qd.types.ndarray(),
     elems: qd.types.ndarray(),
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
 ):
     """Add the vertices and the tetrahedra of an entity at rest to a frame, with the parameters of its material."""
     for i_v, i_b in qd.ndrange(verts.shape[0], fem_state.vertices.pos.shape[2]):
@@ -1336,9 +1548,7 @@ def kernel_add_elements(
 
 
 @qd.kernel(fastcache=True)
-def kernel_add_cloth(
-    f: int, v_start: int, verts: qd.types.ndarray(), fem_state: array_class.FEMState, fem_info: array_class.FEMInfo
-):
+def kernel_add_cloth(f: int, v_start: int, verts: qd.types.ndarray(), fem_state: FEMState, fem_info: FEMInfo):
     """Add the vertices of a cloth at rest to a frame, with placeholder mass and friction."""
     for i_v, i_b in qd.ndrange(verts.shape[0], fem_state.vertices.pos.shape[2]):
         i_global = i_v + v_start
@@ -1361,7 +1571,7 @@ def kernel_add_vverts(
     verts_idx: qd.types.ndarray(),
     uvs: qd.types.ndarray(element_dim=1),
     vfaces: qd.types.ndarray(element_dim=1),
-    fem_info: array_class.FEMInfo,
+    fem_info: FEMInfo,
 ):
     """Bind the visual vertices of a visual geom to the simulated vertices they stand for, with their UVs and faces."""
     for i_vv_ in range(verts_idx.shape[0]):
@@ -1373,7 +1583,7 @@ def kernel_add_vverts(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_state_render(f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_get_state_render(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Copy the position of the simulated vertices of a frame to the visual vertices standing for them."""
     for i_vv, i_b in qd.ndrange(fem_info.vverts.vert_idx.shape[0], fem_state.vverts_render.shape[1]):
         i_v = fem_info.vverts.vert_idx[i_vv]
@@ -1381,7 +1591,7 @@ def kernel_get_state_render(f: int, fem_state: array_class.FEMState, fem_info: a
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_state(f: int, pos: qd.types.ndarray(), vel: qd.types.ndarray(), fem_state: array_class.FEMState):
+def kernel_set_state(f: int, pos: qd.types.ndarray(), vel: qd.types.ndarray(), fem_state: FEMState):
     """Write the position and velocity of every vertex of every environment into a frame."""
     for i_v, i_b in qd.ndrange(pos.shape[1], pos.shape[0]):
         for j in qd.static(range(3)):
@@ -1395,7 +1605,7 @@ def kernel_set_verts_pos(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     poss: qd.types.ndarray(),
-    fem_state: array_class.FEMState,
+    fem_state: FEMState,
 ):
     """Set the position of some vertices in a frame."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1413,7 +1623,7 @@ def kernel_set_verts_vel(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     vels: qd.types.ndarray(),
-    fem_state: array_class.FEMState,
+    fem_state: FEMState,
 ):
     """Set the velocity of some vertices in a frame."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1431,7 +1641,7 @@ def kernel_get_verts_pos(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     poss: qd.types.ndarray(),
-    fem_state: array_class.FEMState,
+    fem_state: FEMState,
 ):
     """Get the position of some vertices in a frame."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1447,8 +1657,8 @@ def kernel_set_elements_actu(
     elements_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     actus: qd.types.ndarray(),
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
 ):
     """Set the actuation of some elements in a frame, each one taking that of its muscle group."""
     for i_e_, i_g, i_b_ in qd.ndrange(elements_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
@@ -1462,7 +1672,7 @@ def kernel_set_elements_actu(
 
 @qd.kernel(fastcache=True)
 def kernel_set_elements_muscle_group(
-    elements_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), fem_info: array_class.FEMInfo
+    elements_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), fem_info: FEMInfo
 ):
     """Set the muscle group of some elements."""
     for i_e_ in range(elements_idx.shape[0]):
@@ -1474,7 +1684,7 @@ def kernel_set_elements_muscle_group(
 
 @qd.kernel(fastcache=True)
 def kernel_set_elements_muscle_direction(
-    elements_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray(), fem_info: array_class.FEMInfo
+    elements_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray(), fem_info: FEMInfo
 ):
     """Set the direction of the muscle fibers of some elements."""
     for i_e_ in range(elements_idx.shape[0]):
@@ -1486,7 +1696,7 @@ def kernel_set_elements_muscle_direction(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_elements_el2v(elements_idx: qd.types.ndarray(), el2v: qd.types.ndarray(), fem_info: array_class.FEMInfo):
+def kernel_get_elements_el2v(elements_idx: qd.types.ndarray(), el2v: qd.types.ndarray(), fem_info: FEMInfo):
     """Get the global index of the four vertices of some elements."""
     for i_e_ in range(elements_idx.shape[0]):
         i_e = elements_idx[i_e_]
@@ -1495,9 +1705,7 @@ def kernel_get_elements_el2v(elements_idx: qd.types.ndarray(), el2v: qd.types.nd
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_linked_vertex_constraints(
-    vertex_constraints: array_class.FEMVertexConstraintsInfo, links_state: array_class.LinksState
-):
+def kernel_update_linked_vertex_constraints(vertex_constraints: FEMVertexConstraintsInfo, links_state: LinksState):
     """Move the target of the vertices following a rigid link with the link."""
     for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
         i_l = vertex_constraints.link_idx[i_v, i_b]
@@ -1512,9 +1720,7 @@ def kernel_update_linked_vertex_constraints(
 
 @no_grad
 @qd.kernel(fastcache=True)
-def kernel_apply_hard_constraints(
-    f: int, vertex_constraints: array_class.FEMVertexConstraintsInfo, fem_state: array_class.FEMState
-):
+def kernel_apply_hard_constraints(f: int, vertex_constraints: FEMVertexConstraintsInfo, fem_state: FEMState):
     """Hold the hard-constrained vertices of the next frame at their target, at rest."""
     for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
         if vertex_constraints.is_constrained[i_v, i_b] and not vertex_constraints.is_soft_constraint[i_v, i_b]:
@@ -1526,9 +1732,9 @@ def kernel_apply_hard_constraints(
 @qd.kernel(fastcache=True)
 def kernel_apply_soft_constraints(
     f: int,
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
-    fem_info: array_class.FEMInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
 ):
     """Pull the soft-constrained vertices of the next frame toward their target with a critically damped spring."""
     for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
@@ -1551,8 +1757,8 @@ def kernel_set_vertex_constraints(
     target_poss: qd.types.ndarray(),
     link_init_pos: qd.types.ndarray(),
     link_init_quat: qd.types.ndarray(),
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
-    fem_state: array_class.FEMState,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_state: FEMState,
     is_soft_constraint: bool,
 ):
     """Constrain some vertices to their targets, keeping their offset from a link of the given initial pose."""
@@ -1579,7 +1785,7 @@ def kernel_update_constraint_targets(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     new_target_poss: qd.types.ndarray(),
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
 ):
     """Set the target position of some constrained vertices."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1595,7 +1801,7 @@ def kernel_update_constraint_targets(
 def kernel_remove_specific_constraints(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
-    vertex_constraints: array_class.FEMVertexConstraintsInfo,
+    vertex_constraints: FEMVertexConstraintsInfo,
 ):
     """Release some constrained vertices."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1605,7 +1811,7 @@ def kernel_remove_specific_constraints(
 
 
 @qd.func
-def func_surface_triangle(i_s: int, i_b: int, f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def func_surface_triangle(i_s: int, i_b: int, f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Return the vertices of a surface triangle, the mass of its element and its unit normal."""
     i_e = fem_info.surface.tri2el[i_s]
     mass = fem_info.elements.mass_scaled[i_e] / fem_info.vol_scale[None]
@@ -1640,7 +1846,7 @@ def func_fem_surface_couplings(
 
 @FEMSolver.api
 @qd.kernel
-def kernel_fem_surface(f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_fem_surface(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """Couple the vertices of the surface triangles of the finite element method entities with the other solvers."""
     for i_s, i_b in qd.ndrange(fem_info.surface.tri2el.shape[0], fem_state.vertices.pos.shape[2]):
         tri2v, mass, surface_normal = func_surface_triangle(i_s, i_b, f, fem_state, fem_info)
@@ -1655,7 +1861,7 @@ def kernel_fem_surface(f: int, fem_state: array_class.FEMState, fem_info: array_
 
 @FEMSolver.api
 @qd.kernel(fastcache=True)
-def kernel_fem_surface_boundary(f: int, fem_state: array_class.FEMState, fem_info: array_class.FEMInfo):
+def kernel_fem_surface_boundary(f: int, fem_state: FEMState, fem_info: FEMInfo):
     """
     Impose the floor on the surface vertices of the finite element method entities.
 

@@ -3,7 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import GEOM_TYPE
-from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 
 @qd.func
@@ -90,7 +90,7 @@ def func_is_geom_boxes_overlap(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,

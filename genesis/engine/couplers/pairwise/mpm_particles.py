@@ -9,12 +9,11 @@ import numpy as np
 
 import quadrants as qd
 
-import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.mpm_solver import GridCoupling, MPMSolver
+from genesis.engine.solvers.mpm_solver import GridCoupling, MPMInfo, MPMSolver
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
-from genesis.engine.solvers.pbd_solver import PBDSolver
-from genesis.engine.solvers.sph_solver import SPHSolver
+from genesis.engine.solvers.pbd_solver import PBDSolver, PBDState
+from genesis.engine.solvers.sph_solver import SPHSolver, SPHState
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import Data, DataKind, field
 
@@ -37,8 +36,8 @@ def func_mpm_sph(
     pos: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    sph_state: array_class.SPHState,
-    mpm_info: array_class.MPMInfo,
+    sph_state: SPHState,
+    mpm_info: MPMInfo,
     mpm_particles_info: MPMParticlesInfo,
 ) -> qd.types.vector(3):
     """
@@ -81,8 +80,8 @@ def func_mpm_pbd(
     pos: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
-    pbd_state: array_class.PBDState,
-    mpm_info: array_class.MPMInfo,
+    pbd_state: PBDState,
+    mpm_info: MPMInfo,
     mpm_particles_info: MPMParticlesInfo,
 ) -> qd.types.vector(3):
     """

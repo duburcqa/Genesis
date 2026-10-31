@@ -6,14 +6,42 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
-from genesis.utils.data import DataItem, iter_data
+from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, GeomsState, RigidInfo
+from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+
+# The nodes of the signed distance field (SDF) grids and of their coarse min-grids, all geoms together
+SDF_CELLS = Size("sdf_cells")
+SDF_COARSE_CELLS = Size("sdf_coarse_cells")
+
+
+class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
+    T_mesh_to_sdf: qd.Tensor = field((float, (4, 4)))
+    sdf_res: qd.Tensor = field((int, 3))
+    sdf_max: qd.Tensor = field(float)
+    sdf_cell_size: qd.Tensor = field((float, 3))
+    sdf_cell_start: qd.Tensor = field(int)
+    # Coarse grid of the block minima of the nodes, a lower bound of the trilinear signed distance
+    sdf_coarse_res: qd.Tensor = field((int, 3))
+    sdf_coarse_cell_start: qd.Tensor = field(int)
+
+
+class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
+    geoms_info: SDFGeomInfo
+    geoms_sdf_val: qd.Tensor = field(float)
+    geoms_sdf_grad: qd.Tensor = field(
+        (float, 3),
+        oversize_hint="Consider setting a larger 'sdf_cell_size', or a smaller 'sdf_max_res', in 'gs.materials.Rigid' "
+        "options.",
+    )
+    geoms_sdf_closest_vert: qd.Tensor = field(int)
+    geoms_sdf_coarse_val: qd.Tensor = field(float, shape=(SDF_COARSE_CELLS,))
 
 
 class SDF(System):
@@ -25,7 +53,7 @@ class SDF(System):
     while a System depends on it.
     """
 
-    sdf_info: array_class.SDFInfo | None
+    sdf_info: SDFInfo | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         self._solver = rigid_solver
@@ -49,7 +77,7 @@ class SDF(System):
         grids_n_cells = grids_n_nodes.prod(axis=-1, dtype=gs.np_int)
         grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         grids_n_coarse_cells = grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
-        self.sdf_info = array_class.SDFInfo(
+        self.sdf_info = SDFInfo(
             sizes=dict(geoms=len(geoms), sdf_cells=grids_n_cells.sum(), sdf_coarse_cells=grids_n_coarse_cells.sum())
         )
         if geoms:
@@ -130,7 +158,14 @@ def sdf_kernel_init_geom_fields(
 
 
 @qd.func
-def sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state: GeomsState, geoms_info: GeomsInfo, sdf_info: SDFInfo):
+def sdf_func_world(
+    geom_idx,
+    batch_idx,
+    pos_world,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    sdf_info: SDFInfo,
+):
     """
     sdf value from world coordinate
     """
@@ -174,7 +209,7 @@ def sdf_func_world_local(
 
 
 @qd.func
-def sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, sdf_info: array_class.SDFInfo):
+def sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, sdf_info: SDFInfo):
     """
     Certified lower bound on the trilinear sd at an in-grid point: the minimum node value over the 4^3-cell node
     block containing its interpolation cell. Exact by convexity - the interpolant only combines nodes of that
@@ -198,8 +233,8 @@ def sdf_func_world_local_banded(
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
     band,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Band-gated variant of sdf_func_world_local, returning (is_in_band, sd).
@@ -249,8 +284,8 @@ def sdf_func_ray_exit_distance(
     tolerance,
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Distance from a point inside the geom to its surface along a unit direction, bisected down to tolerance.
@@ -346,10 +381,10 @@ def sdf_func_grad_world(
     geom_idx,
     batch_idx,
     pos_world,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     g_pos = dyn_state.geoms.pos[geom_idx, batch_idx]
@@ -364,9 +399,9 @@ def sdf_func_grad_world(
 def sdf_func_grad(
     geom_idx,
     pos_sdf,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -405,8 +440,8 @@ def sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info: RigidInfo, sdf_info: SDFI
 def sdf_func_true_grad(
     geom_idx,
     pos_sdf,
-    geoms_info: array_class.GeomsInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -448,9 +483,9 @@ def sdf_func_grad_world_local_consistent(
     pos_world: qd.types.vector(3),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
 ):
     """
     SDF gradient in world coordinates as the analytic gradient of the trilinear value interpolant, NOT the
@@ -495,10 +530,10 @@ def sdf_func_normal_world(
     geom_idx,
     batch_idx,
     pos_world,
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     g_pos = geoms_state.pos[geom_idx, batch_idx]
@@ -515,9 +550,9 @@ def sdf_func_normal_world_local(
     pos_world: qd.types.vector(3),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -538,9 +573,9 @@ def sdf_func_grad_world_local(
     pos_world: qd.types.vector(3),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """
@@ -575,9 +610,9 @@ def sdf_func_find_closest_vert(
     geom_idx,
     i_b,
     pos_world,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    sdf_info: array_class.SDFInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Returns vert of geom that's closest to pos_world

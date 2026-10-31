@@ -7,7 +7,8 @@ This module contains shared utility functions used by both GJK and EPA algorithm
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ColliderInfo
+from genesis.engine.solvers.rigid.data import GJKInfo
+
 from .constants import RETURN_CODE
 from .utils import func_det3
 
@@ -90,7 +91,7 @@ def func_point_triangle_intersection(
     tri_v1: qd.types.vector(3),
     tri_v2: qd.types.vector(3),
     tri_v3: qd.types.vector(3),
-    gjk_info: array_class.GJKInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Check if the point is inside the triangle.
@@ -155,7 +156,7 @@ def func_origin_tetra_intersection(
 
 @qd.func
 def func_project_origin_to_plane(
-    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: array_class.GJKInfo
+    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: GJKInfo
 ):
     """
     Project the origin onto the plane defined by the simplex vertices.

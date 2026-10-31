@@ -20,6 +20,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.grad.bridge import register_custom_backward
 from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
 
@@ -80,9 +81,9 @@ def reverse_forward_kinematics(dyn_state, dyn_info, rigid_info, rigid_config, *f
 @register_custom_backward(reverse_forward_kinematics)
 @qd.kernel(fastcache=True)
 def kernel_update_forward_kinematics(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
@@ -105,9 +106,9 @@ def kernel_update_forward_kinematics(
 @register_custom_backward(reverse_forward_kinematics)
 @qd.kernel(fastcache=True)
 def kernel_update_forward_kinematics_after_integration(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
 ):
@@ -238,11 +239,16 @@ def kernel_masked_forward_velocity(
 
 @qd.func
 def func_update_kinematics_root(
-    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_l_root: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Compute the poses of the links of kinematic root i_l_root of env i_b, its center of mass and its link velocities.
 
-    One thread walks the whole span of the root (see roots_link_idx in array_class.py), parents first, both its static
+    One thread walks the whole span of the root (see roots_link_idx in rigid/data.py), parents first, both its static
     links and those of its trees, so a tree reads the pose of the static link it hangs from after the walk wrote it.
     The velocities read the center of mass, so they follow in a second walk. Runs for a scene simulated without
     dynamics, where no link sleeps.
@@ -256,7 +262,12 @@ def func_update_kinematics_root(
 
 @qd.func
 def func_COM_root_sum(
-    i_l_root, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_l_root,
+    i_b,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Compute the mass and the center of mass of a kinematic root.
 
@@ -268,7 +279,7 @@ def func_COM_root_sum(
 
     dyn_state.links.root_COM_bw[i_l_root, i_b].fill(0.0)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
-    # The walk covers the link span of the root and gates each link on its root (see roots_link_idx in array_class.py),
+    # The walk covers the link span of the root and gates each link on its root (see roots_link_idx in rigid/data.py),
     # so a root spanning several entities, one attached beneath another, sums every link of its own before it divides
     for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -287,7 +298,14 @@ def func_COM_root_sum(
 
 
 @qd.func
-def func_COM_link(i_l, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
+def func_COM_link(
+    i_l,
+    i_b,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     """Compute the quantities of a link that follow from the center of mass of its kinematic root.
 
     Writes, for link i_l of env i_b, the center of mass of its root, its inertia about it and the motion subspace of its
@@ -348,7 +366,12 @@ def func_COM_link(i_l, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: 
 
 @qd.func
 def func_COM_root(
-    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_l_root: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Compute the center of mass of a kinematic root and the inertia of each of its links about it.
 
@@ -380,7 +403,12 @@ def func_COM_root(
 
 
 @qd.func
-def func_COM_links(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
+def func_COM_links(
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     """Compute the center of mass of every kinematic root and the inertia of each of its links about it.
 
     The computation runs in three sweeps so that only the mass-weighted sum walks the links of a root serially: one
@@ -560,7 +588,7 @@ def func_forward_kinematics_root(
     """Compute the pose of every link of kinematic root i_l_root of env i_b, parents first, its sleeping links included.
 
     The callers write the joint coordinates of an entity and read poses back (inverse kinematics, path planning). An
-    entity attached to another shares its root (see roots_link_idx in array_class.py), so the walk over the whole root
+    entity attached to another shares its root (see roots_link_idx in rigid/data.py), so the walk over the whole root
     carries the attached entities along with the joints written.
     """
     i_l_end = rigid_info.links_root_end[i_l_root]
@@ -632,7 +660,10 @@ def func_update_geoms_root(
 
 @qd.func
 def func_update_geoms(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), force_update_all_geoms: qd.template()
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+    force_update_all_geoms: qd.template(),
 ):
     """Place the movable geoms of every awake link of every env on their link, one thread per geom.
 
@@ -666,9 +697,30 @@ def func_update_geoms(
             dyn_state.geoms.verts_updated[i_g, i_b] = False
 
 
+@qd.kernel(fastcache=True)
+def kernel_update_geoms(
+    envs_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    force_update_all_geoms: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+        i_b = qd.cast(envs_idx[i_b_], qd.i32)
+        func_update_geoms_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
+
+
 @qd.func
 def func_forward_velocity_link(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), is_backward: qd.template()
+    i_l: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
 ):
     """Compute the Cartesian velocity of link i_l of env i_b from its parent's velocity and its dof velocities.
 
@@ -889,7 +941,10 @@ def func_forward_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_update_verts_for_geoms(
-    geoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
+    geoms_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     n_geoms = geoms_idx.shape[0]
     _B = dyn_state.geoms.verts_updated.shape[1]
@@ -901,7 +956,13 @@ def kernel_update_verts_for_geoms(
 
 
 @qd.func
-def func_update_verts_for_geom(i_g: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
+def func_update_verts_for_geom(
+    i_g: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
     _B = dyn_state.geoms.verts_updated.shape[1]
 
     if not dyn_state.geoms.verts_updated[i_g, i_b]:
@@ -946,7 +1007,10 @@ def kernel_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config
 
 @qd.func
 def func_update_geom_aabbs(
-    geoms_init_AABB: GeomsInitAABB, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
+    geoms_init_AABB: qd.Tensor,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     """Fit the world-frame axis-aligned bounding box (AABB) of every geom in every environment.
 
@@ -1001,7 +1065,10 @@ def kernel_update_vgeoms(dyn_state: DynState, dyn_info: DynInfo, rigid_config: q
 
 @qd.kernel(fastcache=True)
 def kernel_update_vverts_for_vgeoms(
-    vgeoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
+    vgeoms_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     """
     Refresh vverts_state.pos for the requested vgeom range from FK output. Only iterates vverts that have a slot in
@@ -1063,11 +1130,11 @@ def func_sweep_links_by_level(
     The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down for the forward kinematics and velocities, on the
     links of the awake trees, and for the accelerations, on the awake links of every root. It runs from the leaves up
     for the fold of the composite inertia and of the link forces together, on the links of the awake roots, each link
-    adding its children (see links_child_start in array_class.py). update_cacc applies to the accelerations alone.
+    adding its children (see links_child_start in rigid/data.py). update_cacc applies to the accelerations alone.
 
     A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
     level among them, and the block syncs before the next level, whose links read their parent, or their children,
-    from it (see trees_levels_links_idx in array_class.py for the level tables).
+    from it (see trees_levels_links_idx in rigid/data.py for the level tables).
     """
     BLOCK_DIM = qd.static(32)
     N_LANES_PER_ENV = qd.static(rigid_config.level_sweep_n_lanes_per_env)
@@ -1204,7 +1271,7 @@ def func_update_cartesian_space(
     centers of mass one thread per link and one per root.
 
     A static link moves only when a setter writes the pose of its fixed root, so the step sweep walks the awake trees
-    alone (see trees_root_idx in array_class.py), whose static parents hold still, and a tree sleeps as a unit, so a
+    alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a unit, so a
     hibernated tree keeps the poses of its last awake step. The initial placement and the backward replay cover the
     static links too and walk each root whole (see func_update_kinematics_root): the manual reverse reads the
     per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the
@@ -1291,11 +1358,21 @@ def kernel_forward_kinematics_replay(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_geoms_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
+def kernel_update_geoms_replay(
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     # The reversed kernels place every geom (see reverse_cartesian_space)
     func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)
 
 
 @qd.kernel(fastcache=True)
-def kernel_COM_links_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
+def kernel_COM_links_replay(
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
     func_COM_links(dyn_state, dyn_info, rigid_info, rigid_config)

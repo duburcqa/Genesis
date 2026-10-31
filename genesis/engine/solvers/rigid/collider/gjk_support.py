@@ -8,7 +8,9 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKState
+from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
+from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, GJKInfo, GJKState
+
 from . import support_field
 
 
@@ -20,9 +22,9 @@ def support_mesh(
     direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Find the support point on a mesh in the given direction.
@@ -67,11 +69,11 @@ def support_driver(
     direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -122,11 +124,11 @@ def func_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,

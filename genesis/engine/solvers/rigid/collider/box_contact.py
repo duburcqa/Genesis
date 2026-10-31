@@ -11,9 +11,9 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, DynState, GeomsInitAABB, RigidInfo
-from . import support_field
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, DynInfo, DynState, RigidInfo
 
+from . import support_field
 from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
 
 
@@ -109,7 +109,7 @@ def func_plane_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    geoms_init_AABB: GeomsInitAABB,
+    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -190,11 +190,11 @@ def func_box_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     collider_config: qd.template(),
     errno: qd.Tensor,
 ):

@@ -5,9 +5,15 @@ from typing import Annotated
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.pipeline import Enabled, register_system
-from genesis.engine.solvers.mpm_solver import MPMSolver, func_add_grid_vel, func_quadratic_bspline_stencil
+from genesis.engine.solvers.fem_solver import FEMInfo
+from genesis.engine.solvers.mpm_solver import (
+    MPMInfo,
+    MPMSolver,
+    MPMState,
+    func_add_grid_vel,
+    func_quadratic_bspline_stencil,
+)
 from genesis.options.solvers import LegacyCouplerOptions
 
 from .fem_surface import FEMSurface, SurfaceCoupling
@@ -22,9 +28,9 @@ def func_fem_mpm(
     vel: qd.types.vector(3),
     mass: float,
     surface_normal: qd.types.vector(3),
-    mpm_state: array_class.MPMState,
-    fem_info: array_class.FEMInfo,
-    mpm_info: array_class.MPMInfo,
+    mpm_state: MPMState,
+    fem_info: FEMInfo,
+    mpm_info: MPMInfo,
 ) -> qd.types.vector(3):
     """
     Return the velocity of a surface vertex once it exchanged momentum with the cells of the grid within one cell of the

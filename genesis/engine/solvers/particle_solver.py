@@ -1,11 +1,59 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.state_change import StateChange, mutates
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+from genesis.utils.geom import SpatialHashGrid
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+
+
+VVERTS = Size("vverts")
+VFACES = Size("vfaces")
+# Sizes of the particle solvers: the particles, the slots of the hash grid and the support particles of a visual vertex
+PARTICLES = Size("particles")
+VVERT_SUPPORTS = Size("vvert_supports")
+
+
+class Particles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
+    """
+    Runtime state shared by the particles of every particle-based solver, one value per particle and environment.
+
+    The struct of each solver extends it with its own fields, and the accessors of 'ParticleSolver' take any of them.
+    """
+
+    pos: qd.Tensor = field((float, 3))
+    vel: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
+
+
+class ParticlesParams(Data, kind=DataKind.CONSTANT, shape=(PARTICLES,)):
+    """Model parameters shared by the particles of every particle-based solver, one value per particle."""
+
+    mass: qd.Tensor = field(float)
+
+
+class ParticlesRender(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
+    """The particles as drawn: their position and velocity, an inactive particle moved out of sight."""
+
+    pos: qd.Tensor = field((float, 3))
+    vel: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
+
+
+class VVertsSupport(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
+    """The visual vertices skinned by particles: each one the weighted sum of the positions of its support particles."""
+
+    support_idxs: qd.Tensor = field((int, VVERT_SUPPORTS))
+    support_weights: qd.Tensor = field((float, VVERT_SUPPORTS))
+
+
+class VVertsRender(Data, kind=DataKind.SCRATCH, shape=(VVERTS, ENVS)):
+    """The visual vertices as drawn, active when their first support particle is."""
+
+    pos: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool)
 
 
 class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
@@ -13,15 +61,15 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     The accessors take global particle indices, given once for every environment or one row per environment (see
     '_sanitize_io_variables'), and the kernels of each solver read and write the state the particles hold between two
-    steps. A solver whose particles extend 'array_class.Particles' and 'array_class.ParticlesParams' assigns them to
+    steps. A solver whose particles extend 'Particles' and 'ParticlesParams' assigns them to
     '_particles' and '_particles_params' at build time, which the accessors then read and write.
     """
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
 
-        self._particles: array_class.Particles | None = None
-        self._particles_params: array_class.ParticlesParams | None = None
+        self._particles: Particles | None = None
+        self._particles_params: ParticlesParams | None = None
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
@@ -127,7 +175,7 @@ def kernel_add_vverts(
     particles: qd.types.ndarray(element_dim=1),
     P_invs: qd.types.ndarray(element_dim=2),
     support_idxs_local: qd.types.ndarray(),
-    vverts_support: array_class.VVertsSupport,
+    vverts_support: VVertsSupport,
 ):
     """
     Bind the given vverts to their supporting particles, whose positions skin them for rendering.
@@ -154,7 +202,7 @@ def kernel_set_particles_pos(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     poss: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     """Set the position of some particles, at rest."""
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
@@ -171,7 +219,7 @@ def kernel_get_particles_pos(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     poss: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -185,7 +233,7 @@ def kernel_set_particles_vel(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     vels: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -200,7 +248,7 @@ def kernel_get_particles_vel(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     vels: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -214,7 +262,7 @@ def kernel_set_particles_active(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     actives: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -229,7 +277,7 @@ def kernel_get_particles_active(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     actives: qd.types.ndarray(),
-    particles: array_class.Particles,
+    particles: Particles,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -242,7 +290,7 @@ def kernel_get_particles_mass(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     masses: qd.types.ndarray(),
-    particles_params: array_class.ParticlesParams,
+    particles_params: ParticlesParams,
 ):
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
@@ -250,7 +298,7 @@ def kernel_get_particles_mass(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_particles_render(particles: array_class.Particles, particles_render: array_class.ParticlesRender):
+def kernel_update_particles_render(particles: Particles, particles_render: ParticlesRender):
     """Update the particles as drawn from their state."""
     for i_p, i_b in qd.ndrange(particles.pos.shape[0], particles.pos.shape[1]):
         if particles.is_active[i_p, i_b]:
@@ -267,7 +315,7 @@ def kernel_update_particles_render(particles: array_class.Particles, particles_r
 def func_get_particles_mean_vel(
     i_b: int,
     pos: qd.types.vector(3),
-    hash_grid: array_class.SpatialHashGrid,
+    hash_grid: SpatialHashGrid,
     particles_pos: qd.Tensor,
     particles_vel: qd.Tensor,
     half_size: float,
@@ -298,7 +346,7 @@ def func_add_particles_momentum(
     i_b: int,
     pos: qd.types.vector(3),
     momentum: qd.types.vector(3),
-    hash_grid: array_class.SpatialHashGrid,
+    hash_grid: SpatialHashGrid,
     particles_pos: qd.Tensor,
     particles_vel: qd.Tensor,
     particles_mass: qd.Tensor,

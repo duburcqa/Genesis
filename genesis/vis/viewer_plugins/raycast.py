@@ -4,10 +4,14 @@ from typing import TYPE_CHECKING, NamedTuple, override
 import numpy as np
 import torch
 
+from typing_extensions import override
+
 import genesis as gs
+from genesis.engine.bvh import BVHState, BVHStaticConfig
 from genesis.ext.pyrender.camera import OrthographicCamera
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, with_lock
 from genesis.utils.raycast import Ray, RayHit
+from genesis.utils.raycast_qd import RaycastResult
 
 from .base import ViewerPlugin
 
@@ -15,7 +19,8 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.node import Node
-    from genesis.utils.array_class import BVHState, BVHStaticConfig, RaycastResult
+    from genesis.engine.bvh import BVHState, BVHStaticConfig
+    from genesis.utils.raycast_qd import RaycastResult
 
 
 class RaycastTarget(NamedTuple):
@@ -53,9 +58,9 @@ class Raycaster:
     """
 
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
-        # NOTE: delayed imports to avoid pulling in rigid_solver / array_class before gs is fully initialized.
-        from genesis.engine.bvh import get_bvh_data
-        from genesis.utils.array_class import get_raycast_result
+        # NOTE: delayed imports to avoid pulling in rigid_solver before gs is fully initialized.
+        from genesis.engine.bvh import BVHState, get_bvh_data
+        from genesis.utils.raycast_qd import RaycastResult
 
         self.scene = scene
         self._envs_offset = torch.as_tensor(scene.envs_offset, dtype=gs.tc_float, device=gs.device)
@@ -81,8 +86,8 @@ class Raycaster:
                 if n_slots == 0:
                     continue
             bvh = get_bvh_data(n_envs_max, n_slots)
-            result = array_class.RaycastResult(sizes=dict(envs=n_envs_max))
-            bvh_state = array_class.BVHState(sizes=bvh.sizes, unused=bvh.unused)
+            result = RaycastResult(sizes=dict(envs=n_envs_max))
+            bvh_state = BVHState(sizes=bvh.sizes, unused=bvh.unused)
             self.targets.append(RaycastTarget(solver, bvh_state, bvh.config, result, vfaces_mask))
 
         if not self.targets:

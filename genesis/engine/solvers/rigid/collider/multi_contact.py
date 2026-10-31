@@ -10,7 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, DynInfo, GJKState
+from genesis.engine.solvers.rigid.data import DynInfo, GJKInfo, GJKState
 
 from .constants import RETURN_CODE
 
@@ -25,9 +25,9 @@ def func_multi_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Multi-contact detection algorithm based on Sutherland-Hodgman polygon clipping algorithm. For the two geometric
@@ -289,9 +289,9 @@ def func_potential_box_normals(
     v3: int,
     quat: qd.types.vector(4),
     dir: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     For a simplex defined on a box with three vertices [v1, v2, v3], we find which face normals are potentially
@@ -442,8 +442,8 @@ def func_box_normal_from_collision_normal(
     i_b: int,
     quat: qd.types.vector(4),
     dir: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
 ):
     """
     Among the 6 faces of the box, find the one of which normal is closest to the [dir].
@@ -485,9 +485,9 @@ def func_potential_mesh_normals(
     v2: int,
     v3: int,
     quat: qd.types.vector(4),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     For a simplex defined on a mesh with three vertices [v1, v2, v3],
@@ -555,7 +555,7 @@ def func_potential_mesh_normals(
 
 
 @qd.func
-def func_find_aligned_faces(i_b: int, nv: int, nw: int, gjk_state: array_class.GJKState, gjk_info: array_class.GJKInfo):
+def func_find_aligned_faces(i_b: int, nv: int, nw: int, gjk_state: GJKState, gjk_info: GJKInfo):
     """
     Find if any two faces from [contact_faces] are aligned.
     """
@@ -585,9 +585,9 @@ def func_potential_box_edge_normals(
     quat: qd.types.vector(4),
     v1: qd.types.vector(3),
     v2: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     For a simplex defined on a box with two vertices [v1, v2],
@@ -650,9 +650,9 @@ def func_potential_mesh_edge_normals(
     quat: qd.types.vector(4),
     v1: qd.types.vector(3),
     v2: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    gjk_info: GJKInfo,
 ):
     """
     For a simplex defined on a mesh with two vertices [v1, v2],
@@ -713,7 +713,7 @@ def func_potential_mesh_edge_normals(
 
 
 @qd.func
-def func_safe_normalize(v: qd.types.vector(3), gjk_info: array_class.GJKInfo):
+def func_safe_normalize(v: qd.types.vector(3), gjk_info: GJKInfo):
     """
     Normalize the vector [v] safely.
     """
@@ -736,8 +736,8 @@ def func_find_aligned_edge_face(
     i_b: int,
     nedge: int,
     nface: int,
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
     is_edge_face: bool,
 ):
     """
@@ -888,8 +888,8 @@ def func_clip_polygon(
     max_contacts: int,
     normal: qd.types.vector(3),
     approx_dir: qd.types.vector(3),
-    gjk_state: array_class.GJKState,
-    gjk_info: array_class.GJKInfo,
+    gjk_state: GJKState,
+    gjk_info: GJKInfo,
     edgecon1: bool,
 ):
     """
@@ -1049,7 +1049,7 @@ def func_clip_polygon(
 
 
 @qd.func
-def func_halfspace(a: qd.types.vector(3), n: qd.types.vector(3), p: qd.types.vector(3), gjk_info: array_class.GJKInfo):
+def func_halfspace(a: qd.types.vector(3), n: qd.types.vector(3), p: qd.types.vector(3), gjk_info: GJKInfo):
     """
     Check if the point [p] is inside the half-space defined by the plane with normal [n] and point [a].
     """
@@ -1062,7 +1062,7 @@ def func_plane_intersect(
     pd: float,
     v1: qd.types.vector(3),
     v2: qd.types.vector(3),
-    gjk_info: array_class.GJKInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Compute the intersection point of the line segment [v1, v2]
