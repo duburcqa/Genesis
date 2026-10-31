@@ -85,6 +85,8 @@ def test_template_instances_are_distinct_systems(monkeypatch):
     class Queued(Layout): ...
 
     LayoutT = TypeVar("LayoutT", bound=Layout)
+    T = TypeVar("T")
+    IfQueued = Annotated[T | None, OnlyIf(Queued)]
 
     class Scratch(System, Generic[LayoutT]):
         is_created_on_demand = True
@@ -93,9 +95,7 @@ def test_template_instances_are_distinct_systems(monkeypatch):
     class Pass(System, Generic[LayoutT]):
         layout: ClassVar[type[Layout]]
 
-        def __init__(
-            self, scratch: Scratch[LayoutT], overlap: Annotated[Scratch[Queued] | None, OnlyIf(Queued)]
-        ) -> None:
+        def __init__(self, scratch: Scratch[LayoutT], overlap: IfQueued[Scratch[Queued]]) -> None:
             self.scratch, self.overlap = scratch, overlap
 
     assert Scratch[Queued] is Scratch[Queued] and Scratch[Queued] is not Scratch[PerEnv]

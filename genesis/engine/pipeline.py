@@ -553,8 +553,9 @@ class OnlyIf(NamedTuple):
     """
     Make a dependency of a template exist in its instances taking the given argument alone (see 'System').
 
-    It annotates the parameter it conditions, `gjk: Annotated[GJK[Queued, WithoutEPA] | None, OnlyIf(Queued)]`, which
-    is a mandatory dependency of the instances taking `Queued` and absent from the others.
+    It is the metadata of a generic alias declared once with its argument, `IfQueued = Annotated[T | None,
+    OnlyIf(Queued)]`, which annotates the parameter it conditions, `gjk: IfQueued[GJK[Queued, WithoutEPA]]`: a mandatory
+    dependency of the instances taking `Queued`, absent from the others, and an optional one for type checkers.
     """
 
     arg: type
@@ -576,7 +577,7 @@ def _get_dependency_hints(fn: Callable) -> dict[str, tuple[tuple[type, ...], boo
                     continue
                 is_conditional = True
         hint_args = typing.get_args(hint)
-        is_optional = isinstance(hint, types.UnionType) and type(None) in hint_args
+        is_optional = typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in hint_args
         classes = tuple([arg for arg in hint_args if arg is not type(None)]) if is_optional else (hint,)
         # A template instance named with the type parameters of the owner takes the arguments the owner was given
         classes = tuple(
