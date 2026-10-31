@@ -5,7 +5,7 @@ A System declares what it depends on as the typed parameters of its constructor,
 classes it derives from. The simulator assembles the Systems a scene calls for (see 'assemble_systems'): it creates each
 one once its dependencies exist, builds it once they are built, then routes the stage of each of its roles into the slot
 the role fills. A System that depends on a System or a struct the scene never has is absent, and so are its stages. See
-.github/contributing/PIPELINE.md for the design.
+https://genesis-world.readthedocs.io/en/latest/user_guide/developers/composable_pipeline.html for the design.
 
 A Phase is an ordered sequence of stages, split into slots. A stage is a kernel, a func whose loops run at the top
 level, a kernel method of a data-oriented object, a Python function, an extension point of a kernel (see Inline) or
