@@ -671,12 +671,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             link_init_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
             link_init_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
         else:
-            rigid_solver = self._sim.rigid_solver
-            links_envs_idx = envs_idx if self._scene.n_envs > 0 else None
+            # Imported here to break the import cycle between the couplings and the solvers they couple
+            from genesis.engine.couplers.pairwise import RigidFEMAttachment
+
+            attachment = self._sim.get_system(RigidFEMAttachment)
+            if attachment is None:
+                gs.raise_exception("Constraining vertices to follow a link requires a scene simulating rigid entities.")
             # The attachment is a configuration of the constraint, which carries no gradient
-            with torch.no_grad():
-                link_init_pos = rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-                link_init_quat = rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+            link_init_pos, link_init_quat = attachment.get_link_pose(link_idx, envs_idx)
             link_init_pos = broadcast_tensor(link_init_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
             link_init_quat = broadcast_tensor(link_init_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
 

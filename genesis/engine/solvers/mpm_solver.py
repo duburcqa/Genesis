@@ -141,7 +141,6 @@ class MPMSolver(ParticleSolver):
         self.mpm_state: array_class.MPMState | None = None
         self.mpm_info: array_class.MPMInfo | None = None
         self.mpm_static_config: array_class.MPMStaticConfig | None = None
-        self.particle_constraints_info: array_class.MPMParticleConstraintsInfo | None = None
         self._material_dispatcher: MPMMaterialDispatcher | None = None
         # The hybrid entities whose soft part the solver holds, which drive their particles after each substep
         self._hybrid_entities: list[HybridEntity] = []
@@ -333,12 +332,6 @@ class MPMSolver(ParticleSolver):
     def substep_post_coupling(self, f):
         self.g2p(f=f)
 
-        if self.particle_constraints_info is not None:
-            rigid_solver = self.sim.rigid_solver
-            kernel_apply_particle_constraints(
-                f, self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints_info, self.mpm_info
-            )
-
         for entity in self._hybrid_entities:
             entity.update_soft_part(f)
 
@@ -372,9 +365,6 @@ class MPMSolver(ParticleSolver):
         yield from iter_data(self, "mpm_static_config")
         for name in ("mpm_state", "mpm_info"):
             yield from iter_data(self, name)
-        # Allocated the first time a particle is attached (see 'set_particle_constraints')
-        if self.particle_constraints_info is not None:
-            yield from iter_data(self, "particle_constraints_info")
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -520,42 +510,13 @@ class MPMSolver(ParticleSolver):
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        if not isinstance(link_idx, int):
-            gs.raise_exception("link_idx must be an integer.")
-        if self.particle_constraints_info is None:
-            # The flat index of a vector array fits in int32
-            if self._n_particles * self._B * 3 > np.iinfo(np.int32).max:
-                gs.raise_exception(
-                    f"Particle constraint shape (n_envs={self._B}, n_particles={self._n_particles}, 3) is too large. "
-                    "Consider reducing n_envs or n_particles."
-                )
-            # Allocated the first time a particle is attached, which most scenes never do
-            self.particle_constraints_info = array_class.MPMParticleConstraintsInfo(
-                sizes=dict(particles=self._n_particles, envs=self._B)
-            )
-            self.particle_constraints_info.link_idx.fill(-1)
-        particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._B, -1), ("envs_idx", "particles_idx")
-        ).contiguous()
-        if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
-            gs.raise_exception("The particle mask overruns the particles of the solver.")
-        rigid_solver = self._sim.rigid_solver
-        # The attachment is a configuration of the constraint, which carries no gradient
-        with torch.no_grad():
-            link_pos = rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
-            link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
-        link_pos = broadcast_tensor(link_pos, gs.tc_float, (self._B, 3)).contiguous()
-        link_quat = broadcast_tensor(link_quat, gs.tc_float, (self._B, 4)).contiguous()
-        kernel_set_particle_constraints(
-            particles_start,
-            link_idx,
-            stiffness,
-            particles_mask,
-            link_pos,
-            link_quat,
-            self.mpm_state,
-            self.particle_constraints_info,
-        )
+        # Imported here to break the import cycle between the couplings and the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidMPMAttachment
+
+        attachment = self._sim.get_system(RigidMPMAttachment)
+        if attachment is None:
+            gs.raise_exception("Attaching particles to a link requires a scene simulating rigid entities.")
+        attachment.attach(particles_mask, link_idx, stiffness, particles_start=particles_start)
 
     @gs.assert_built
     @mutates(StateChange.MODEL)
@@ -571,18 +532,12 @@ class MPMSolver(ParticleSolver):
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        if self.particle_constraints_info is None:
-            return
-        n_particles = -1
-        if particles_mask is None:
-            particles_mask = True
-            n_particles = self.n_particles - particles_start
-        particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._B, n_particles), ("envs_idx", "particles_idx")
-        ).contiguous()
-        if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
-            gs.raise_exception("The particle mask overruns the particles of the solver.")
-        kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints_info)
+        # Imported here to break the import cycle between the couplings and the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidMPMAttachment
+
+        attachment = self._sim.get_system(RigidMPMAttachment)
+        if attachment is not None:
+            attachment.detach(particles_mask, particles_start=particles_start)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1277,84 +1232,6 @@ def kernel_get_particles_mass(
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         masses[i_b_, i_p_] = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particle_constraints(
-    particles_start: int,
-    link_idx: int,
-    stiffness: float,
-    particles_mask: qd.types.ndarray(),
-    link_pos: qd.types.ndarray(element_dim=1),
-    link_quat: qd.types.ndarray(element_dim=1),
-    mpm_state: array_class.MPMState,
-    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
-):
-    """Attach the masked particles to a link, at the point of its frame where each one lies now."""
-    for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-        if particles_mask[i_b, i_p_]:
-            i_p = i_p_ + particles_start
-            # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
-            pos = mpm_state.particles.pos[0, i_p, i_b]
-            local_pos = gu.qd_inv_transform_by_trans_quat(pos, link_pos[i_b], link_quat[i_b])
-
-            particle_constraints_info.is_constrained[i_p, i_b] = True
-            particle_constraints_info.target_pos[i_p, i_b] = pos
-            particle_constraints_info.stiffness[i_p, i_b] = stiffness
-            particle_constraints_info.link_idx[i_p, i_b] = link_idx
-            particle_constraints_info.link_local_pos[i_p, i_b] = local_pos
-
-
-@qd.kernel(fastcache=True)
-def kernel_remove_particle_constraints(
-    particles_start: int,
-    particles_mask: qd.types.ndarray(),
-    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
-):
-    """Detach the masked particles from the link they are attached to."""
-    for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-        if particles_mask[i_b, i_p_]:
-            i_p = i_p_ + particles_start
-            particle_constraints_info.is_constrained[i_p, i_b] = False
-            particle_constraints_info.link_idx[i_p, i_b] = -1
-
-
-@qd.kernel(fastcache=True)
-def kernel_apply_particle_constraints(
-    f: int,
-    mpm_state: array_class.MPMState,
-    links_state: array_class.LinksState,
-    particle_constraints_info: array_class.MPMParticleConstraintsInfo,
-    mpm_info: array_class.MPMInfo,
-):
-    """Pull the constrained particles of the next frame toward their target with a critically damped spring."""
-    for i_p, i_b in qd.ndrange(
-        particle_constraints_info.is_constrained.shape[0], particle_constraints_info.is_constrained.shape[1]
-    ):
-        if particle_constraints_info.is_constrained[i_p, i_b]:
-            # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
-            # reverse a field read back after it is overwritten in the same kernel.
-            target_pos = particle_constraints_info.target_pos[i_p, i_b]
-            i_l = particle_constraints_info.link_idx[i_p, i_b]
-            if i_l >= 0:
-                target_pos = gu.qd_transform_by_trans_quat(
-                    particle_constraints_info.link_local_pos[i_p, i_b],
-                    links_state.pos[i_l, i_b],
-                    links_state.quat[i_l, i_b],
-                )
-
-            stiffness = particle_constraints_info.stiffness[i_p, i_b]
-            mass = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
-
-            pos_error = mpm_state.particles.pos[f + 1, i_p, i_b] - target_pos
-            spring_force = -stiffness * pos_error
-            damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * mpm_state.particles.vel[f + 1, i_p, i_b]
-
-            # The velocity is incremented in place, which autodiff reverses, since it cannot reverse an overwrite of a
-            # field the same kernel reads
-            mpm_state.particles.vel[f + 1, i_p, i_b] += (
-                mpm_info.substep_dt[None] * (spring_force + damping_force) / mass
-            )
 
 
 @qd.func

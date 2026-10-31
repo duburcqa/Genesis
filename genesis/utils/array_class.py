@@ -1926,21 +1926,6 @@ class MPMState(Data, kind=DataKind.STATE):
     errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
-class MPMParticleConstraintsInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
-    """
-    The critically damped springs pulling particles toward targets, one per particle and environment.
-
-    A particle attached to a link (`link_idx` other than -1) follows the point `link_local_pos` of the frame of the
-    link, the others the fixed point `target_pos`.
-    """
-
-    is_constrained: qd.Tensor = field(bool)
-    target_pos: qd.Tensor = field((float, 3))
-    stiffness: qd.Tensor = field(float)
-    link_idx: qd.Tensor = field(int)
-    link_local_pos: qd.Tensor = field((float, 3))
-
-
 class MPMInfo(Data, kind=DataKind.CONSTANT):
     """
     Model parameters of the material point method (MPM) solver.

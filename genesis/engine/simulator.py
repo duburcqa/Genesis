@@ -125,7 +125,6 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
-        self._checkpointed_systems: list[System] = []
 
         # The coupler solving the couplings of the scene at once, if any. LegacyCouplerOptions enable
         # couplings between pairs of solvers instead, which are Systems of their own (see genesis/engine/couplers/pairwise).
@@ -257,18 +256,6 @@ class Simulator(RBC):
         # The Systems compose the substep from their stages
         self._engine.compose()
         self._step_system = self._engine.find(Step)
-        # The data of a part belongs to the data of the System holding it (see 'System.get_parts')
-        parts = [part for system in self._engine.systems for part in system.get_parts()]
-        self._checkpointed_systems = [
-            *self._active_solvers,
-            *[
-                system
-                for system in self._engine.systems
-                if not isinstance(system, Solver)
-                and all([system is not part for part in parts])
-                and next(iter(system.data), None) is not None
-            ],
-        ]
 
         # Every System of a differentiable scene supports gradients, which it declares
         if self._requires_grad:
@@ -640,8 +627,22 @@ class Simulator(RBC):
 
     @property
     def checkpointed_systems(self) -> list[System]:
-        """The Systems a checkpoint holds the data of: the active solvers, then the other Systems holding data."""
-        return self._checkpointed_systems
+        """
+        The Systems a checkpoint holds the data of: the active solvers, then the other Systems holding data now.
+
+        The data of a part belongs to the data of the System holding it (see 'System.get_parts').
+        """
+        parts = [part for system in self._engine.systems for part in system.get_parts()]
+        return [
+            *self._active_solvers,
+            *[
+                system
+                for system in self._engine.systems
+                if not isinstance(system, Solver)
+                and all([system is not part for part in parts])
+                and next(iter(system.data), None) is not None
+            ],
+        ]
 
     def get_system(self, cls: type[System]) -> System | None:
         """Return the System of the scene of the given class, None when the scene has none."""

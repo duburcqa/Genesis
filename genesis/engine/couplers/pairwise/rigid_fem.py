@@ -1,5 +1,7 @@
 """The couplings of the rigid solver with the finite element method (FEM) solver."""
 
+import torch
+
 import quadrants as qd
 
 import genesis.utils.array_class as array_class
@@ -42,13 +44,26 @@ class RigidFEM(System):
 
 @register_system
 class RigidFEMAttachment(System):
-    """Move the targets of the finite element method vertices following a rigid link with the link."""
+    """
+    Move the targets of the finite element method (FEM) vertices following a rigid link with the link.
 
-    def __init__(self, rigid_solver: RigidSolver, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
+    The FEM solver constrains its vertices to follow a link through it (see 'FEMSolver.set_vertex_constraints').
+    """
+
+    def __init__(self, rigid_solver: RigidSolver, fem_solver: FEMSolver) -> None:
+        self._rigid_solver = rigid_solver
         self._fem_solver = fem_solver
 
     def compose(self, step: Step) -> None:
         step.couplings.add(self._fem_solver.update_linked_vertex_constraints)
+
+    def get_link_pose(self, link_idx: int, envs_idx) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the position and quaternion of a link in some environments, which carry no gradient."""
+        links_envs_idx = envs_idx if self._rigid_solver.n_envs > 0 else None
+        with torch.no_grad():
+            link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+            link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+        return link_pos, link_quat
 
 
 @qd.func
