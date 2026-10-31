@@ -187,23 +187,6 @@ class Collider(System):
         return self._n_terrain_threads
 
     def _init_static_config(self) -> None:
-        # The contact patch (polygon clipping over the touching faces) defaults on under MuJoCo compatibility with GJK,
-        # the way MuJoCo builds its manifolds, and off otherwise, the perturbation-based detection being more reliable
-        # on marginal manifolds.
-        enable_contact_patch = self._solver._options.enable_contact_patch
-        if enable_contact_patch is None:
-            enable_contact_patch = (
-                self._solver._enable_mujoco_compatibility
-                and self._solver._options.use_gjk_collision
-                and self._solver._enable_multi_contact
-            )
-        elif enable_contact_patch:
-            if not self._solver._options.use_gjk_collision:
-                gs.raise_exception("'enable_contact_patch' requires 'use_gjk_collision'.")
-            if not self._solver._enable_multi_contact:
-                gs.raise_exception("'enable_contact_patch' requires 'enable_multi_contact'.")
-        self._solver._options.enable_contact_patch = enable_contact_patch
-
         # Identify the convex collision detection (ccd) algorithm
         if self._solver._options.use_gjk_collision:
             if self._solver._enable_mujoco_compatibility:
@@ -220,7 +203,7 @@ class Collider(System):
         # func_clip_polygon), which the convex budget must hold or the extra witnesses of the patch are lost.
         if self._solver.rigid_config.requires_grad:
             n_contacts_per_convex_pair = 20
-        elif self._solver._options.enable_contact_patch:
+        elif self._solver._enable_contact_patch:
             n_contacts_per_convex_pair = 8
         else:
             n_contacts_per_convex_pair = 5
@@ -410,7 +393,7 @@ class Collider(System):
                 broad_pairs=max_collision_pairs_broad,
                 candidate_contacts=max_candidate_contacts,
                 nonconvex_pair_contacts=self.collider_config.n_contacts_per_nonconvex_pair,
-                contact_slots=1 if self._solver._options.enable_contact_patch else 5,
+                contact_slots=1 if self._solver._enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
             env_first={ColliderState.contact_sort_key: True, "pruning": True},
@@ -420,7 +403,7 @@ class Collider(System):
                 diff_contacts=not config.requires_grad,
                 work_queue=not (is_split or self.collider_config.has_terrain),
                 split_narrowphase=not is_split,
-                perturbed_slots=not (is_split and not self._solver._options.enable_contact_patch),
+                perturbed_slots=not (is_split and not self._solver._enable_contact_patch),
                 pruning=not self.collider_config.has_prunable_contacts,
             ),
             requires_grad=config.requires_grad,

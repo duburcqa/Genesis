@@ -60,8 +60,8 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
     gjk_state: GJKState | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
-        # Resolved by the collider (see '_init_static_config')
-        enable_contact_patch = rigid_solver._options.enable_contact_patch
+        # Resolved by the rigid solver
+        enable_contact_patch = rigid_solver._enable_contact_patch
         gjk_max_iterations = 50
         epa_max_iterations = 50
         # 6 * epa_max_iterations is the maximum number of faces in the polytope.

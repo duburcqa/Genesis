@@ -212,6 +212,20 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self._enable_collision = options.enable_collision
         self._enable_multi_contact = options.enable_multi_contact
         self._enable_mujoco_compatibility = options.enable_mujoco_compatibility
+        # The contact patch (polygon clipping over the touching faces) defaults on under MuJoCo compatibility with GJK,
+        # the way MuJoCo builds its manifolds, and off otherwise, the perturbation-based detection being more reliable
+        # on marginal manifolds.
+        enable_contact_patch = options.enable_contact_patch
+        if enable_contact_patch is None:
+            enable_contact_patch = (
+                self._enable_mujoco_compatibility and options.use_gjk_collision and self._enable_multi_contact
+            )
+        elif enable_contact_patch:
+            if not options.use_gjk_collision:
+                gs.raise_exception("'enable_contact_patch' requires 'use_gjk_collision'.")
+            if not self._enable_multi_contact:
+                gs.raise_exception("'enable_contact_patch' requires 'enable_multi_contact'.")
+        self._enable_contact_patch = enable_contact_patch
         self._enable_joint_limit = options.enable_joint_limit
         self._enable_self_collision = options.enable_self_collision
         self._enable_neutral_collision = options.enable_neutral_collision
