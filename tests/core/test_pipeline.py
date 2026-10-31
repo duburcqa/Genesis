@@ -1,4 +1,4 @@
-from typing import Annotated, ClassVar, Generic, TypeVar
+from typing import Annotated
 
 import pytest
 
@@ -84,22 +84,17 @@ def test_template_instances_are_distinct_systems(monkeypatch):
 
     class Queued(Layout): ...
 
-    LayoutT = TypeVar("LayoutT", bound=Layout)
-    T = TypeVar("T")
-    IfQueued = Annotated[T | None, OnlyIf(Queued)]
+    type IfQueued[T] = Annotated[T | None, OnlyIf(Queued)]
 
-    class Scratch(System, Generic[LayoutT]):
+    class Scratch[LayoutT: Layout](System):
         is_created_on_demand = True
-        layout: ClassVar[type[Layout]]
 
-    class Pass(System, Generic[LayoutT]):
-        layout: ClassVar[type[Layout]]
-
+    class Pass[LayoutT: Layout](System):
         def __init__(self, scratch: Scratch[LayoutT], overlap: IfQueued[Scratch[Queued]]) -> None:
             self.scratch, self.overlap = scratch, overlap
 
     assert Scratch[Queued] is Scratch[Queued] and Scratch[Queued] is not Scratch[PerEnv]
-    assert Scratch[Queued].layout is Queued
+    assert list(Scratch[Queued].template_args.values()) == [Queued]
     with pytest.raises(TypeError, match="takes the arguments"):
         Scratch[Queued, PerEnv]
 

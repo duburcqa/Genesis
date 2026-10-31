@@ -39,7 +39,7 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.grad.kernel_writes import get_written_paths
 from genesis.utils.cache import get_cache_dir
 from genesis.utils.data import CHECKPOINT_KINDS, ConfigItem, Data, DataItem, DataKind, fill_data
-from genesis.utils.misc import data_to_array, get_own_annotations
+from genesis.utils.misc import data_to_array
 
 # The type of the annotation of a compile-time parameter
 Template = type(qd.template())
@@ -81,23 +81,22 @@ class System:
         """
         Return the System class instantiating the template for the given arguments, the same class for the same ones.
 
-        A template is a System class generic over type parameters (`class GJK(System, Generic[LayoutT, CapabilityT])`),
-        whose class attributes annotated without a value receive its arguments in order, such as `layout:
-        ClassVar[type[Layout]]`. Its instances are distinct System classes, which a scene holds side by side, each owning
-        the state its arguments call for, and which a dependency names apart. An instance that no scene registers is
-        created when a System depends on it (see 'create_systems').
+        A template is a System class generic over type parameters, `class GJK[LayoutT: Layout, CapabilityT:
+        Capability](System)`, whose instances read their arguments by parameter, `self.template_args[LayoutT]`. Its
+        instances are distinct System classes, which a scene holds side by side, each owning the state its arguments
+        call for, and which a dependency names apart. They are created on demand when the template is (see
+        'create_systems').
         """
         args = args if isinstance(args, tuple) else (args,)
         # An argument left to a type parameter of an enclosing template is substituted where it is resolved
         if any([isinstance(arg, typing.TypeVar) for arg in args]):
             return super().__class_getitem__(args)
-        names = [name for name in get_own_annotations(cls) if name not in cls.__dict__]
-        if len(args) != len(names):
-            raise TypeError(f"{cls.__name__}[...] takes the arguments {names}, got {len(args)}.")
+        params = cls.__type_params__
+        if len(args) != len(params):
+            raise TypeError(f"{cls.__name__}[...] takes the arguments {[param.__name__ for param in params]}.")
         if args not in cls._template_instances:
             name = f"{cls.__name__}[{', '.join([arg.__name__ for arg in args])}]"
-            template_args = dict(zip(cls.__parameters__, args))
-            namespace = {**dict(zip(names, args)), "template_args": template_args, "__module__": cls.__module__}
+            namespace = {"template_args": dict(zip(params, args)), "__module__": cls.__module__}
             cls._template_instances[args] = type(name, (cls,), namespace)
         return cls._template_instances[args]
 
@@ -553,7 +552,7 @@ class OnlyIf(NamedTuple):
     """
     Make a dependency of a template exist in its instances taking the given argument alone (see 'System').
 
-    It is the metadata of a generic alias declared once with its argument, `IfQueued = Annotated[T | None,
+    It is the metadata of a generic type alias declared once with its argument, `type IfQueued[T] = Annotated[T | None,
     OnlyIf(Queued)]`, which annotates the parameter it conditions, `gjk: IfQueued[GJK[Queued, WithoutEPA]]`: a mandatory
     dependency of the instances taking `Queued`, absent from the others, and an optional one for type checkers.
     """
@@ -568,6 +567,10 @@ def _get_dependency_hints(fn: Callable) -> dict[str, tuple[tuple[type, ...], boo
     dependency_hints = {}
     for name in inspect.signature(fn).parameters:
         hint, is_conditional = hints[name], False
+        # A type alias stands for its value, its type parameters taking the arguments it is given
+        while isinstance(typing.get_origin(hint) or hint, typing.TypeAliasType):
+            alias = typing.get_origin(hint) or hint
+            hint = alias.__value__[typing.get_args(hint)] if typing.get_args(hint) else alias.__value__
         if typing.get_origin(hint) is typing.Annotated:
             conditions = [meta for meta in hint.__metadata__ if isinstance(meta, OnlyIf)]
             hint = hint.__origin__
