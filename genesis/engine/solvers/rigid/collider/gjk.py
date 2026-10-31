@@ -45,7 +45,9 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
     request of its users (see 'reserve'). An instance without EPA leaves the arrays of the EPA unallocated.
     """
 
-    is_created_on_demand = True
+    gjk_config: array_class.GJKStaticConfig
+    gjk_info: array_class.GJKInfo
+    gjk_state: array_class.GJKState | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         # Resolved by the collider (see '_init_static_config')
@@ -118,7 +120,7 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
             polygon_verts=max_contact_polygon_verts,
         )
         self._requires_grad = rigid_solver.rigid_config.requires_grad
-        self.gjk_state: array_class.GJKState | None = None
+        self.gjk_state = None
 
     def reserve(self, n_workers: int) -> None:
         """Size the scratch of the queued instance for at least the given number of workers."""
@@ -132,11 +134,6 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
         self.gjk_state = array_class.GJKState(
             sizes=dict(workers=self._n_workers, **self._sizes), unused=unused, requires_grad=self._requires_grad
         )
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        for name in ("gjk_config", "gjk_info", "gjk_state"):
-            yield from iter_data(self, name)
 
 
 @qd.func

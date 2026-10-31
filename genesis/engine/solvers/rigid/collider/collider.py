@@ -85,6 +85,10 @@ class Collider(System):
         is_launched_apart=True,
     )
 
+    collider_config: array_class.ColliderStaticConfig
+    collider_info: array_class.ColliderInfo
+    collider_state: array_class.ColliderState
+
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
 
@@ -136,12 +140,6 @@ class Collider(System):
 
         # Make sure that the initial state is clean
         self.clear()
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        """Yield every array and static config of the collider (see 'Solver.data')."""
-        for name in ("collider_config", "collider_info", "collider_state"):
-            yield from iter_data(self, name)
 
     @property
     def has_possible_pairs(self) -> bool:

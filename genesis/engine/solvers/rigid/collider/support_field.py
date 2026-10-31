@@ -34,18 +34,14 @@ class SupportField(System):
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
-    is_created_on_demand = True
+    support_field_info: array_class.SupportFieldInfo | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         self._solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        self.support_field_info: array_class.SupportFieldInfo | None = None
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        yield from iter_data(self, "support_field_info")
+        self.support_field_info = None
 
     def build(self) -> None:
         """Build the support tables of the geoms into the support field info."""

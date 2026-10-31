@@ -42,7 +42,16 @@ from genesis.engine.states.solvers import SystemCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.grad.kernel_writes import get_written_paths
 from genesis.utils.cache import get_cache_dir
-from genesis.utils.data import CHECKPOINT_KINDS, ConfigItem, Data, DataItem, DataKind, fill_data
+from genesis.utils.data import (
+    CHECKPOINT_KINDS,
+    ConfigItem,
+    Data,
+    DataItem,
+    DataKind,
+    StaticConfig,
+    fill_data,
+    iter_data,
+)
 from genesis.utils.misc import data_to_array
 
 # The type of the annotation of a compile-time parameter
@@ -69,8 +78,6 @@ class System:
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
-    # Whether the System is created when another one depends on it, rather than registered (see 'assemble_systems')
-    is_created_on_demand: bool = False
     # The slots the roles of other Systems move to while this System exists, by role (see 'RoleOf')
     relocations: ClassVar[dict["RoleOf", "SlotRef"]] = {}
     # The Systems, or roles of Systems, absent while this System exists
@@ -119,8 +126,9 @@ class System:
         """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
 
     def get_parts(self) -> "tuple[System, ...]":
-        """Return the Systems this one builds and holds itself, which join the Systems of the scene once it is built."""
-        return ()
+        """Return the Systems this one builds and holds itself, its annotated parts, which join the scene once built."""
+        parts = [vars(self).get(name) for name, cls in _get_owned_attrs(type(self)).items() if issubclass(cls, System)]
+        return tuple([part for part in parts if part is not None])
 
     @property
     def requires(self) -> "tuple[type[System], ...]":
@@ -129,8 +137,14 @@ class System:
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
-        """Yield every array and static config the System holds, named by the attributes reaching it (see iter_data)."""
-        return iter(())
+        """
+        Yield every array and static config the System holds, named by the attributes reaching it (see iter_data).
+
+        They are the structs and static configs its class annotates, in declaration order, those not built left out.
+        """
+        for name, cls in _get_owned_attrs(type(self)).items():
+            if not issubclass(cls, System) and vars(self).get(name) is not None:
+                yield from iter_data(self, name)
 
     def save_checkpoint(self, kinds: frozenset[DataKind]) -> SystemCheckpoint:
         """Return a checkpoint of the arrays of the given kinds the System holds, for 'load_checkpoint' to restore."""
@@ -686,18 +700,6 @@ def _bind(scope: dict[str, list[Any]], name: str) -> Any:
     return values[0] if values else CallArg(name)
 
 
-class OnlyIf(NamedTuple):
-    """
-    Make a dependency of a template exist in its instances taking the given argument alone (see 'System').
-
-    It is the metadata of a generic type alias declared once with its argument, `type IfQueued[T] = Annotated[T | None,
-    OnlyIf(Queued)]`, which annotates the parameter it conditions, `gjk: IfQueued[GJK[Queued, WithoutEPA]]`: a mandatory
-    dependency of the instances taking `Queued`, absent from the others, and an optional one for type checkers.
-    """
-
-    arg: type
-
-
 class _Dependency(NamedTuple):
     """A parameter of the constructor of a System: the classes it takes, whether it is optional, its conditions."""
 
@@ -708,11 +710,11 @@ class _Dependency(NamedTuple):
 
 
 def _get_dependencies(cls: type[System]) -> list[_Dependency]:
-    """Return the dependencies a System class declares, those its template arguments rule out taking no class."""
+    """Return the dependencies a System class declares."""
     hints = typing.get_type_hints(cls.__init__, localns=_SYSTEM_CLASSES_BY_NAME, include_extras=True)
     dependencies = []
     for name in inspect.signature(cls).parameters:
-        hint, conditions, is_conditional = hints[name], (), False
+        hint, conditions = hints[name], ()
         # A type alias stands for its value, its type parameters taking the arguments it is given
         while isinstance(typing.get_origin(hint) or hint, typing.TypeAliasType):
             alias = typing.get_origin(hint) or hint
@@ -728,12 +730,6 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
                     if isinstance(meta, Enabled)
                 ]
             )
-            only_ifs = [meta for meta in metadata if isinstance(meta, OnlyIf)]
-            if only_ifs:
-                if not all([only_if.arg in cls.template_args.values() for only_if in only_ifs]):
-                    dependencies.append(_Dependency(name, (), True, ()))
-                    continue
-                is_conditional = True
         hint_args = typing.get_args(hint)
         is_optional = typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in hint_args
         classes = tuple([arg for arg in hint_args if arg is not type(None)]) if is_optional else (hint,)
@@ -746,24 +742,43 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
                 for c in classes
             ]
         )
-        dependencies.append(_Dependency(name, classes, is_optional and not is_conditional, conditions))
+        dependencies.append(_Dependency(name, classes, is_optional, conditions))
     return dependencies
 
 
-def _get_owned(cls: type) -> list[type]:
+def _is_component(cls: type) -> bool:
     """
-    Return the Data structs and the parts a System class declares it owns, those of its parts included.
+    Return whether a System class is a component: playing no role, registered and owned by none, it is created on demand.
+
+    A component exists while some System depends on it, and is built once every System that could use it is decided.
+    """
+    owned = {owned for owner in _SYSTEM_CLASSES_BY_NAME.values() for owned in _get_owned(owner)}
+    return not get_roles(cls) and cls not in _SYSTEM_CLASSES and cls not in owned
+
+
+def _get_owned_attrs(cls: type) -> dict[str, type]:
+    """
+    Return the attributes a System class declares it owns, by name: its Data structs, static configs and parts.
 
     A System declares them as the annotations of its class attributes, `dyn_state: DynState`, `collider: Collider |
-    None`.
+    None`, in declaration order, those of its bases first.
     """
-    owned = []
-    for base in cls.__mro__:
-        for hint in inspect.get_annotations(base).values():
+    owned = {}
+    for base in reversed(cls.__mro__):
+        for name, hint in inspect.get_annotations(base).items():
             for arg in typing.get_args(hint) or (hint,):
-                if isinstance(arg, type) and issubclass(arg, (Data, System)) and arg not in owned and arg is not cls:
-                    owned += [arg, *(_get_owned(arg) if issubclass(arg, System) else ())]
+                if isinstance(arg, type) and issubclass(arg, (Data, StaticConfig, System)) and arg is not cls:
+                    owned[name] = arg
     return owned
+
+
+def _get_owned(cls: type) -> list[type]:
+    """Return the classes of the Data structs and of the parts a System class owns, those of its parts included."""
+    return [
+        owned
+        for owned_cls in _get_owned_attrs(cls).values()
+        for owned in (owned_cls, *(_get_owned(owned_cls) if issubclass(owned_cls, System) else ()))
+    ]
 
 
 @contextlib.contextmanager
@@ -834,9 +849,6 @@ def assemble_systems(
         # A class waits at the first dependency still undecided, before requiring any component it may never use
         args = {}
         for dependency in _get_dependencies(cls):
-            if not dependency.classes:
-                args[dependency.name] = None
-                continue
             classes = dependency.classes
             owners_unbuilt = [type(system) for system in systems if id(system) not in built_ids]
             if all([isinstance(c, type) and issubclass(c, Data) for c in classes]):
@@ -866,7 +878,7 @@ def assemble_systems(
                 )
                 if not candidates and not dependency.is_optional:
                     for needed in classes:
-                        if needed.is_created_on_demand and needed not in classes_pending:
+                        if _is_component(needed) and needed not in classes_pending:
                             classes_pending.append(needed)
                             may_come = True
             else:
@@ -964,7 +976,7 @@ def assemble_systems(
     def get_rank(system: System) -> tuple[int, int]:
         if type(system) in registration:
             return 1, registration[type(system)]
-        return (2 if type(system).is_created_on_demand else 0), 0
+        return (2 if _is_component(type(system)) else 0), 0
 
     systems = sorted(systems, key=get_rank)
     _route_roles(systems)

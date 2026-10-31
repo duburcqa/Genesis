@@ -1498,10 +1498,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
             )
 
-    def get_parts(self) -> "tuple[System, ...]":
-        """Return the collider and the constraint solver, whose Data the couplings of the rigid geoms read."""
-        return tuple([part for part in (self.collider, self.constraint_solver) if part is not None])
-
     def _build_substep(self) -> None:
         """
         Build the phases of the substep of the solver: its dynamics, its constraint force and its integration.

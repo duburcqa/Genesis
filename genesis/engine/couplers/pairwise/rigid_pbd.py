@@ -183,6 +183,8 @@ class RigidPBD(Coupling):
     # lags by one substep
     couple = (kernel_pbd_rigid_collide, kernel_drive_pbd_particles_by_link)
 
+    rigid_pbd_info: RigidPBDInfo
+
     def __init__(
         self,
         rigid_solver: RigidSolver,
@@ -195,10 +197,6 @@ class RigidPBD(Coupling):
         self.clamped_inv_dt = min(1.0 / pbd_solver.substep_dt, CLAMPED_INV_DT)
         self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
         self.rigid_pbd_info.link_idx.fill(-1)
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        yield from iter_data(self, "rigid_pbd_info")
 
     def attach_particles(self, particles_idx, envs_idx, link_idx):
         """Carry some PBD particles along with a rigid link, where they lie now in its frame."""

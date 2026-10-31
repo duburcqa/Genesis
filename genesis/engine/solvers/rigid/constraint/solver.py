@@ -107,6 +107,8 @@ IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
 
 
 class ConstraintSolver(System):
+    constraint_state: array_class.ConstraintState
+
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
         self._collider = rigid_solver.collider
@@ -266,11 +268,6 @@ class ConstraintSolver(System):
                     link_slice_np = qd_to_numpy(link_slice)
                     link_slice_np[0] = len(links_idx)
                     link_slice.from_numpy(link_slice_np)
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        """Yield every array of the constraint solver, tagged by kind (see 'Solver.data')."""
-        yield from iter_data(self, "constraint_state")
 
     def reset(self, envs_idx=None):
         self._eq_const_info_cache.clear()

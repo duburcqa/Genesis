@@ -25,15 +25,11 @@ class SDF(System):
     while a System depends on it.
     """
 
-    is_created_on_demand = True
+    sdf_info: array_class.SDFInfo | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         self._solver = rigid_solver
-        self.sdf_info: array_class.SDFInfo | None = None
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        yield from iter_data(self, "sdf_info")
+        self.sdf_info = None
 
     def build(self) -> None:
         rigid_solver = self._solver

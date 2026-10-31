@@ -24,7 +24,8 @@ class MPR[LayoutT: Layout](System):
     request of its users (see 'reserve').
     """
 
-    is_created_on_demand = True
+    mpr_info: array_class.MPRInfo
+    mpr_state: array_class.MPRState | None
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
         self.mpr_info = array_class.MPRInfo(
@@ -42,7 +43,7 @@ class MPR[LayoutT: Layout](System):
             )
         )
         self._n_workers = rigid_solver._B if self.template_args[LayoutT] is PerEnv else 0
-        self.mpr_state: array_class.MPRState | None = None
+        self.mpr_state = None
 
     def reserve(self, n_workers: int) -> None:
         """Size the scratch of the queued instance for at least the given number of workers."""
@@ -50,11 +51,6 @@ class MPR[LayoutT: Layout](System):
 
     def build(self) -> None:
         self.mpr_state = array_class.MPRState(sizes=dict(workers=self._n_workers))
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        for name in ("mpr_info", "mpr_state"):
-            yield from iter_data(self, name)
 
 
 @qd.kernel

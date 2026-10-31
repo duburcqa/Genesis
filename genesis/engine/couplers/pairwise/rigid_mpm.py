@@ -214,6 +214,8 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
     cell_separation = func_cpic_cell_separation
     cell_velocity = func_cpic_cell_velocity
 
+    rigid_mpm_cpic: RigidMPMCPICState
+
     def __init__(
         self,
         rigid_mpm: RigidMPM,
@@ -238,10 +240,6 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
         else:
             kernel_reset_cpic_rigid_normal(self._mpm_solver.scene._sanitize_envs_idx(envs_idx), self.rigid_mpm_cpic)
 
-    @property
-    def data(self) -> Iterator[DataItem]:
-        yield from iter_data(self, "rigid_mpm_cpic")
-
 
 class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
     """
@@ -264,10 +262,12 @@ class RigidMPMAttachment(Integration):
     The springs are allocated the first time a particle is attached, which most scenes never do (see 'attach').
     """
 
+    rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None
+
     def __init__(self, rigid_solver: RigidSolver, mpm_solver: MPMSolver) -> None:
         self._rigid_solver = rigid_solver
         self._mpm_solver = mpm_solver
-        self.rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None = None
+        self.rigid_mpm_attachment_info = None
 
     def substep_post_coupling(self, f: int) -> None:
         """Pull the attached particles of the next frame toward their link."""
@@ -336,11 +336,6 @@ class RigidMPMAttachment(Integration):
         if particles_start < 0 or particles_start + particles_mask.shape[1] > self._mpm_solver.n_particles:
             gs.raise_exception("The particle mask overruns the particles of the solver.")
         kernel_detach_mpm_particles(particles_start, particles_mask, self.rigid_mpm_attachment_info)
-
-    @property
-    def data(self) -> Iterator[DataItem]:
-        if self.rigid_mpm_attachment_info is not None:
-            yield from iter_data(self, "rigid_mpm_attachment_info")
 
 
 @qd.kernel(fastcache=True)

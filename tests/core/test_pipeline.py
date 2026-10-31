@@ -7,7 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.engine.pipeline as pipeline
-from genesis.engine.pipeline import OnlyIf, System, assemble_systems, register_system
+from genesis.engine.pipeline import System, assemble_systems, register_system
 from genesis.engine.step import Integration
 from genesis.utils.array_class import DynState
 from genesis.utils.data import V
@@ -86,14 +86,12 @@ def test_template_instances_are_distinct_systems(monkeypatch):
 
     class Queued(Layout): ...
 
-    type IfQueued[T] = Annotated[T | None, OnlyIf(Queued)]
-
-    class Scratch[LayoutT: Layout](System):
-        is_created_on_demand = True
+    # A component: playing no role, registered by none, it exists once a System depends on it
+    class Scratch[LayoutT: Layout](System): ...
 
     class Pass[LayoutT: Layout](System):
-        def __init__(self, scratch: Scratch[LayoutT], overlap: IfQueued[Scratch[Queued]]) -> None:
-            self.scratch, self.overlap = scratch, overlap
+        def __init__(self, scratch: Scratch[LayoutT]) -> None:
+            self.scratch = scratch
 
     assert Scratch[Queued] is Scratch[Queued] and Scratch[Queued] is not Scratch[PerEnv]
     assert list(Scratch[Queued].template_args.values()) == [Queued]
@@ -105,7 +103,4 @@ def test_template_instances_are_distinct_systems(monkeypatch):
     systems_by_cls = {type(system): system for system in systems}
     assert set(systems_by_cls) == {Scratch[PerEnv], Scratch[Queued], Pass[PerEnv], Pass[Queued]}
     assert systems_by_cls[Pass[PerEnv]].scratch is systems_by_cls[Scratch[PerEnv]]
-    assert systems_by_cls[Pass[PerEnv]].overlap is None
-    assert (
-        systems_by_cls[Pass[Queued]].scratch is systems_by_cls[Pass[Queued]].overlap is systems_by_cls[Scratch[Queued]]
-    )
+    assert systems_by_cls[Pass[Queued]].scratch is systems_by_cls[Scratch[Queued]]
