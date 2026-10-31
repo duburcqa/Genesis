@@ -18,7 +18,7 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_set_ik_targets,
 )
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
-from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
+from genesis.engine.states.solvers import KinematicSolverState, SystemCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
@@ -903,7 +903,7 @@ class KinematicSolver(Solver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
-    def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
+    def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
         if DataKind.DERIVED not in checkpoint.kinds:
             # Without the derived arrays, the next step recomputes them from the state. A restored record runs forward
@@ -914,7 +914,7 @@ class KinematicSolver(Solver):
                 self.update_forward_pos()
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
-    def __setstate__(self, state: SolverCheckpoint) -> None:
+    def __setstate__(self, state: SystemCheckpoint) -> None:
         self.load_checkpoint(state)
 
     @property

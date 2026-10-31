@@ -444,7 +444,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @mutates()
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             kernel_set_state(f, state.pos, state.vel, self.fem_state)

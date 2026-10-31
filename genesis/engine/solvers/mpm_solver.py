@@ -107,10 +107,11 @@ class MPMSolver(ParticleSolver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
-        # The couplings of the grid with the other solvers, which the coupling Systems add their funcs to
+        # The extension points of the transfers between the particles and the grid, and of the update of the grid,
+        # which the coupling Systems add their funcs to
+        self.p2g = Inline(kernel_p2g, func_mpm_cell_separation)
         self.grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
-        # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
-        opt_in(array_class.SDFInfo, cond=lambda: self.is_cpic_active)
+        self.g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -181,7 +182,7 @@ class MPMSolver(ParticleSolver):
         requires_grad = self._sim.requires_grad
         unused = {None: True}
         if self.is_active:
-            unused = {array_class.SPARSE_GRID_RESET: requires_grad, array_class.CPIC: not self.is_cpic_active}
+            unused = {array_class.SPARSE_GRID_RESET: requires_grad}
         grid_x, grid_y, grid_z = self._grid_res
         self.mpm_state = array_class.MPMState(
             sizes=dict(
@@ -191,7 +192,6 @@ class MPMSolver(ParticleSolver):
                 grid_x=grid_x,
                 grid_y=grid_y,
                 grid_z=grid_z,
-                geoms=self.sim.rigid_solver.n_geoms_,
                 vverts=self._n_vverts,
             ),
             unused=unused,
@@ -218,7 +218,7 @@ class MPMSolver(ParticleSolver):
             unused={info_arrays: not self.is_active},
         )
         self.mpm_static_config = array_class.MPMStaticConfig(
-            is_svd_needed=is_svd_needed, enable_CPIC=self.is_cpic_active, requires_grad=self._sim.requires_grad
+            is_svd_needed=is_svd_needed, requires_grad=self._sim.requires_grad
         )
         self._material_dispatcher = MPMMaterialDispatcher(self._materials)
         self._hybrid_entities = [
@@ -257,14 +257,6 @@ class MPMSolver(ParticleSolver):
     @property
     def is_active(self):
         return self.n_particles > 0
-
-    @property
-    def is_cpic_active(self):
-        """Whether the particles check for thin rigid geoms between them and the cells of their stencil.
-
-        See MPMCPIC for Compatible Particle-In-Cell (CPIC).
-        """
-        return self._enable_CPIC and self.is_active and self.sim.rigid_solver.is_active
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -323,19 +315,7 @@ class MPMSolver(ParticleSolver):
             # The grid is left zeroed by kernel_reset_dirty_cells at the end of the previous substep, and is zero
             # initialized before the first one
             kernel_compute_F_tmp(f, self.mpm_state, self.mpm_info, compute_svd=self.mpm_static_config.is_svd_needed)
-        rigid_solver = self.sim.rigid_solver
-        kernel_p2g(
-            f,
-            self.mpm_state,
-            rigid_solver.dyn_state.geoms,
-            self.mpm_info,
-            rigid_solver.dyn_info.geoms,
-            rigid_solver.rigid_info,
-            rigid_solver.collider.collider_info.sdf,
-            self.mpm_static_config,
-            rigid_solver.collider.collider_config,
-            self._material_dispatcher,
-        )
+        self.p2g(f=f)
 
     def compose(self, step: Step) -> None:
         """
@@ -345,22 +325,16 @@ class MPMSolver(ParticleSolver):
         grid (see 'func_mpm_grid_couplings').
         """
         super().compose(step)
+        self.p2g.bind(static_config=self.mpm_static_config, material_dispatcher=self._material_dispatcher)
         self.grid_couplings.bind(force_fields=self.force_fields_dispatcher)
+        self.g2p.bind(static_config=self.mpm_static_config)
         step.couplings.add(self.grid_couplings)
 
     def substep_post_coupling(self, f):
-        rigid_solver = self.sim.rigid_solver
-        kernel_g2p(
-            f,
-            self.mpm_state,
-            rigid_solver.dyn_state.links,
-            self.mpm_info,
-            rigid_solver.dyn_info.geoms,
-            rigid_solver.rigid_info,
-            self.mpm_static_config,
-        )
+        self.g2p(f=f)
 
         if self.particle_constraints_info is not None:
+            rigid_solver = self.sim.rigid_solver
             kernel_apply_particle_constraints(
                 f, self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints_info, self.mpm_info
             )
@@ -391,9 +365,7 @@ class MPMSolver(ParticleSolver):
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @property
-    def is_differentiable(self) -> bool:
-        return not self.is_cpic_active
+    is_differentiable = True
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
@@ -408,18 +380,12 @@ class MPMSolver(ParticleSolver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @mutates()
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             kernel_set_state(
                 f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active, self.mpm_state
             )
-            # The thin rigid geoms the particles saw belong to the trajectory they leave (see MPMCPIC)
-            if self.is_cpic_active:
-                if envs_idx is None:
-                    self.mpm_state.cpic.rigid_normal.fill(0)
-                else:
-                    kernel_reset_cpic_rigid_normal(envs_idx, self.mpm_state)
             self.clear_errno(envs_idx)
 
     def get_state(self, f):
@@ -781,26 +747,46 @@ def kernel_svd(f: int, mpm_state: array_class.MPMState):
             mpm_state.particles.V[f, i_p, i_b] = V
 
 
+@qd.func
+def func_mpm_cell_separation(f: int, i_p: int, i_b: int, i_c: int, cell_pos: qd.types.vector(3), i_sep: int) -> int:
+    """
+    Return what separates a particle from a cell of its stencil, -1 for nothing, the cell then getting nothing from it.
+
+    `i_c` indexes the cell among the 27 of the stencil, at `cell_pos`. The placeholder of the extension point of the
+    transfer from the particles to the grid, which the coupling Systems add their funcs to (see 'MPMSolver.p2g'), each
+    leaving a separation found by an earlier one as it is.
+    """
+    return i_sep
+
+
+@qd.func
+def func_mpm_cell_velocity(
+    f: int, i_p: int, i_b: int, i_c: int, weight: float, grid_vel: qd.types.vector(3)
+) -> qd.types.vector(3):
+    """
+    Return the velocity a cell of the stencil of a particle contributes to it, of the given weight.
+
+    `i_c` indexes the cell among the 27 of the stencil. The placeholder of the extension point of the transfer from the
+    grid to the particles, which the coupling Systems add their funcs to (see 'MPMSolver.g2p').
+    """
+    return grid_vel
+
+
 @qd.kernel
 def kernel_p2g(
     f: int,
     mpm_state: array_class.MPMState,
-    geoms_state: array_class.GeomsState,
     mpm_info: array_class.MPMInfo,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
     static_config: qd.template(),
-    collider_static_config: qd.template(),
     material_dispatcher: qd.template(),
 ):
     """
     Update the deformation of the active particles of a frame, then scatter their momentum and mass to the grid.
 
     The material of each particle updates its deformation gradient and plastic volume ratio into the next frame and
-    gives its stress, which enters the momentum. With Compatible Particle-In-Cell (CPIC), a cell separated from a
-    particle by a thin rigid geom gets nothing from it (see MPMCPIC). Without gradient, the cells first touched are
-    listed for the sparse reset (see MPMGrid).
+    gives its stress, which enters the momentum. A cell separated from a particle gets nothing from it (see
+    func_mpm_cell_separation). Without gradient, the cells first touched are listed for the sparse reset (see
+    MPMGrid).
     """
     for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
         if mpm_state.particles.is_active[f, i_p, i_b]:
@@ -856,28 +842,12 @@ def kernel_p2g(
                 for d in qd.static(range(3)):
                     weight *= w[offset[d], d]
 
-                i_g_sep = -1
-                if qd.static(static_config.enable_CPIC):
-                    cell_pos = (base + offset) * dx
-                    for i_g in range(mpm_state.cpic.rigid_normal.shape[1]):
-                        if i_g_sep == -1 and geoms_info.needs_coup[i_g]:
-                            sdf_normal_particle = mpm_state.cpic.rigid_normal[i_p, i_g, i_b]
-                            sdf_normal_cell = sdf.sdf_func_normal_world(
-                                i_g,
-                                i_b,
-                                cell_pos,
-                                geoms_state,
-                                geoms_info,
-                                rigid_info,
-                                sdf_info,
-                                collider_static_config,
-                            )
-                            # The particle and the cell lie on opposite sides of the geom
-                            if sdf_normal_particle.dot(sdf_normal_cell) < 0:
-                                i_g_sep = i_g
-                    mpm_state.cpic.cells_geom_idx[i_p, offset[0], offset[1], offset[2], i_b] = i_g_sep
+                i_sep = -1
+                i_sep = func_mpm_cell_separation(
+                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], (base + offset) * dx, i_sep
+                )
                 cell_ijk = base - grid_offset + offset
-                if i_g_sep == -1:
+                if i_sep == -1:
                     mpm_state.grid.vel_in[f, cell_ijk[0], cell_ijk[1], cell_ijk[2], i_b] += weight * (
                         mpm_info.particles.mass[i_p] * mpm_state.particles.vel[f, i_p, i_b] + affine @ dpos
                     )
@@ -906,21 +876,12 @@ def kernel_p2g(
 
 
 @qd.kernel
-def kernel_g2p(
-    f: int,
-    mpm_state: array_class.MPMState,
-    links_state: array_class.LinksState,
-    mpm_info: array_class.MPMInfo,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    static_config: qd.template(),
-):
+def kernel_g2p(f: int, mpm_state: array_class.MPMState, mpm_info: array_class.MPMInfo, static_config: qd.template()):
     """
     Gather the velocity of the grid back to the active particles of a frame and advect them into the next frame.
 
-    With Compatible Particle-In-Cell (CPIC), a cell separated from a particle by a thin rigid geom contributes the
-    velocity of the particle colliding with that geom instead (see MPMCPIC). The inactive particles carry their state
-    over to the next frame unchanged.
+    A cell contributes the velocity the couplings give it (see func_mpm_cell_velocity). The inactive particles carry
+    their state over to the next frame unchanged.
     """
     for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
         if mpm_state.particles.is_active[f, i_p, i_b]:
@@ -939,21 +900,9 @@ def kernel_g2p(
                 for d in qd.static(range(3)):
                     weight *= w[offset[d], d]
 
-                if qd.static(static_config.enable_CPIC):
-                    i_g_sep = mpm_state.cpic.cells_geom_idx[i_p, offset[0], offset[1], offset[2], i_b]
-                    if i_g_sep != -1:
-                        grid_vel = func_collide_in_rigid_geom(
-                            i_g_sep,
-                            i_b,
-                            mpm_state.particles.pos[f, i_p, i_b],
-                            mpm_state.particles.vel[f, i_p, i_b],
-                            mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
-                            mpm_state.cpic.rigid_normal[i_p, i_g_sep, i_b],
-                            influence=1.0,
-                            links_state=links_state,
-                            geoms_info=geoms_info,
-                            rigid_info=rigid_info,
-                        )
+                grid_vel = func_mpm_cell_velocity(
+                    f, i_p, i_b, offset[0] * 9 + offset[1] * 3 + offset[2], weight, grid_vel
+                )
 
                 new_vel += weight * grid_vel
                 new_C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
@@ -1038,16 +987,6 @@ def kernel_reset_dirty_cells(f: int, mpm_state: array_class.MPMState):
             mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = qd.Vector.zero(gs.qd_float, 3)
             if i_b == 0:
                 mpm_state.grid.dirty_flag[i_x, i_y, i_z] = gs.qd_int(0)
-
-
-@qd.kernel(fastcache=True)
-def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: array_class.MPMState):
-    """Zero the normals of the thin rigid geoms seen by the particles of some environments (see MPMCPIC)."""
-    for i_p, i_g, i_b_ in qd.ndrange(
-        mpm_state.cpic.rigid_normal.shape[0], mpm_state.cpic.rigid_normal.shape[1], envs_idx.shape[0]
-    ):
-        i_b = envs_idx[i_b_]
-        mpm_state.cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)

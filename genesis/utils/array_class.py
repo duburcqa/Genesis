@@ -1857,8 +1857,6 @@ GRID_Y = Size("grid_y")
 GRID_Z = Size("grid_z")
 # The scratch of the sparse reset of the grid, without gradient alone (see MPMGrid)
 SPARSE_GRID_RESET = Label("sparse_grid_reset")
-# The thin rigid geoms between the particles and the cells of their stencil (see MPMCPIC)
-CPIC = Label("cpic")
 
 
 class MPMParticles(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):
@@ -1917,24 +1915,11 @@ class MPMGrid(Data, kind=DataKind.SCRATCH, shape=(FRAMES - 1, GRID_X, GRID_Y, GR
     dirty_count: qd.Tensor = field(int, shape=(1,), labels=SPARSE_GRID_RESET)
 
 
-class MPMCPIC(Data, kind=DataKind.STATE):
-    """
-    The thin rigid geoms separating each particle from the cells of its stencil, for Compatible Particle-In-Cell (CPIC).
-
-    `rigid_normal` is the last outward normal of each geom seen by each particle, and `cells_geom_idx` the geom
-    separating each particle from each cell of its stencil, -1 for none.
-    """
-
-    rigid_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, GEOMS, ENVS), labels=CPIC)
-    cells_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH, labels=CPIC)
-
-
 class MPMState(Data, kind=DataKind.STATE):
     """Runtime state of the material point method (MPM) solver."""
 
     particles: MPMParticles
     grid: MPMGrid
-    cpic: MPMCPIC
     particles_render: ParticlesRender
     vverts_render: VVertsRender
     # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
@@ -1982,8 +1967,6 @@ class MPMStaticConfig(StaticConfig):
     # Whether the singular value decomposition of the deformation gradient is computed, which a material reading it
     # and the backward pass require. Otherwise J is the determinant of the advected deformation gradient.
     is_svd_needed: bool
-    # Whether the particles and the cells of their stencil are checked for a thin rigid geom between them (see MPMCPIC)
-    enable_CPIC: bool
     # Whether the grid of every substep is kept for the backward pass, instead of being zeroed sparsely (see MPMGrid)
     requires_grad: bool
 

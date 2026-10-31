@@ -1,5 +1,7 @@
 """The coupling of the rigid geoms with the position based dynamics (PBD) particles."""
 
+from collections.abc import Iterator
+
 import quadrants as qd
 
 import genesis as gs
@@ -13,7 +15,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Step
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.array_class import ENVS, PARTICLES
-from genesis.utils.data import Data, DataKind, field, opt_in
+from genesis.utils.data import Data, DataItem, DataKind, field, iter_data, opt_in
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 # The largest inverse timestep at which the particles carried by a link catch up with it, which spares them jerks
@@ -55,6 +57,10 @@ class RigidPBD(System):
         # The carried particles catch up with their link after both the rigid and the PBD solvers updated, so the
         # correction lags by one substep
         step.couplings.add(kernel_pbd_rigid_collide, kernel_drive_pbd_particles_by_link)
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "rigid_pbd_info")
 
     def attach_particles(self, particles_idx, envs_idx, link_idx):
         """Carry some PBD particles along with a rigid link, where they lie now in its frame."""

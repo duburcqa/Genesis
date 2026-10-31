@@ -16,7 +16,7 @@ from genesis.engine.materials.base import Material
 from genesis.engine.pipeline import System
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.step import Step
-from genesis.engine.states import SolverCheckpoint
+from genesis.engine.states import SystemCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
@@ -552,7 +552,7 @@ class Solver(RBC, System):
         """
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-    def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SolverCheckpoint:
+    def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SystemCheckpoint:
         """
         Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
 
@@ -636,9 +636,9 @@ class Solver(RBC, System):
         configs = {}
         if not boundary_only:
             configs = {item.name: item.config for item in self.data if isinstance(item, ConfigItem)}
-        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
+        return SystemCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
 
-    def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
+    def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
 
         `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint.
@@ -663,11 +663,11 @@ class Solver(RBC, System):
             arrays = checkpoint.arrays
         fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
 
-    def __getstate__(self) -> SolverCheckpoint:
-        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
+    def __getstate__(self) -> SystemCheckpoint:
+        """Return a SystemCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
         return self.save_checkpoint(CHECKPOINT_KINDS)
 
-    def __setstate__(self, state: SolverCheckpoint) -> None:
+    def __setstate__(self, state: SystemCheckpoint) -> None:
         """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
         self.load_checkpoint(state)
 

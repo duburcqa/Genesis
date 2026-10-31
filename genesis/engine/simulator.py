@@ -30,7 +30,7 @@ from .solvers import (
 )
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
-from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
+from .states.solvers import SimState, SimulatorCheckpoint, SystemCheckpoint
 from .step import Step
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 STATE_KINDS = frozenset((DataKind.STATE,))
 
 
-def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
+def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SystemCheckpoint]]) -> None:
     """Write back the boundary checkpoint of every given solver, then flush the zero-copy writes of the restore on
     Metal."""
     for solver, checkpoint in solvers_checkpoints:
@@ -125,6 +125,7 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
+        self._checkpointed_systems: list[System] = []
 
         # The coupler solving the couplings of the scene at once, if any. LegacyCouplerOptions enable
         # couplings between pairs of solvers instead, which are Systems of their own (see genesis/engine/couplers/pairwise).
@@ -256,6 +257,18 @@ class Simulator(RBC):
         # The Systems compose the substep from their stages
         self._engine.compose()
         self._step_system = self._engine.find(Step)
+        # The data of a part belongs to the data of the System holding it (see 'System.get_parts')
+        parts = [part for system in self._engine.systems for part in system.get_parts()]
+        self._checkpointed_systems = [
+            *self._active_solvers,
+            *[
+                system
+                for system in self._engine.systems
+                if not isinstance(system, Solver)
+                and all([system is not part for part in parts])
+                and next(iter(system.data), None) is not None
+            ],
+        ]
 
         # Every System of a differentiable scene supports gradients, which it declares
         if self._requires_grad:
@@ -350,9 +363,9 @@ class Simulator(RBC):
         for item in iter_data(self, "steps", DataKind.STATE):
             if item.kind in kinds:
                 yield item._replace(name=f"Simulator.{item.name}")
-        for solver in self._active_solvers:
-            prefix = type(solver).__name__
-            for item in solver.data:
+        for system in self.checkpointed_systems:
+            prefix = type(system).__name__
+            for item in system.data:
                 if isinstance(item, DataItem) and item.kind in kinds:
                     yield item._replace(name=f"{prefix}.{item.name}")
 
@@ -364,7 +377,7 @@ class Simulator(RBC):
             )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            solvers={type(solver).__name__: solver.__getstate__() for solver in self._active_solvers},
+            systems={type(system).__name__: system.__getstate__() for system in self.checkpointed_systems},
         )
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
@@ -379,8 +392,8 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        for solver in self._active_solvers:
-            solver.__setstate__(state.solvers[type(solver).__name__])
+        for system in self.checkpointed_systems:
+            system.__setstate__(state.systems[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -458,7 +471,7 @@ class Simulator(RBC):
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
-    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
+    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SystemCheckpoint]) -> None:
         """
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
         differentiable solvers.
@@ -624,6 +637,11 @@ class Simulator(RBC):
         simulated, which is `get_time`.
         """
         return self._cur_substep_global * self._substep_dt
+
+    @property
+    def checkpointed_systems(self) -> list[System]:
+        """The Systems a checkpoint holds the data of: the active solvers, then the other Systems holding data."""
+        return self._checkpointed_systems
 
     def get_system(self, cls: type[System]) -> System | None:
         """Return the System of the scene of the given class, None when the scene has none."""

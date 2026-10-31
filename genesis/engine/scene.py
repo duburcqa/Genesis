@@ -1847,16 +1847,16 @@ class Scene(RBC):
             )
         if state.digest != self._desc_digest:
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
-        # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
+        # Every System checks its record before anything is touched, so a record from another scene leaves this one as
         # it was, the recorders included
-        solvers = {type(solver).__name__: solver for solver in self._sim.active_solvers}
-        if set(state.sim.solvers) != set(solvers):
+        systems = {type(system).__name__: system for system in self._sim.checkpointed_systems}
+        if set(state.sim.systems) != set(systems):
             gs.raise_exception(
-                f"The checkpoint holds {sorted(state.sim.solvers)} where this scene simulates {sorted(solvers)}."
+                f"The checkpoint holds {sorted(state.sim.systems)} where this scene simulates {sorted(systems)}."
             )
-        for name, solver in solvers.items():
-            record = state.sim.solvers[name]
-            items = (item for item in solver.data if isinstance(item, DataItem) and item.kind in record.kinds)
+        for name, system in systems.items():
+            record = state.sim.systems[name]
+            items = [item for item in system.data if isinstance(item, DataItem) and item.kind in record.kinds]
             check_data(items, record.arrays)
         # The recorders finish the run first (see 'reset'), and the restart follows the state, so the visualizer draws
         # the state put back.

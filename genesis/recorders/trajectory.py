@@ -31,7 +31,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.state_change import StateChange, Subscriber
-from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
+from genesis.engine.states.solvers import SimulatorCheckpoint, SystemCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization
 from genesis.utils.data import ArrayItem, ConfigItem, DataKind, ScalarItem, StaticConfig
@@ -1257,12 +1257,12 @@ class Trajectory:
         arrays: dict[str, dict[str, np.ndarray]] = {}
         for name, value in values.items():
             if name != STEPS_FIELD and not name.startswith(TIMINGS_PREFIX):
-                solver_name, array_name = name.split(".", 1)
-                arrays.setdefault(solver_name, {})[array_name] = value
-        solvers = {
-            solver_name: SolverCheckpoint(solver_arrays, {}, kinds) for solver_name, solver_arrays in arrays.items()
+                system_name, array_name = name.split(".", 1)
+                arrays.setdefault(system_name, {})[array_name] = value
+        systems = {
+            system_name: SystemCheckpoint(system_arrays, {}, kinds) for system_name, system_arrays in arrays.items()
         }
-        sim = SimulatorCheckpoint(steps=values[STEPS_FIELD], solvers=solvers)
+        sim = SimulatorCheckpoint(steps=values[STEPS_FIELD], systems=systems)
         self._scene.__setstate__(
             self._checkpoint_class(scene=self._scene.desc, digest=self._digest, layout=self._layout, sim=sim)
         )

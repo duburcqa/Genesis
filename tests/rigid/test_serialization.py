@@ -644,7 +644,7 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     read_box_pos = box.get_pos()
     read_arm_qpos = arm.get_qpos()
     if requires_grad:
-        qpos_grad = checkpoint.sim.solvers["RigidSolver"].arrays["rigid_info.qpos.grad"]
+        qpos_grad = checkpoint.sim.systems["RigidSolver"].arrays["rigid_info.qpos.grad"]
         assert_equal((tensor_to_array(qpos_grad) != 0.0).any(), True)
         scene.__setstate__(checkpoint)
     for _ in range(10):
@@ -659,9 +659,9 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     assert_equal(twin_scene.entities[2].get_qpos(), read_arm_qpos)
     twin_checkpoint = twin_scene.__getstate__()
     assert_equal(twin_checkpoint.sim.steps, checkpoint.sim.steps)
-    for name, record in checkpoint.sim.solvers.items():
+    for name, record in checkpoint.sim.systems.items():
         for array_name, array in record.arrays.items():
-            assert_equal(twin_checkpoint.sim.solvers[name].arrays[array_name], array)
+            assert_equal(twin_checkpoint.sim.systems[name].arrays[array_name], array)
     for _ in range(10):
         twin_scene.step()
     resumed_state = twin_scene.sim.rigid_solver.get_state()
@@ -702,12 +702,12 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
 
     # A record names every array, so a restore raises on a missing or extra array and names the difference. A restore
     # of a record with another 'n_envs' raises and names both counts.
-    rigid = checkpoint.sim.solvers["RigidSolver"]
+    rigid = checkpoint.sim.systems["RigidSolver"]
     dropped_name, *_ = rigid.arrays
     arrays = {name: array for name, array in rigid.arrays.items() if name != dropped_name}
-    solvers = {**checkpoint.sim.solvers, "RigidSolver": dataclasses.replace(rigid, arrays=arrays)}
+    systems = {**checkpoint.sim.systems, "RigidSolver": dataclasses.replace(rigid, arrays=arrays)}
     with pytest.raises(gs.GenesisException, match=f"do not share \\['{dropped_name}'\\]"):
-        scene.__setstate__(dataclasses.replace(checkpoint, sim=dataclasses.replace(checkpoint.sim, solvers=solvers)))
+        scene.__setstate__(dataclasses.replace(checkpoint, sim=dataclasses.replace(checkpoint.sim, systems=systems)))
     with pytest.raises(gs.GenesisException, match="built with EnvironmentLayout\\(n_envs=3"):
         scene.__setstate__(dataclasses.replace(checkpoint, layout=dataclasses.replace(checkpoint.layout, n_envs=3)))
 

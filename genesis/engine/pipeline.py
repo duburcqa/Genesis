@@ -25,15 +25,19 @@ import sys
 import textwrap
 import types
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from typing import Any, NamedTuple
 
 import quadrants as qd
 from quadrants.lang._quadrants_callable import BoundQuadrantsCallable, QuadrantsCallable
 
+import genesis as gs
+from genesis.engine.states.solvers import SystemCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.utils.cache import get_cache_dir
+from genesis.utils.data import CHECKPOINT_KINDS, ConfigItem, DataItem, DataKind, fill_data
+from genesis.utils.misc import data_to_array
 
 # The type of the annotation of a compile-time parameter
 Template = type(qd.template())
@@ -68,6 +72,34 @@ class System:
     def get_parts(self) -> "tuple[System, ...]":
         """Return the Systems this one builds and holds itself, which compose like any other once it exists."""
         return ()
+
+    @property
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        """Yield every array and static config the System holds, named by the attributes reaching it (see 'iter_data')."""
+        return iter(())
+
+    def save_checkpoint(self, kinds: frozenset[DataKind]) -> SystemCheckpoint:
+        """Return a checkpoint of the arrays of the given kinds the System holds, for 'load_checkpoint' to restore."""
+        items = [item for item in self.data if isinstance(item, DataItem) and item.kind in kinds]
+        arrays = {
+            item.name: data_to_array(item.array, to_torch=gs.use_zerocopy.is_supported, copy=True) for item in items
+        }
+        return SystemCheckpoint(arrays, {}, kinds)
+
+    def __getstate__(self) -> SystemCheckpoint:
+        """Return a SystemCheckpoint of the System, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
+        return self.save_checkpoint(CHECKPOINT_KINDS)
+
+    def __setstate__(self, state: SystemCheckpoint) -> None:
+        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
+        self.load_checkpoint(state)
+
+    def load_checkpoint(self, checkpoint: SystemCheckpoint) -> None:
+        """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build."""
+        fill_data(
+            [item for item in self.data if isinstance(item, DataItem) and item.kind in checkpoint.kinds],
+            checkpoint.arrays,
+        )
 
 
 def register_system(cls: type[System]) -> type[System]:

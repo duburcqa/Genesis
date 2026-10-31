@@ -13,7 +13,7 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
-from genesis.engine.states import RigidSolverState, SolverCheckpoint
+from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
@@ -1818,7 +1818,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 entity._prev_prop_t = -1
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
-    def __setstate__(self, state: SolverCheckpoint) -> None:
+    def __setstate__(self, state: SystemCheckpoint) -> None:
         super().__setstate__(state)
         self._restart()
 
