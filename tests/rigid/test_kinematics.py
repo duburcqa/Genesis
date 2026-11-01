@@ -7,6 +7,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -663,7 +664,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
         vis_mode="collision",
     )
     scene.build(n_envs=n_envs)
-    collider_state = scene.rigid_solver.collider.collider_state
+    collider_state = scene.sim.get_system(Collider).collider_state
 
     hand = franka.get_link("hand")
     hand_pos_ref = torch.tensor([0.3, 0.1, 0.1], dtype=gs.tc_float, device=gs.device)
@@ -674,7 +675,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
     qpos_goal = franka.inverse_kinematics(hand, pos=hand_pos_ref, quat=hand_quat_ref)
     qpos_goal[..., -2:] = 0.04
     franka.set_qpos(qpos_goal)
-    scene.rigid_solver.collider.detection()
+    scene.sim.get_system(Collider).detection()
     assert not collider_state.n_contacts.to_numpy().any()
     franka.set_qpos(torch.zeros_like(qpos_goal))
 
@@ -722,7 +723,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
             franka.set_qpos(waypoint)
 
             # Check if the cube is colliding with the robot
-            scene.rigid_solver.collider.detection()
+            scene.sim.get_system(Collider).detection()
             n_contacts = collider_state.n_contacts.to_numpy()
             for i_b in range(max(scene.n_envs, 1)):
                 for i_c in range(n_contacts[i_b]):

@@ -132,9 +132,9 @@ class System:
         """
         Declare funcs or kernels the API of the System class, `@GJK.api` above `@qd.func`, and return the first one.
 
-        A stage writes the Data of the System adding it and of the System offering the slot it fills, each with the
-        System owning it as a part and the parts of that owner. It changes the Data of any other System through the API
-        of that System alone, which writes it unchecked: the funcs of the API it calls, or a kernel of the API it runs.
+        A stage writes the Data of the System adding it and of the System offering the slot it fills. It changes the
+        Data of any other System through the API of that System alone, which writes it unchecked: the funcs of the API
+        it calls, or a kernel of the API it runs.
         """
         for func in funcs:
             _API_FUNCS[func.fn] = cls
@@ -142,12 +142,6 @@ class System:
 
     def build(self) -> None:
         """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
-
-    @property
-    def parts(self) -> "tuple[System, ...]":
-        """The Systems this one builds and holds itself, its annotated parts, which join the scene once built."""
-        parts = [vars(self).get(name) for name, cls in _get_owned_attrs(type(self)).items() if issubclass(cls, System)]
-        return tuple([part for part in parts if part is not None])
 
     @property
     def requires(self) -> "tuple[type[System], ...]":
@@ -161,8 +155,8 @@ class System:
 
         They are the structs and static configs its class annotates, in declaration order, those not built left out.
         """
-        for name, cls in _get_owned_attrs(type(self)).items():
-            if not issubclass(cls, System) and vars(self).get(name) is not None:
+        for name in _get_owned_attrs(type(self)):
+            if vars(self).get(name) is not None:
                 yield from iter_data(self, name)
 
     def save_checkpoint(self, kinds: frozenset[DataKind]) -> SystemCheckpoint:
@@ -262,13 +256,18 @@ def get_roles(cls: type) -> list[type]:
 
 
 def _get_stages(system: System, role: type) -> tuple[Any, ...]:
-    """Return the stages of the entry point of a role a System plays, its methods bound and its properties evaluated."""
+    """
+    Return the stages of the entry point of a role a System plays, its methods bound, its properties evaluated and its
+    phases those of the System.
+    """
     (entry,) = inspect.get_annotations(role)
     value = inspect.getattr_static(system, entry)
     if isinstance(value, property):
         value = value.fget(system)
     elif isinstance(value, types.FunctionType):
         value = value.__get__(system)
+    elif isinstance(value, (Phase, Inline)):
+        value = _get_declared(system, entry)
     return value if isinstance(value, tuple) else (value,)
 
 
@@ -772,39 +771,29 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
 
 def _is_component(cls: type) -> bool:
     """
-    Return whether a System class is a component: playing no role, registered and owned by none, created on demand.
+    Return whether a System class is a component: playing no role and unregistered, created on demand.
 
     A component exists while some System depends on it, and is built once every System that could use it is decided.
     """
     if not (isinstance(cls, type) and issubclass(cls, System)):
         return False
-    owned = {owned for owner in _SYSTEM_CLASSES_BY_NAME.values() for owned in _get_owned(owner)}
-    return not get_roles(cls) and cls not in _SYSTEM_CLASSES and cls not in owned
+    return not get_roles(cls) and cls not in _SYSTEM_CLASSES
 
 
 def _get_owned_attrs(cls: type) -> dict[str, type]:
     """
-    Return the attributes a System class declares it owns, by name: its Data structs, static configs and parts.
+    Return the attributes a System class declares it owns, by name: its Data structs and static configs.
 
-    A System declares them as the annotations of its class attributes, `dyn_state: DynState`, `collider: Collider |
-    None`, in declaration order, those of its bases first.
+    A System declares them as the annotations of its class attributes, `dyn_state: DynState`, in declaration order,
+    those of its bases first.
     """
     owned = {}
     for base in reversed(cls.__mro__):
         for name, hint in inspect.get_annotations(base).items():
             for arg in typing.get_args(hint) or (hint,):
-                if isinstance(arg, type) and issubclass(arg, (Data, StaticConfig, System)) and arg is not cls:
+                if isinstance(arg, type) and issubclass(arg, (Data, StaticConfig)):
                     owned[name] = arg
     return owned
-
-
-def _get_owned(cls: type) -> list[type]:
-    """Return the classes of the Data structs and of the parts a System class owns, those of its parts included."""
-    return [
-        owned
-        for owned_cls in _get_owned_attrs(cls).values()
-        for owned in (owned_cls, *(_get_owned(owned_cls) if issubclass(owned_cls, System) else ()))
-    ]
 
 
 @contextlib.contextmanager
@@ -823,37 +812,33 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
     """
     Return the Data the stages being added bind by name, and the identities of those they may write.
 
-    The scope holds the public attributes of the System, of the Systems it depends on, and of their parts, as they are
-    when a stage is added, and the structs it depends on as Data under the name of their parameter. The stages write
-    the Data of the System and of the System offering their slot, each with its owner when it is a part and the parts
-    of either, but never the Data another System declares it owns (see 'System.api').
+    The scope holds the public attributes of the System and of the Systems it depends on, as they are when a stage is
+    added, and the structs it depends on as Data under the name of their parameter. The stages write the Data of the
+    System and of the System offering their slot, but never the Data another System declares it owns (see
+    'System.api').
     """
     system = _scope_system
     assert system is not None, "A stage is added within the scope of its System (see 'assemble_systems')."
     scope: dict[str, list[Any]] = {}
     for dependency in (system, *system._dependencies):
-        for owner in (dependency, *dependency.parts):
-            for name, value in vars(owner).items():
-                if not name.startswith("_") and all([value is not other for other in scope.get(name, ())]):
-                    scope.setdefault(name, []).append(value)
+        for name, value in vars(dependency).items():
+            if not name.startswith("_") and all([value is not other for other in scope.get(name, ())]):
+                scope.setdefault(name, []).append(value)
     for name, struct in system._data_dependencies.items():
         if all([struct is not other for other in scope.get(name, ())]):
             scope.setdefault(name, []).append(struct)
     units = [unit for unit in (system, _scope_slot_owner) if unit is not None]
-    owners = [dep for unit in units for dep in unit._dependencies if any([part is unit for part in dep.parts])]
-    unit_systems = [unit_system for unit in (*units, *owners) for unit_system in (unit, *unit.parts)]
     # The Data another System of the scope declares it owns stays read-only, even held by a System of the unit
     owned_ids = {
         id(vars(other).get(name))
-        for dependency in (system, *system._dependencies)
-        for other in (dependency, *dependency.parts)
-        if all([other is not unit_system for unit_system in unit_systems])
+        for other in (system, *system._dependencies)
+        if all([other is not unit for unit in units])
         for name in _get_owned_attrs(type(other))
     }
     writable_ids = {
         id(value)
-        for unit_system in unit_systems
-        for name, value in vars(unit_system).items()
+        for unit in units
+        for name, value in vars(unit).items()
         if not name.startswith("_") and id(value) not in owned_ids
     }
     return scope, writable_ids
@@ -872,7 +857,7 @@ def assemble_systems(
     every condition on them holds, and is absent once one of them never will, the reason being logged. A component
     exists once an existing System depends on it (see '_is_component'). A System is built once the Systems it depends
     on are built and every System that could still use it is decided, so that every request they make of it in their
-    constructor is in, those needing its build aside (its parts, its Data, a condition on it). Its extension points
+    constructor is in, those needing its build aside (its Data, a condition on it). Its extension points
     then bind their kernel, and the stage of each role is routed into its slot, in the order of the Systems: those
     given, then those created in registration order, then the components.
     """
@@ -912,7 +897,7 @@ def assemble_systems(
         classes_coming = [
             owned
             for owner in (*classes_pending, *[type(system) for system in systems if id(system) not in built_ids])
-            for owned in (owner, *_get_owned(owner))
+            for owned in (owner, *_get_owned_attrs(owner).values())
         ]
         args = {}
         for dependency in dependencies_by_cls.setdefault(cls, _get_dependencies(cls)):
@@ -957,9 +942,9 @@ def assemble_systems(
             system._data_dependencies = {name: arg for name, arg in decision.items() if isinstance(arg, Data)}
             systems.append(system)
         for system in [system for system in systems if id(system) not in built_ids]:
-            # A pending class needing what a build provides (the parts and Data of this System, a condition on a System
+            # A pending class needing what a build provides (the Data of this System, a condition on a System
             # not built yet) is decided after that build, so it makes no request of this one in its constructor
-            owned = tuple(_get_owned(type(system)))
+            owned = tuple(_get_owned_attrs(type(system)).values())
             types_built = [type(other) for other in systems if id(other) in built_ids]
             is_used_pending = False
             for cls in classes_pending:
@@ -982,12 +967,6 @@ def assemble_systems(
                 system.build()
             built_ids.add(id(system))
             is_progressing = True
-            # The parts of a System join the Systems of the scene, built with it, and depend on it
-            for part in system.parts:
-                if all([part is not other for other in systems]):
-                    part._dependencies = (system, *part._dependencies)
-                    systems.append(part)
-                    built_ids.add(id(part))
         # A component joins the pending classes while they are decided
         if not is_progressing and all([cls in classes_decided for cls in classes_pending]):
             break

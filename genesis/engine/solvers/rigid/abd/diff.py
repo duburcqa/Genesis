@@ -9,6 +9,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.base_solver import func_flag_error
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
 from genesis.utils.misc import qd_isfinite
 
@@ -30,7 +31,7 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
         if i_dq < rigid_info.qpos.shape[0]:
             is_valid = is_valid and qd_isfinite(rigid_info.qpos_next[i_dq, i_b])
         if not is_valid:
-            errno[i_b] = errno[i_b] | RigidErrorCode.INVALID_ACC_NAN
+            func_flag_error(i_b, RigidErrorCode.INVALID_ACC_NAN, errno)
 
     # The sizes are read in the loop ranges, since autodiff takes a top level made of loops alone
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)

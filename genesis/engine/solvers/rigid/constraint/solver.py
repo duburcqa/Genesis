@@ -1,5 +1,5 @@
-from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Annotated
 
 import numpy as np
 import torch
@@ -9,15 +9,16 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.engine.pipeline import System
+from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.solvers.base_solver import func_flag_error
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import (
     func_hibernate_island_if_settled,
     func_list_item,
     func_list_range_start,
-    func_wakeup_island,
     linear_to_lower_tri,
 )
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.data import (
     ColliderState,
     ConstraintState,
@@ -30,12 +31,25 @@ from genesis.engine.solvers.rigid.data import (
     cholesky_tile_size_for,
     island_tile_caps,
 )
+from genesis.engine.solvers.rigid.rigid_solver import RigidConstraints, RigidConstraintsBackward, RigidSolver
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.grad.bridge import no_grad
-from genesis.utils.data import DataItem, iter_data
-from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.options.solvers import RigidOptions
+from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch, qd_zero_grad
 
-from . import backward as backward_constraint_solver, linesearch, noslip as constraint_noslip
+from . import linesearch, noslip as constraint_noslip
 from ..collider.contact import func_add_contacts_force_to_links
+from .backward import (
+    kernel_accumulate_constraint_solver_grads,
+    kernel_compute_gradients,
+    kernel_load_dL_dqacc_from_acc_grad,
+    kernel_manual_add_collision_constraints_bw,
+    kernel_manual_add_equality_constraints_bw,
+    kernel_manual_add_frictionloss_constraints_bw,
+    kernel_manual_add_joint_limit_constraints_bw,
+    kernel_manual_update_actuator_force_bw,
+    kernel_solve_adjoint_u,
+)
 from .island import (
     func_build_islands,
     func_build_islands_coop,
@@ -54,8 +68,7 @@ def _func_clear_jac_row(i_con: int, i_b: int, constraint_state: ConstraintState)
     """Zero one row of the constraint Jacobian.
 
     Only the dofs of the support last recorded for row i_con are cleared, the row being zero elsewhere: every writer of
-    a row records its support, and a cleared env records empty supports over zero rows (see
-    constraint_solver_kernel_clear).
+    a row records its support, which a reset of the env keeps (see func_reset_env).
     """
     for i_d_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
         i_d = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
@@ -117,29 +130,31 @@ def _sort_relevant_dofs_descending(
             constraint_state.jac_dofs_idx[i_con, j + 1, i_b] = key
 
 
-if TYPE_CHECKING:
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+@register_system
+class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
+    """
+    Solve the constraints of the rigid entities in every substep: the equalities, the joint limits, the frictionloss of
+    the dofs and the contacts the collider detects.
 
+    A scene disabling the constraints holds no constraint solver.
+    """
 
-IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
-
-
-class ConstraintSolver(System):
     constraint_state: ConstraintState
 
-    def __init__(self, rigid_solver: "RigidSolver"):
+    def __init__(
+        self,
+        rigid_solver: RigidSolver,
+        collider: Collider,
+        options: Annotated[RigidOptions, Enabled(disable_constraint=False)],
+    ) -> None:
         self._solver = rigid_solver
-        self._collider = rigid_solver.collider
-        self._B = rigid_solver._B
-        self._para_level = rigid_solver._para_level
+        self._collider = collider
+        self._options = options
 
-        self._solver_type = rigid_solver._options.constraint_solver
-        self._n_iterations = int(rigid_solver._options.iterations)
-        self.tolerance = rigid_solver._options.tolerance
-        self.ls_iterations = rigid_solver._options.ls_iterations
-        self.ls_tolerance = rigid_solver._options.ls_tolerance
-        # Effective (CPU-gated) sparsity flag, resolved in the static config; the raw option may differ on GPU.
-        self.sparse_solve = rigid_solver.rigid_config.sparse_solve
+    def build(self) -> None:
+        solver = self._solver
+        config = solver.rigid_config
+        self._n_iterations = int(self._options.iterations)
 
         # Note that it must be over-estimated because friction parameters and joint limits may be updated dynamically.
         # * rows_per_contact constraints per contact, bounded by the post-pruning contact budget enforced by the
@@ -149,17 +164,15 @@ class ConstraintSolver(System):
         # * up to 6 constraints per equality (weld)
         # * 1 more constraint per dynamic constraint (a screw adds a friction row and a limit row to its 5 equality rows)
         # The collider resolves the option 'max_contacts' (see 'max_contacts' in 'Collider._init_collision_fields')
-        rows_per_contact = rigid_solver.rigid_config.rows_per_contact
+        rows_per_contact = config.rows_per_contact
         self.len_constraints = (
-            rows_per_contact * rigid_solver._options.max_contacts
-            + sum(joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in self._solver.joints)
-            + self._solver.n_dofs
-            + self._solver.n_candidate_equalities_ * 6
-            + self._solver._options.max_dynamic_constraints
+            rows_per_contact * self._options.max_contacts
+            + sum(joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in solver.joints)
+            + solver.n_dofs
+            + solver.n_candidate_equalities_ * 6
+            + self._options.max_dynamic_constraints
         )
-        self.len_constraints_ = max(1, self.len_constraints)
 
-        solver, config = self._solver, rigid_solver.rigid_config
         # A Jacobian row reaches the dofs of the kinematic chains of the two links it couples. Each pass of the walk
         # moves every link one ancestor up, adding the dofs of the ancestor it passes to its chain.
         links_n_dofs = np.array([link.n_dofs for link in solver.links], dtype=gs.np_int)
@@ -171,7 +184,7 @@ class ConstraintSolver(System):
             links_chain_n_dofs += np.where(has_ancestor, links_n_dofs[links_ancestor_idx], 0)
             links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
         # One update slot per fused update of the per-island factor, one for the whole-env factor of a single island
-        nt_vec_n_slots = config.hessian_rank_update_batch if self.sparse_solve or not config.is_single_island else 1
+        nt_vec_n_slots = config.hessian_rank_update_batch if config.sparse_solve or not config.is_single_island else 1
         n_tile_classes = len(island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
         is_serialized = config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = ConstraintState(
@@ -179,8 +192,8 @@ class ConstraintSolver(System):
                 envs=solver._B,
                 dofs=solver.n_dofs_,
                 trees=solver.n_trees_,
-                constraints=self.len_constraints_,
-                contacts=rigid_solver._options.max_contacts,
+                constraints=max(1, self.len_constraints),
+                contacts=self._options.max_contacts,
                 rows_per_contact=rows_per_contact,
                 nt_vec_slots=nt_vec_n_slots,
                 jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
@@ -199,7 +212,7 @@ class ConstraintSolver(System):
                 cone_incremental=not (config.enable_elliptic_friction and config.backend == gs.cpu),
                 signorini=not config.enable_signorini_contact,
                 cone_free_reuse=not config.enable_cone_free_hessian_reuse,
-                noslip=solver._options.noslip_iterations == 0,
+                noslip=self._options.noslip_iterations == 0,
                 noslip_cooperative=not config.enable_cooperative_noslip,
                 rcm=not config.sparse_solve,
                 island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
@@ -216,98 +229,117 @@ class ConstraintSolver(System):
             else None,
         )
         self._eq_const_info_cache = {}
-
-        cs = self.constraint_state
-        self.jac = cs.jac
-        self.diag = cs.diag
-        self.aref = cs.aref
-        self.jac_n_dofs = cs.jac_n_dofs
-        self.jac_dofs_idx = cs.jac_dofs_idx
-        self.n_constraints = cs.n_constraints
-        self.n_constraints_equality = cs.n_constraints_equality
-        self.n_constraints_frictionloss = cs.n_constraints_frictionloss
-        self.n_constraints_cone = cs.n_constraints_cone
-        self.improved = cs.improved
-        self.Jaref = cs.Jaref
-        self.Ma = cs.Ma
-        self.Ma_ws = cs.Ma_ws
-        self.grad = cs.grad
-        self.Mgrad = cs.Mgrad
-        self.search = cs.search
-        self.efc_D = cs.efc_D
-        self.efc_force = cs.efc_force
-        self.active = cs.active
-        self.prev_active = cs.prev_active
-        self.qfrc_constraint = cs.qfrc_constraint
-        self.qacc = cs.qacc
-        self.qacc_ws = cs.qacc_ws
-        self.cost_ws = cs.cost_ws
-        self.cost = cs.cost
-        self.mv = cs.mv
-        self.jv = cs.jv
-        if self._solver_type == gs.constraint_solver.CG:
-            self.cg_prev_grad = cs.cg_prev_grad
-            self.cg_prev_Mgrad = cs.cg_prev_Mgrad
-        if self._solver_type == gs.constraint_solver.Newton:
-            self.nt_H = cs.nt_H
-            self.nt_vec = cs.nt_vec
-
         self.reset()
 
-    def reset(self, envs_idx=None):
+        solver.register_errors(
+            solver.errno,
+            {
+                RigidErrorCode.INVALID_FORCE_NAN: (
+                    "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
+                ),
+            },
+        )
+        # The warm start and the rows of the constraints were found at the previous pose, so a change of the geometry
+        # drops them, which the readout of the equality constraints shows until the next solve. The checkpoint of the
+        # constraint solver is restored after that of the rigid solver (see 'Collider.build').
+        solver.subscribe(
+            Subscriber(
+                frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx, links_idx: self.reset(envs_idx)
+            )
+        )
+
+    @property
+    def solve_rigid_constraints(self) -> tuple[Callable, ...]:
+        """The assembly of the rows of the constraints, their solve, then the forces it leaves on the links."""
+        return (kernel_add_equality_constraints, kernel_add_inequality_constraints, self.solve, kernel_resolve_post)
+
+    @property
+    def solve_rigid_constraints_backward(self) -> tuple[Callable, ...]:
+        """
+        The reversal of the solve through the implicit function theorem, then of the assembly of its rows.
+
+        The upstream gradient of the adjoint solve is seeded from the gradient of the acceleration, and its outputs are
+        folded back into the gradients of the smooth force and of the mass matrix. The actuator effort sums the
+        frictionloss forces of the solve with the applied and passive efforts, so its gradient reaches their rows first.
+        """
+        # Pure grad shuffles run in place through zero-copy views when supported, through a kernel otherwise (see "Pure
+        # read-write data accessors on the hot path" in CLAUDE.md)
+        stages = [
+            kernel_manual_update_actuator_force_bw,
+            self._load_dL_dqacc if gs.use_zerocopy else kernel_load_dL_dqacc_from_acc_grad,
+            self.backward,
+            self._accumulate_grads if gs.use_zerocopy else kernel_accumulate_constraint_solver_grads,
+            kernel_manual_add_equality_constraints_bw,
+            kernel_manual_add_frictionloss_constraints_bw,
+        ]
+        if self._solver.rigid_config.enable_collision:
+            stages += [self._zero_contacts_grad, kernel_manual_add_collision_constraints_bw]
+        if self._solver.rigid_config.enable_joint_limit:
+            stages.append(kernel_manual_add_joint_limit_constraints_bw)
+        return tuple(stages)
+
+    def _load_dL_dqacc(self) -> None:
+        """Move the gradient of the acceleration into the upstream gradient of the adjoint solve, through views."""
+        acc_grad = qd_to_torch(self._solver.dyn_state.dofs.acc.grad, copy=False)
+        dL_dqacc = qd_to_torch(self.constraint_state.dL_dqacc, copy=False)
+        dL_dqacc.copy_(acc_grad)
+        acc_grad.zero_()
+        # torch (MPS) and quadrants share no compute stream on Metal, so the writes are flushed before the next kernels
+        if gs.backend == gs.metal:
+            torch.mps.synchronize()
+
+    def _accumulate_grads(self) -> None:
+        """Add the outputs of the adjoint solve to the gradients of the smooth force and of the mass matrix, through
+        views (see kernel_accumulate_constraint_solver_grads in backward.py).
+        """
+        force_grad = qd_to_torch(self._solver.dyn_state.dofs.force.grad, copy=False)
+        force_grad.add_(qd_to_torch(self.constraint_state.dL_dforce, copy=False))
+        mass_mat_grad = qd_to_torch(self._solver.rigid_info.mass_mat.grad, copy=False)
+        mass_mat_grad.add_(qd_to_torch(self.constraint_state.dL_dM, copy=False))
+        # See '_load_dL_dqacc'
+        if gs.backend == gs.metal:
+            torch.mps.synchronize()
+
+    def _zero_contacts_grad(self) -> None:
+        """Zero the gradients of the contacts, which the reversal of the contact rows accumulates into."""
+        contact_data = self._collider.collider_state.contact_data
+        qd_zero_grad(contact_data.pos)
+        qd_zero_grad(contact_data.normal)
+        qd_zero_grad(contact_data.penetration)
+        # One flush for the zeroing batch, see qd_zero_grad in misc.py
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
+
+    def reset(self, envs_idx=None) -> None:
+        """Drop the warm start and the rows of the constraints of the environments 'envs_idx' (None for all of them)."""
         self._eq_const_info_cache.clear()
 
         if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
-            dofs_mask = (slice(None), *envs_mask)
             is_warmstart = qd_to_torch(self.constraint_state.is_warmstart, copy=False)
-            qacc_ws = qd_to_torch(self.constraint_state.qacc_ws, copy=False)
             assign_indexed_tensor(is_warmstart, envs_mask, False)
-            assign_indexed_tensor(qacc_ws, dofs_mask, 0.0)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-            return
-
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
-        constraint_solver_kernel_reset(envs_idx, self.constraint_state, self._solver.rigid_config)
-
-    def clear(self, envs_idx=None):
-        self.reset(envs_idx)
-
-        if gs.use_zerocopy and (
-            not isinstance(envs_idx, torch.Tensor) or (not IS_OLD_TORCH or envs_idx.dtype == torch.bool)
-        ):
-            n_constraints = qd_to_torch(self.constraint_state.n_constraints, copy=False)
-            n_constraints_equality = qd_to_torch(self.constraint_state.n_constraints_equality, copy=False)
-            n_constraints_frictionloss = qd_to_torch(self.constraint_state.n_constraints_frictionloss, copy=False)
-            n_constraints_cone = qd_to_torch(self.constraint_state.n_constraints_cone, copy=False)
-            if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-                n_constraints.masked_fill_(envs_idx, 0)
-                n_constraints_equality.masked_fill_(envs_idx, 0)
-                n_constraints_frictionloss.masked_fill_(envs_idx, 0)
-                n_constraints_cone.masked_fill_(envs_idx, 0)
-            elif isinstance(envs_idx, torch.Tensor):
-                n_constraints.scatter_(0, envs_idx, 0)
-                n_constraints_equality.scatter_(0, envs_idx, 0)
-                n_constraints_frictionloss.scatter_(0, envs_idx, 0)
-                n_constraints_cone.scatter_(0, envs_idx, 0)
-            else:
-                env_mask = indices_to_mask(envs_idx)
-                assign_indexed_tensor(n_constraints, env_mask, 0)
-                assign_indexed_tensor(n_constraints_equality, env_mask, 0)
-                assign_indexed_tensor(n_constraints_frictionloss, env_mask, 0)
-                assign_indexed_tensor(n_constraints_cone, env_mask, 0)
+            qacc_ws = qd_to_torch(self.constraint_state.qacc_ws, copy=False)
+            assign_indexed_tensor(qacc_ws, (slice(None), *envs_mask), 0.0)
+            constraint_state = self.constraint_state
+            for counts in (
+                constraint_state.n_constraints,
+                constraint_state.n_constraints_equality,
+                constraint_state.n_constraints_frictionloss,
+                constraint_state.n_constraints_cone,
+            ):
+                counts_view = qd_to_torch(counts, copy=False)
+                assign_indexed_tensor(counts_view, envs_mask, 0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             return
 
         if not isinstance(envs_idx, torch.Tensor):
             envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
-        if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-            fn = constraint_solver_kernel_masked_clear
+        if envs_idx.dtype == torch.bool:
+            fn = constraint_solver_kernel_masked_reset
         else:
-            fn = constraint_solver_kernel_clear
-        fn(envs_idx, self.constraint_state, self._solver.rigid_info, self._solver.rigid_config)
+            fn = constraint_solver_kernel_reset
+        fn(envs_idx, self.constraint_state, self._solver.rigid_config)
 
     def solve(self):
         """Solve the constraint forces, which invalidates the readback of the equality constraints."""
@@ -421,12 +453,12 @@ class ConstraintSolver(System):
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 
         # 1. We first need to find a solution to A^T * u = g system.
-        backward_constraint_solver.kernel_solve_adjoint_u(
+        kernel_solve_adjoint_u(
             self.constraint_state, self._solver.dyn_info, self._solver.rigid_info, self._solver.rigid_config
         )
 
         # 2. Using the solution u, we can compute the gradients of the input variables.
-        backward_constraint_solver.kernel_compute_gradients(self.constraint_state, self._solver.rigid_info)
+        kernel_compute_gradients(self.constraint_state, self._solver.rigid_info)
 
 
 # =====================================================================================================================
@@ -492,87 +524,41 @@ def kernel_get_equality_constraints(
 # ====================================== Reset and Clear Constraint Solver State ======================================
 
 
-@no_grad
-@qd.kernel(fastcache=True)
-def constraint_solver_kernel_reset(
-    envs_idx: qd.types.ndarray(), constraint_state: ConstraintState, rigid_config: qd.template()
-):
-    n_dofs = constraint_state.qacc_ws.shape[0]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        constraint_state.is_warmstart[i_b] = False
-        for i_d in range(n_dofs):
-            constraint_state.qacc_ws[i_d, i_b] = 0.0
-
-
 @qd.func
-def func_clear_constraint_counts_at_env(i_b: int, constraint_state: ConstraintState, rigid_info: RigidInfo):
-    """Reset the constraint counts of env i_b (see constraint_solver_kernel_clear)."""
+def func_reset_env(i_b: int, constraint_state: ConstraintState):
+    """Drop the warm start and the rows of the constraints of env i_b (see 'ConstraintSolver.reset').
+
+    A row keeps the support of its Jacobian, which its next writer clears first (see _func_clear_jac_row).
+    """
+    constraint_state.is_warmstart[i_b] = False
+    for i_d in range(constraint_state.qacc_ws.shape[0]):
+        constraint_state.qacc_ws[i_d, i_b] = 0.0
     constraint_state.n_constraints[i_b] = 0
     constraint_state.n_constraints_equality[i_b] = 0
     constraint_state.n_constraints_frictionloss[i_b] = 0
     constraint_state.n_constraints_cone[i_b] = 0
 
 
+@no_grad
 @qd.kernel(fastcache=True)
-def constraint_solver_kernel_clear(
-    envs_idx: qd.types.ndarray(),
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+def constraint_solver_kernel_reset(
+    envs_idx: qd.types.ndarray(), constraint_state: ConstraintState, rigid_config: qd.template()
 ):
-    """Clear the constraints of the given envs, every row of their Jacobian included (see _func_clear_jac_row)."""
-    n_dofs = constraint_state.qacc_ws.shape[0]
-    len_constraints = constraint_state.jac.shape[0]
-
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_clear_constraint_counts_at_env(i_b, constraint_state, rigid_info)
-
-    # One thread per row of an env, consecutive threads following the memory order of the layout so that their writes
-    # coalesce (see constraint_layout_batch_first)
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b_ in qd.ndrange(
-        len_constraints,
-        envs_idx.shape[0],
-        axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
-    ):
-        i_b = envs_idx[i_b_]
-        for i_d in range(n_dofs):
-            constraint_state.jac[i_c, i_d, i_b] = gs.qd_float(0.0)
-        constraint_state.jac_n_dofs[i_c, i_b] = 0
+        func_reset_env(i_b, constraint_state)
 
 
+@no_grad
 @qd.kernel(fastcache=True)
-def constraint_solver_kernel_masked_clear(
-    envs_mask: qd.types.ndarray(),
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+def constraint_solver_kernel_masked_reset(
+    envs_mask: qd.types.ndarray(), constraint_state: ConstraintState, rigid_config: qd.template()
 ):
-    """Clear the constraints of the envs the mask selects (see constraint_solver_kernel_clear)."""
-    n_dofs = constraint_state.qacc_ws.shape[0]
-    len_constraints = constraint_state.jac.shape[0]
-
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_clear_constraint_counts_at_env(i_b, constraint_state, rigid_info)
-
-    # See constraint_solver_kernel_clear
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(
-        len_constraints,
-        envs_mask.shape[0],
-        axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
-    ):
-        if envs_mask[i_b]:
-            for i_d in range(n_dofs):
-                constraint_state.jac[i_c, i_d, i_b] = gs.qd_float(0.0)
-            constraint_state.jac_n_dofs[i_c, i_b] = 0
+            func_reset_env(i_b, constraint_state)
 
 
 # ========================================= Register Pre-Defined Constraints ==========================================
@@ -2113,114 +2099,6 @@ def add_frictionloss_constraints(
                 if dyn_info.equalities.eq_data[i_e, i_b][17] > EPS:
                     qd.atomic_add(constraint_state.n_constraints[i_b], 1)
                     qd.atomic_add(constraint_state.n_constraints_frictionloss[i_b], 1)
-
-
-# ==================================== Runtime User-Specified Dynamic Constraints =====================================
-
-
-@qd.kernel(fastcache=True)
-def kernel_add_dynamic_constraint(
-    link1_idx: int,
-    link2_idx: int,
-    anchor_link_idx: int,
-    envs_idx: qd.types.ndarray(),
-    eq_type: int,
-    anchor_pos: qd.types.ndarray(),
-    eq_data_tail: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Register a constraint between two links, taking their current relative pose as its reference.
-
-    The anchor is the point anchor_pos given in the frame of link anchor_link_idx. The constraint data holds:
-    [0:3]   the anchor, in the frame of link2
-    [3:6]   the anchor, in the frame of link1
-    [6:10]  the orientation of link2 relative to link1
-    [10:18] the type-specific entries of eq_data_tail (see func_equality_links and func_screw_frame)
-    Every selected env has an equality slot left (see RigidSolver._add_dynamic_constraint).
-    """
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_e = dyn_state.n_equalities[i_b]
-        anchor = gu.qd_transform_by_trans_quat(
-            gs.qd_vec3([anchor_pos[0], anchor_pos[1], anchor_pos[2]]),
-            dyn_state.links.pos[anchor_link_idx, i_b],
-            dyn_state.links.quat[anchor_link_idx, i_b],
-        )
-        pos1 = gu.qd_inv_transform_by_trans_quat(
-            anchor, dyn_state.links.pos[link1_idx, i_b], dyn_state.links.quat[link1_idx, i_b]
-        )
-        pos2 = gu.qd_inv_transform_by_trans_quat(
-            anchor, dyn_state.links.pos[link2_idx, i_b], dyn_state.links.quat[link2_idx, i_b]
-        )
-        relpose = gu.qd_quat_mul(
-            gu.qd_inv_quat(dyn_state.links.quat[link1_idx, i_b]), dyn_state.links.quat[link2_idx, i_b]
-        )
-
-        dyn_info.equalities.eq_type[i_e, i_b] = eq_type
-        dyn_info.equalities.eq_obj1id[i_e, i_b] = link1_idx
-        dyn_info.equalities.eq_obj2id[i_e, i_b] = link2_idx
-        for i_3 in qd.static(range(3)):
-            dyn_info.equalities.eq_data[i_e, i_b][i_3] = pos2[i_3]
-            dyn_info.equalities.eq_data[i_e, i_b][i_3 + 3] = pos1[i_3]
-        for i_4 in qd.static(range(4)):
-            dyn_info.equalities.eq_data[i_e, i_b][i_4 + 6] = relpose[i_4]
-        for i_t in qd.static(range(8)):
-            dyn_info.equalities.eq_data[i_e, i_b][i_t + 10] = eq_data_tail[i_t]
-
-        dyn_info.equalities.sol_params[i_e, i_b] = qd.Vector(
-            [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
-        )
-
-        dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] + 1
-
-
-@qd.kernel(fastcache=True)
-def kernel_delete_dynamic_constraint(
-    link1_idx: int,
-    link2_idx: int,
-    envs_idx: qd.types.ndarray(),
-    eq_type: int,
-    dyn_state: DynState,
-    hibernation_state: HibernationState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        for i_e in range(rigid_info.n_equalities[None], dyn_state.n_equalities[i_b]):
-            link_a = dyn_info.equalities.eq_obj1id[i_e, i_b]
-            link_b = dyn_info.equalities.eq_obj2id[i_e, i_b]
-            if dyn_info.equalities.eq_type[i_e, i_b] == eq_type and (
-                (link_a == link1_idx and link_b == link2_idx) or (link_a == link2_idx and link_b == link1_idx)
-            ):
-                # Nothing else wakes a link held asleep by the deleted constraint (see the hibernation pass of
-                # func_build_islands)
-                if qd.static(rigid_config.use_hibernation):
-                    for i_side in range(2):
-                        i_l = link_a
-                        if i_side == 1:
-                            i_l = link_b
-                        if dyn_state.links.is_hibernated[i_l, i_b]:
-                            i_is = hibernation_state.links_island_idx[i_l, i_b]
-                            func_wakeup_island(
-                                i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
-                            )
-                if i_e < dyn_state.n_equalities[i_b] - 1:
-                    # Swap-remove must move the whole constraint record, not just its type,
-                    # otherwise the surviving slot keeps the deleted constraint's links/data.
-                    i_last = dyn_state.n_equalities[i_b] - 1
-                    dyn_info.equalities.eq_type[i_e, i_b] = dyn_info.equalities.eq_type[i_last, i_b]
-                    dyn_info.equalities.eq_obj1id[i_e, i_b] = dyn_info.equalities.eq_obj1id[i_last, i_b]
-                    dyn_info.equalities.eq_obj2id[i_e, i_b] = dyn_info.equalities.eq_obj2id[i_last, i_b]
-                    dyn_info.equalities.eq_data[i_e, i_b] = dyn_info.equalities.eq_data[i_last, i_b]
-                    dyn_info.equalities.sol_params[i_e, i_b] = dyn_info.equalities.sol_params[i_last, i_b]
-                dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] - 1
 
 
 # =====================================================================================================================
@@ -6209,12 +6087,18 @@ def func_update_qacc(
         dyn_state.dofs.force[i_d, i_b] = dyn_state.dofs.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
         constraint_state.qacc_ws[i_d, i_b] = constraint_state.qacc[i_d, i_b]
         if qd.math.isnan(constraint_state.qacc[i_d, i_b]):
-            errno[i_b] = errno[i_b] | RigidErrorCode.INVALID_FORCE_NAN
+            func_flag_error(i_b, RigidErrorCode.INVALID_FORCE_NAN, errno)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
         constraint_state.is_warmstart[i_b] = True
 
+
+# The constraint solver orders the contacts by island, writes back their forces and reverses their rows into their
+# gradients, through the API of the collider
+Collider.api(
+    func_sort_contacts, func_sort_contacts_coop, func_update_contact_force, kernel_manual_add_collision_constraints_bw
+)
 
 from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
 

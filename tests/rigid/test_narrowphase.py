@@ -453,7 +453,7 @@ class AnalyticalVsGJKSceneCreator:
         errno_val = self.scene_gjk._sim.rigid_solver._errno[0]
         if expect_collision:
             # Kernel1 runs GJK on every pair left by the broad phase (analytical paths are disabled).
-            if self.scene_gjk._sim.rigid_solver.collider.narrowphase_layout is Queued:
+            if self.scene_gjk.sim.get_system(Collider).narrowphase_layout is Queued:
                 assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
             # On GPU: multicontact is reached when contact0 detects a collision and enqueues the pair.
             # On CPU: the monolithic kernel calls gjk.func_gjk_contact directly (skipping gjk.func_gjk).
@@ -476,12 +476,12 @@ def test_capsule_analytical_accuracy(tmp_path: Path, show_viewer: bool, tol: flo
     _cap1 = scene_add_capsule(tmp_path=tmp_path, scene=scene, half_length=0.25, radius=0.1)
     cap2 = scene_add_capsule(tmp_path=tmp_path, scene=scene, half_length=0.25, radius=0.1)
     scene.build()
-    assert scene.rigid_solver.collider is not None
+    assert scene.sim.get_system(Collider) is not None
 
     cap2.set_pos((0.15, 0, 0))
     scene.step()
 
-    contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+    contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
     assert len(contacts["geom_a"]) > 0
 
     penetration = contacts["penetration"][0]
@@ -661,7 +661,7 @@ def test_analytical_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
                 scene_creator.update_pos_quat_analytical(entity_idx=i_entity, pos=pos, euler=euler)
             scene_creator.step_analytical()
 
-            contacts = scene_analytical.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+            contacts = scene_analytical.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
             assert (len(contacts["geom_a"]) > 0) == should_collide, "Analytical collision mismatch"
             _check_expected_values(
                 contacts, description, exp_pen, exp_normal, "analytical", ANALYTICAL_PEN_TOL, ANALYTICAL_NORMAL_TOL
@@ -683,7 +683,7 @@ def test_analytical_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
                 scene_creator.update_pos_quat_gjk(entity_idx=i_entity, pos=pos, euler=euler)
             scene_creator.step_gjk(should_collide)
 
-            contacts_gjk = scene_gjk.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+            contacts_gjk = scene_gjk.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
             has_collision_analytical = len(contacts_analytical["geom_a"]) > 0
             has_collision_gjk = len(contacts_gjk["geom_a"]) > 0
             assert has_collision_analytical == has_collision_gjk, "Collision detection mismatch!"
@@ -828,7 +828,7 @@ def test_split_vs_monolithic_narrowphase(
             capsule_b.set_qpos((*pos_b, *quat_b))
             box.set_pos(pos_box)
             scene.step()
-            arms_contacts.append(scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False))
+            arms_contacts.append(scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False))
         contacts_split, contacts_mono = arms_contacts
 
         n_contacts_split = [len(geoms) for geoms in contacts_split["geom_a"]]
@@ -882,7 +882,7 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
     corners_xy = np.concatenate((corners_xy, corners_xy[:, ::-1]))
     corners_xy = corners_xy[np.lexsort((corners_xy[:, 1], corners_xy[:, 0]))]
     expected = np.column_stack((corners_xy, np.full(8, 0.0995)))
-    contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+    contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
     for positions, penetrations in zip(contacts["position"], contacts["penetration"]):
         assert positions.shape[0] == 8
         # Rounded sort keys: corners tied in x must order by y identically on both sides of the comparison.
@@ -947,11 +947,11 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
     yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
     offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
     box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
-    corners_tol = scene.rigid_solver.collider._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
+    corners_tol = scene.sim.get_system(Collider)._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
     box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
     box.set_quat(np.stack((np.cos(0.5 * yaw), np.zeros(N_ENVS), np.zeros(N_ENVS), np.sin(0.5 * yaw)), axis=-1))
     scene.step()
-    contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+    contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
 
     for i_b in range(N_ENVS):
         # The overlap clips the top face of the base by the half-planes of the bottom face of the box
@@ -1087,7 +1087,7 @@ def test_maximum_contact_area(show_viewer, tol):
     yaws = np.tile(2.0 * np.pi * np.arange(N_YAWS) / N_YAWS, len(SCALES))
     quats_yaw = gu.rotvec_to_quat(yaws[:, None] * np.array((0.0, 0.0, 1.0)))
     envs_corners = [np.pad(tops_corners[i_b // N_YAWS], ((0, 0), (0, 1))) for i_b in range(scene.n_envs)]
-    tilt_max = TILT_RATIO * scene.rigid_solver.collider._mc_perturbation
+    tilt_max = TILT_RATIO * scene.sim.get_system(Collider)._mc_perturbation
     for _ in range(N_TRIALS):
         # The narrow pillar lies inside the disk that the wide section contains, anywhere within it, with its deepest
         # corner pressed into the wide one by the penetration
@@ -1102,9 +1102,9 @@ def test_maximum_contact_area(show_viewer, tol):
         tops_z = envs_scale * (PILLAR_HEIGHT - PENETRATION) - envs_corners_z
         top.set_pos(np.concatenate((offsets, tops_z[:, None]), axis=-1))
         top.set_quat(quats)
-        scene.rigid_solver.collider.clear()
-        scene.rigid_solver.collider.detection()
-        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+        scene.sim.get_system(Collider).clear()
+        scene.sim.get_system(Collider).detection()
+        contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
 
         tops_pos = tensor_to_array(top.get_pos())
         for i_b in range(scene.n_envs):
@@ -1283,13 +1283,13 @@ def test_mesh_support_exactness(show_viewer, tol):
             directions_local,
             supports_world,
             supports_local,
-            scene.rigid_solver.collider.collider_state,
+            scene.sim.get_system(Collider).collider_state,
             scene.sim.get_system(GJK).gjk_state,
             scene.rigid_solver.dyn_info,
             scene.sim.get_system(GJK).gjk_info,
             support_field_info,
             scene.rigid_solver.rigid_config,
-            scene.rigid_solver.collider.collider_config,
+            scene.sim.get_system(Collider).collider_config,
         )
         assert_allclose(supports_world, supports_local[:, (2, 0, 1)] + (1.0, 2.0, 3.0), tol=tol)
         assert_allclose(supports, verts[supports_idx - geom.vert_start], tol=tol)

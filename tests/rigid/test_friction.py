@@ -6,6 +6,7 @@ from scipy.optimize import brentq
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -301,7 +302,7 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
     # Hold under the sustained push for 20 seconds
     for _ in range(2000):
         scene.step()
-        assert_equal(rigid_solver.collider.get_contacts()["link_a"], contacts_link_a)
+        assert_equal(rigid_solver.sim.get_system(Collider).get_contacts()["link_a"], contacts_link_a)
 
     # The floating boxes stay where the equilibrium put them. Drift is measured per contact, comparing each box against
     # the one supporting it and the first against the fixed wall, so that a slip is attributed to the contact where it
@@ -862,7 +863,7 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
     for i_step in range(N_STEPS):
         scene.step()
 
-        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=True)
+        contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=True)
         counts = [len(positions) for positions in contacts["position"]]
         # Contact 0 may select any tied support vertex. Perturbation and pruning must recover the same complete
         # manifold across rotated scenes regardless of that initial choice.

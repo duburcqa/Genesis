@@ -13,6 +13,8 @@ from scipy.spatial.qhull import QhullError
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils.misc import tensor_to_array
 
 from .conftest import ellipsoid_mjcf
@@ -474,7 +476,7 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
     scene.build()
 
     scene.step()
-    contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+    contacts = scene.sim.get_system(Collider).get_contacts(to_torch=False)
     normals = contacts["normal"]
     assert len(normals) > 0
     assert_allclose(np.abs(normals[..., 2]), 1, atol=1e2 * tol)
@@ -560,7 +562,7 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
     pairs_scale = np.linalg.norm(boxes_half, axis=-1).min(axis=-1)
     # Multi-contact detection tilts each box of a pair about its first contact by the perturbation angle. A point found
     # in the tilted pose moves by up to this angle times the diameter of its box, as does the overlap along any normal.
-    pairs_tol = 2.0 * scene.rigid_solver.collider._mc_perturbation * pairs_size
+    pairs_tol = 2.0 * scene.sim.get_system(Collider)._mc_perturbation * pairs_size
 
     links_pair_idx = np.full(scene.rigid_solver.n_links, -1)
     links_box_idx = np.full(scene.rigid_solver.n_links, -1)
@@ -641,11 +643,11 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
                         box.set_dofs_velocity(np.concatenate((vel_lin, np.random.normal(size=(N_ENVS, 3))), axis=-1))
                 boxes_pos[..., 1, :] = np.stack([tensor_to_array(box_b.get_pos()) for _, box_b in pairs_boxes], axis=1)
 
-                scene.rigid_solver.collider.clear()
-                scene.rigid_solver.collider.detection()
+                scene.sim.get_system(Collider).clear()
+                scene.sim.get_system(Collider).detection()
             else:
                 scene.step()
-            contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+            contacts = scene.sim.get_system(Collider).get_contacts(to_torch=False)
             offsets = boxes_pos[..., 1, :] - boxes_pos[..., 0, :]
             axes_depth = np.where(is_axis_valid, axes_support - np.abs(axes @ offsets[..., None])[..., 0], np.inf)
             pairs_depth = axes_depth.min(axis=-1)
@@ -761,8 +763,8 @@ def test_box_contact_true_penetration(show_viewer, tol):
         box_2.set_pos(gu.transform_by_quat(offsets_local, quats))
         box_2.set_quat(quats)
 
-        scene.rigid_solver.collider.clear()
-        scene.rigid_solver.collider.detection()
+        scene.sim.get_system(Collider).clear()
+        scene.sim.get_system(Collider).detection()
         contacts = box_1.get_contacts(with_entity=box_2)
         is_contact_valid = tensor_to_array(contacts["valid_mask"])
         penetrations = tensor_to_array(contacts["penetration"])
@@ -964,7 +966,7 @@ def test_box_stacks_stability(detection, show_viewer, tol):
             piles_boxes_pos = [np.stack([tensor_to_array(box.get_pos()) for box in boxes]) for *_, boxes in piles]
             piles_boxes_quat = [np.stack([tensor_to_array(box.get_quat()) for box in boxes]) for *_, boxes in piles]
             scene.step()
-            contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+            contacts = scene.sim.get_system(Collider).get_contacts(to_torch=False)
             for i_pile, (scale, _, base, boxes) in enumerate(piles):
                 rest_depth, boxes_size = piles_rest_depth[i_pile], piles_boxes_size[i_pile]
                 boxes_pos_rest, boxes_up_axis = piles_boxes_pos_rest[i_pile], piles_boxes_up_axis[i_pile]
@@ -1059,7 +1061,7 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                             corners_pair_dist = np.linalg.norm(patch[:, None] - pair_pos, axis=-1)
                             corners_dist = corners_pair_dist.min(axis=-1, initial=np.inf)
                             pair_scale = np.linalg.norm(links_half[[i_lower, i_upper], i_b], axis=-1).min()
-                            corners_tol = scene.rigid_solver.collider._mc_tolerance * pair_scale
+                            corners_tol = scene.sim.get_system(Collider)._mc_tolerance * pair_scale
                             assert (corners_dist[is_pressed & is_kept] < corners_tol).all()
 
                         # Otherwise, detection reports only a few points per pair, so their hull only has to span the
@@ -1165,7 +1167,7 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     hull_depth = -ConvexHull((finger_verts[:, None] - lamp_verts).reshape((-1, 3))).equations[:, 3].max()
 
     scene.step()
-    contacts = scene.rigid_solver.collider.get_contacts()
+    contacts = scene.sim.get_system(Collider).get_contacts()
     is_box = contacts["geom_a"] == box.geoms[0].idx
     assert_allclose((contacts["normal"][is_box] @ face_normal).abs(), 1.0, tol=tol)
     is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
@@ -1427,7 +1429,7 @@ def test_contact_pruning(gjk_collision, show_viewer):
         # contact's dominant axial direction (this scene's normals are nearly axial, so axis + sign is enough; we
         # don't need to be fully generic). Redundant (interior or hull-edge-midpoint) contacts and >2-collinear
         # contacts both indicate the pruning kernel left work undone.
-        contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+        contacts = scene.sim.get_system(Collider).get_contacts(to_torch=False)
         for i_b in range(scene.n_envs):
             positions = contacts["position"][i_b]
             normals = contacts["normal"][i_b]
@@ -1601,7 +1603,7 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
     # spike above it occasionally in fp32, so it only has to be ideal at least once.
     for _ in range(NUM_CHECKS):
         scene.step()
-        contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+        contacts = scene.sim.get_system(Collider).get_contacts(to_torch=False)
         geom_a, geom_b = contacts["geom_a"], contacts["geom_b"]
         penetration = contacts["penetration"]
         normal_z = contacts["normal"][:, 2]
@@ -1688,7 +1690,7 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
         scene.step()
     for _ in range(300):
         scene.step()
-        n_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
+        n_contacts = scene.sim.get_system(Collider).collider_state.n_contacts.to_numpy()
         assert n_contacts.all()
         if model_name.startswith("side_by_side"):
             assert (n_contacts >= 4).all()
@@ -1791,12 +1793,12 @@ def test_num_contact_overflow(
         assert ("The initial state is invalid" in log_text) is is_warned_by_build
     if is_warned_by_build:
         assert error_pattern in log_text
-    assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
+    assert scene.sim.get_system(Collider).collider_config.has_prunable_contacts
 
     # Contact budget as documented for 'RigidOptions.max_contacts' (32 contact points per link pair floored at 512),
     # each contact point taking 4 constraint rows under the default pyramidal friction cone.
     solver = scene.rigid_solver
-    collider_info = solver.collider.collider_info
+    collider_info = solver.sim.get_system(Collider).collider_info
     if max_contacts is None:
         n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
         expected_max_contacts = max(32 * n_link_pairs, 512)
@@ -1810,7 +1812,7 @@ def test_num_contact_overflow(
         + 6 * solver.n_candidate_equalities_
         + rigid_options.max_dynamic_constraints
     )
-    assert solver.constraint_solver.len_constraints == expected_len_constraints
+    assert solver.sim.get_system(ConstraintSolver).len_constraints == expected_len_constraints
 
     # An error flagged by a step raises at the beginning of the next step on CPU, and at worst of the one after it on
     # GPU, where the check may not block, so an error flagged by the first step raises within that many steps. The
@@ -1889,8 +1891,8 @@ def test_filter_neutral_self_collisions(show_viewer):
     eq_obj1id = scene.rigid_solver.dyn_info.equalities.eq_obj1id.to_numpy()[: scene.rigid_solver.n_equalities, 0]
     eq_obj2id = scene.rigid_solver.dyn_info.equalities.eq_obj2id.to_numpy()[: scene.rigid_solver.n_equalities, 0]
 
-    scene.rigid_solver.collider.detection()
-    contacts_data = scene.rigid_solver.collider.get_contacts()
+    scene.sim.get_system(Collider).detection()
+    contacts_data = scene.sim.get_system(Collider).get_contacts()
     assert ((contacts_data["link_a"] == 12) & (contacts_data["link_b"] == 0)).any()
 
     for i in range(2):
@@ -2110,8 +2112,8 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     # The ball is a sphere seated in the top ring's hole, so every ball contact normal must point radially
     ball_geoms_idx = {geom.idx for geom in ball.geoms}
     ball_center = np.atleast_2d(tensor_to_array(ball.get_pos()))[0]
-    solver.collider.detection()
-    contacts = solver.collider.get_contacts(to_torch=False)
+    solver.sim.get_system(Collider).detection()
+    contacts = solver.sim.get_system(Collider).get_contacts(to_torch=False)
     geom_a, geom_b = contacts["geom_a"], contacts["geom_b"]
     position, normal, penetration = contacts["position"], contacts["normal"], contacts["penetration"]
     for i in range(len(geom_a)):
@@ -2129,7 +2131,7 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
         steps = []
         for _ in range(N_STEPS):
             scene.step()
-            contacts = solver.collider.get_contacts(to_torch=False)
+            contacts = solver.sim.get_system(Collider).get_contacts(to_torch=False)
             geom_a, geom_b = contacts["geom_a"], contacts["geom_b"]
             position, normal, penetration = contacts["position"], contacts["normal"], contacts["penetration"]
             contact_order = tuple(
@@ -2206,7 +2208,7 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
     assert set(geoms_root_idx[arm_geoms].tolist()) == set(geoms_root_idx[hand_geoms].tolist())
 
     # The palm overlaps the non-adjacent a2 link at qpos0, so the neutral-overlap check masks this cross-entity pair.
-    collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()
+    collision_pair_idx = scene.sim.get_system(Collider).collider_info.collision_pair_idx.to_numpy()
     a2_geom = arm.get_link("a2").geoms[0].idx
     palm_geom = hand.get_link("palm").geoms[0].idx
     assert_equal(collision_pair_idx[a2_geom, palm_geom], -1)

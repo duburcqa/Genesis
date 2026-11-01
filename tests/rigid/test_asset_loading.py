@@ -9,6 +9,7 @@ from PIL import Image
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.ext import urdfpy
 from genesis.utils import urdf as uu
 from genesis.utils.misc import get_assets_dir, qd_to_numpy, tensor_to_array
@@ -2102,7 +2103,7 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
         box.attach(hand, "right_finger")
 
     # Make sure that collision between hand base link and franka attachment point has been filtered out as adjacent
-    collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()
+    collision_pair_idx = scene.sim.get_system(Collider).collider_info.collision_pair_idx.to_numpy()
     assert collision_pair_idx[franka.get_link("attachment").idx, hand.base_link_idx] == -1
 
     with pytest.raises(gs.GenesisException):

@@ -12,6 +12,7 @@ except ImportError:
 
 import genesis as gs
 from genesis.engine.couplers.ipc_coupler.data import COUPLING_TYPE
+from genesis.engine.solvers.rigid.collider import Collider
 
 from .utils import (
     get_ipc_rigid_links_idx,
@@ -272,9 +273,9 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
 
     scene.build()
     assert scene.sim is not None
-    assert scene.sim.rigid_solver.collider is not None
+    assert scene.sim.get_system(Collider) is not None
 
-    pair_idx = scene.sim.rigid_solver.collider._collision_pair_idx
+    pair_idx = scene.sim.get_system(Collider)._collision_pair_idx
 
     # Collect geom indices for entities that should retain rigid solver pairs
     rigid_kept_geoms = {geom.idx for geom in entity.geoms} - ipc_excluded_geoms

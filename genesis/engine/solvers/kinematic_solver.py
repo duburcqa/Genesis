@@ -178,9 +178,7 @@ class KinematicSolver(Solver):
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
-        self.collider = None
         self._ik_scratch: IKScratch | None = None
-        self.constraint_solver = None
 
         self.qpos = None
 

@@ -605,18 +605,13 @@ class Simulator(RBC):
     def checkpointed_systems(self) -> list[System]:
         """
         The Systems a checkpoint holds the data of: the active solvers, then the other Systems holding data now.
-
-        The data of a part belongs to the data of the System holding it (see 'System.parts').
         """
-        parts = [part for system in self._systems for part in system.parts]
         return [
             *self._active_solvers,
             *[
                 system
                 for system in self._systems
-                if not isinstance(system, Solver)
-                and all([system is not part for part in parts])
-                and next(iter(system.data), None) is not None
+                if not isinstance(system, Solver) and next(iter(system.data), None) is not None
             ],
         ]
 

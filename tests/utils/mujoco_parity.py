@@ -11,6 +11,8 @@ import scipy.sparse.csgraph
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics, kernel_update_acc
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
@@ -537,15 +539,15 @@ def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev
     a friction pyramid whichever tangent the engines label first, and the limit rows. The reference acceleration and
     the row velocity separate rows sharing a jacobian, such as the two sides of a bilateral constraint.
     """
-    gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]
+    gs_n_constraints = gs_sim.sim.get_system(ConstraintSolver).constraint_state.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
-    gs_jac = gs_sim.rigid_solver.constraint_solver.jac.to_numpy()[:gs_n_constraints, :, 0]
+    gs_jac = gs_sim.sim.get_system(ConstraintSolver).constraint_state.jac.to_numpy()[:gs_n_constraints, :, 0]
     mj_jac = mj_sim.data.efc_J.reshape([mj_n_constraints, -1])
     gs_jac_dofs, mj_jac_dofs = gs_jac[:, gs_dofs_idx], mj_jac[:, mj_dofs_idx]
-    gs_efc_D = gs_sim.rigid_solver.constraint_solver.efc_D.to_numpy()[:gs_n_constraints, 0]
+    gs_efc_D = gs_sim.sim.get_system(ConstraintSolver).constraint_state.efc_D.to_numpy()[:gs_n_constraints, 0]
     mj_efc_D = mj_sim.data.efc_D
-    gs_efc_aref = gs_sim.rigid_solver.constraint_solver.aref.to_numpy()[:gs_n_constraints, 0]
+    gs_efc_aref = gs_sim.sim.get_system(ConstraintSolver).constraint_state.aref.to_numpy()[:gs_n_constraints, 0]
     mj_efc_aref = mj_sim.data.efc_aref
 
     cost = np.abs(gs_jac_dofs[:, None] - mj_jac_dofs[None]).max(axis=-1) / tol
@@ -614,17 +616,17 @@ def check_mujoco_data_consistency(
     mj_qfrc_actuator = mj_sim.data.qfrc_actuator
     assert_allclose(gs_qfrc_actuator, mj_qfrc_actuator[mj_dofs_idx], tol=tol)
 
-    gs_n_contacts = gs_sim.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0]
+    gs_n_contacts = gs_sim.sim.get_system(Collider).collider_state.n_contacts.to_numpy()[0]
     mj_n_contacts = mj_sim.data.ncon
     assert gs_n_contacts == mj_n_contacts, f"contact count differs: gs={gs_n_contacts} mj={mj_n_contacts}"
-    gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]
+    gs_n_constraints = gs_sim.sim.get_system(ConstraintSolver).constraint_state.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
 
     efc_atol, qvel_atol = _compute_efc_tolerances(mj_sim, tol)
 
     if gs_n_constraints and not ignore_constraints:
-        gs_contact_pos = gs_sim.rigid_solver.collider.collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
+        gs_contact_pos = gs_sim.sim.get_system(Collider).collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
         mj_contact_pos = mj_sim.data.contact.pos
         # Sort based on the axis with the largest variation
         max_var_axis = 0
@@ -639,12 +641,12 @@ def check_mujoco_data_consistency(
         gs_sidx = np.argsort(gs_contact_pos[:, max_var_axis])
         mj_sidx = np.argsort(mj_contact_pos[:, max_var_axis])
         assert_allclose(gs_contact_pos[gs_sidx], mj_contact_pos[mj_sidx], tol=tol)
-        gs_contact_normal = gs_sim.rigid_solver.collider.collider_state.contact_data.normal.to_numpy()[
+        gs_contact_normal = gs_sim.sim.get_system(Collider).collider_state.contact_data.normal.to_numpy()[
             :gs_n_contacts, 0
         ]
         mj_contact_normal = -mj_sim.data.contact.frame[:, :3]
         assert_allclose(gs_contact_normal[gs_sidx], mj_contact_normal[mj_sidx], tol=tol)
-        gs_penetration = gs_sim.rigid_solver.collider.collider_state.contact_data.penetration.to_numpy()[
+        gs_penetration = gs_sim.sim.get_system(Collider).collider_state.contact_data.penetration.to_numpy()[
             :gs_n_contacts, 0
         ]
         mj_penetration = -mj_sim.data.contact.dist
@@ -654,16 +656,20 @@ def check_mujoco_data_consistency(
             gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, qvel_prev=qvel_prev, tol=tol, efc_atol=efc_atol
         )
 
-        gs_efc_force = gs_sim.rigid_solver.constraint_solver.efc_force.to_numpy()[:gs_n_constraints, 0]
+        gs_efc_force = gs_sim.sim.get_system(ConstraintSolver).constraint_state.efc_force.to_numpy()[
+            :gs_n_constraints, 0
+        ]
         mj_efc_force = mj_sim.data.efc_force
         assert_allclose(gs_efc_force[gs_sidx], mj_efc_force[mj_sidx], atol=efc_atol, rtol=tol)
 
         # Solver statistics of the last iteration, per island (both engines solve per island, see build_genesis_sim),
         # matched through the MuJoCo island of the island's first dof. A Genesis island without any constraint has no
         # MuJoCo counterpart (its dofs sit outside every MuJoCo island) and is skipped.
-        gs_constraint_solver = gs_sim.rigid_solver.constraint_solver
+        gs_constraint_solver = gs_sim.sim.get_system(ConstraintSolver)
         gs_island_state = gs_constraint_solver.constraint_state.island
-        gs_grad = qd_to_numpy(gs_constraint_solver.grad, transpose=True)[0, : gs_sim.rigid_solver.n_dofs]
+        gs_grad = qd_to_numpy(gs_constraint_solver.constraint_state.grad, transpose=True)[
+            0, : gs_sim.rigid_solver.n_dofs
+        ]
         gs_islands_inertia = qd_to_numpy(gs_island_state.inertia, transpose=True)[0]
         gs_islands_ls_improvement = qd_to_numpy(gs_island_state.ls_improvement, transpose=True)[0]
         gs_n_islands = qd_to_numpy(gs_island_state.n_islands)[0]
@@ -686,18 +692,18 @@ def check_mujoco_data_consistency(
             gs_improvement = gs_scale * gs_islands_ls_improvement[gs_island]
             mj_improvement = mj_sim.data.solver.improvement[mj_stat]
 
-            # Note that 'constraint_solver.active' refers to whether the quadratic part of a constraint is active,
+            # Note that 'constraint_state.active' refers to whether the quadratic part of a constraint is active,
             # unlike Mujoco that defines 'nactive' as the number of active constraints regardless of its type.
             # In practice, this only makes a difference if frictionloss is enabled. Middle-zone (slipping) elliptic
             # cone rows are excluded from the per-row quadratic (handled as a coupled block) yet count as active in
             # Mujoco's stat, which engages a cone as a whole; counting every row of a cone that carries any force
             # translates Genesis's convention into Mujoco's.
-            gs_counted = gs_constraint_solver.active.to_numpy()[:gs_n_constraints, 0].copy()
-            gs_n_cone = gs_constraint_solver.n_constraints_cone.to_numpy()[0]
+            gs_counted = gs_constraint_solver.constraint_state.active.to_numpy()[:gs_n_constraints, 0].copy()
+            gs_n_cone = gs_constraint_solver.constraint_state.n_constraints_cone.to_numpy()[0]
             if gs_n_cone:
                 gs_nef = (
-                    gs_constraint_solver.n_constraints_equality.to_numpy()[0]
-                    + gs_constraint_solver.n_constraints_frictionloss.to_numpy()[0]
+                    gs_constraint_solver.constraint_state.n_constraints_equality.to_numpy()[0]
+                    + gs_constraint_solver.constraint_state.n_constraints_frictionloss.to_numpy()[0]
                 )
                 rows_per_contact = gs_sim.rigid_solver.rigid_config.rows_per_contact
                 gs_cone_rows = slice(gs_nef, gs_nef + gs_n_cone)
@@ -747,7 +753,7 @@ def check_mujoco_data_consistency(
 
     # Acceleration pre- VS post-implicit damping gs_qacc_post = gs_sim.rigid_solver.dyn_state.dofs.acc.to_numpy()[:, 0]
     if gs_n_constraints:
-        gs_qacc_pre = gs_sim.rigid_solver.constraint_solver.qacc.to_numpy()[:, 0]
+        gs_qacc_pre = gs_sim.sim.get_system(ConstraintSolver).constraint_state.qacc.to_numpy()[:, 0]
     else:
         gs_qacc_pre = gs_qacc_smooth
     mj_qacc_pre = mj_sim.data.qacc
@@ -870,10 +876,10 @@ def simulate_and_check_mujoco_consistency(
     # Substituting MuJoCo's double-precision reference acceleration right before each solve makes both engines
     # minimize the same problem, keeping the solver comparison exact; the row pairing still validates Genesis's own
     # assembled values beforehand. MuJoCo steps first in the loop below, so its rows describe the same state.
-    constraint_solver = gs_sim.rigid_solver.constraint_solver
+    constraint_solver = gs_sim.sim.get_system(ConstraintSolver)
 
     def solve_on_mujoco_aref(*args):
-        if constraint_solver.n_constraints.to_numpy()[0]:
+        if constraint_solver.constraint_state.n_constraints.to_numpy()[0]:
             efc_atol, _ = _compute_efc_tolerances(mj_sim, tol)
             gs_sidx, mj_sidx = _pair_constraint_rows(
                 gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, qvel_prev=qvel_prev, tol=tol, efc_atol=efc_atol
@@ -896,7 +902,9 @@ def simulate_and_check_mujoco_consistency(
             # Keep Mujoco and Genesis simulation in sync to avoid drift over time
             mj_sim.data.qpos[mj_qs_idx] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
             mj_sim.data.qvel[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
-            mj_sim.data.qacc_warmstart[mj_dofs_idx] = gs_sim.rigid_solver.constraint_solver.qacc_ws.to_numpy()[:, 0]
+            mj_sim.data.qacc_warmstart[mj_dofs_idx] = gs_sim.sim.get_system(
+                ConstraintSolver
+            ).constraint_state.qacc_ws.to_numpy()[:, 0]
             mj_sim.data.qacc_smooth[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.acc_smooth.to_numpy()[:, 0]
 
             # Backup current velocity

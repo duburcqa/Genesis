@@ -83,6 +83,36 @@ def func_wakeup_island(
 
 
 @qd.func
+def func_wakeup_island_held_by_links(
+    i_la: int,
+    i_lb: int,
+    i_b: int,
+    links_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    hibernation_state: HibernationState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Wake the island of the link that the pair of links (i_la, i_lb) holds to one of the links of env i_b given.
+
+    The other link of a pair holding one of the given links is the sleeper, whose whole island wakes (see
+    func_wakeup_island). A pair holding none of them wakes nothing.
+    """
+    for i_l_ in range(links_idx.shape[0]):
+        i_l = links_idx[i_l_]
+        i_sleeper = -1
+        if i_la == i_l:
+            i_sleeper = i_lb
+        elif i_lb == i_l:
+            i_sleeper = i_la
+        if i_sleeper >= 0:
+            if dyn_state.links.is_hibernated[i_sleeper, i_b]:
+                i_is = hibernation_state.links_island_idx[i_sleeper, i_b]
+                func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.func
 def func_wakeup_link(
     i_l: int,
     i_b: int,

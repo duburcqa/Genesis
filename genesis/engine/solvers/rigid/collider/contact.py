@@ -10,12 +10,15 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
+from genesis.engine.solvers.base_solver import func_flag_error
+from genesis.engine.solvers.rigid.abd.misc import func_wakeup_island_held_by_links
 from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     DynInfo,
     DynState,
     GJKState,
+    HibernationState,
     RigidErrorCode,
     RigidInfo,
 )
@@ -172,35 +175,18 @@ def func_collider_reset_env(
     i_b: int,
     collider_state: ColliderState,
     collider_config: qd.template(),
-    cache_only: qd.template(),
 ):
     """Drop what the collision detection of env i_b carries over from the previous steps.
 
-    The cache of contact normals and penetrations warm-starts the next detection. Unless 'cache_only', the next
-    detection also runs as the first one.
+    The cache of contact normals and penetrations warm-starts the next detection, which runs as the first one.
     """
-    if qd.static(not cache_only):
-        collider_state.first_time[i_b] = True
+    collider_state.first_time[i_b] = True
 
     # The contact cache is only held for the convex-convex pairs (see ContactCache in rigid/data.py)
     if qd.static(collider_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
             collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
-
-
-@qd.kernel(fastcache=True)
-def collider_kernel_reset(
-    envs_idx: qd.types.ndarray(),
-    collider_state: ColliderState,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-    cache_only: qd.template(),
-):
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=cache_only)
 
 
 @qd.func
@@ -368,7 +354,7 @@ def kernel_collider_clear(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+        func_collider_reset_env(i_b, collider_state, collider_config)
         func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
         # Only the contacts of the sleepers remain listed, so their links alone keep a contact force
         for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -389,12 +375,41 @@ def kernel_masked_collider_clear(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+            func_collider_reset_env(i_b, collider_state, collider_config)
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             # See 'kernel_collider_clear'
             for i_l in range(dyn_state.links.contact_force.shape[0]):
                 dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
             func_add_contacts_force_to_links(i_b, dyn_state, collider_state)
+
+
+@qd.kernel(fastcache=True)
+def kernel_wake_up_entities_resting_on_links(
+    links_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    dyn_state: DynState,
+    hibernation_state: HibernationState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Wake up the hibernated islands resting on the specified links, through the contacts a sleeper keeps.
+
+    A fixed link never sleeps, so moving it wakes nothing by itself, while the links resting on it would stay asleep
+    where it was (see n_contacts_hibernated in rigid/data.py, and kernel_wake_up_entities_held_by_links in
+    abd/accessor.py for the links constrained to it).
+    """
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        for i_e in range(collider_state.n_contacts_hibernated[i_b]):
+            i_c = collider_state.contact_sort_idx[i_e, i_b]
+            i_la = collider_state.contact_data.link_a[i_c, i_b]
+            i_lb = collider_state.contact_data.link_b[i_c, i_b]
+            func_wakeup_island_held_by_links(
+                i_la, i_lb, i_b, links_idx, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
+            )
 
 
 @qd.kernel(fastcache=True)
@@ -509,7 +524,7 @@ def func_reserve_contacts(
         if not qd.static(use_atomic):
             collider_state.n_contacts[i_b] = i_c + n_contacts
     else:
-        errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
+        func_flag_error(i_b, RigidErrorCode.OVERFLOW_COLLISION_PAIRS, errno)
     return i_c
 
 
@@ -546,7 +561,7 @@ def func_set_contact(
     # bodies pass through each other just as silently.
     residual = contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
     if not qd_isfinite(residual):
-        errno[i_b] = errno[i_b] | RigidErrorCode.INVALID_CONTACT_NAN
+        func_flag_error(i_b, RigidErrorCode.INVALID_CONTACT_NAN, errno)
 
     # b to a
     collider_state.contact_data.geom_a[i_c, i_b] = i_ga
@@ -1527,7 +1542,7 @@ def func_clamp_prune_contacts(
         # increase 'max_contacts'.
         if collider_state.n_contacts[i_b] > max_contacts:
             collider_state.n_contacts[i_b] = max_contacts
-            errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CONTACTS
+            func_flag_error(i_b, RigidErrorCode.OVERFLOW_CONTACTS, errno)
 
 
 @qd.func
@@ -1955,7 +1970,7 @@ def func_clamp_prune_contacts_coop(
         if i_thread == 0:
             if collider_state.n_contacts[i_b] > max_contacts:
                 collider_state.n_contacts[i_b] = max_contacts
-                errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CONTACTS
+                func_flag_error(i_b, RigidErrorCode.OVERFLOW_CONTACTS, errno)
 
 
 @qd.kernel

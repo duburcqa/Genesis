@@ -43,11 +43,13 @@ from genesis.utils.misc import (
 
 from .abd.accessor import (
     ConstraintType,
+    kernel_add_dynamic_constraint,
     kernel_clear_dynamic_constraints,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
     kernel_control_dofs_velocity,
+    kernel_delete_dynamic_constraint,
     kernel_get_links_acc,
     kernel_get_links_vel,
     kernel_set_dofs_act_bias,
@@ -95,6 +97,7 @@ from .abd.forward_dynamics import (
     update_qvel,
 )
 from .abd.forward_kinematics import (
+    func_update_geom_aabbs,
     kernel_forward_kinematics_links_geoms,
     kernel_masked_forward_kinematics_links_geoms,
     kernel_update_cartesian_space,
@@ -118,24 +121,6 @@ from .abd.misc import (
     kernel_wakeup_coupled_links,
 )
 from ..base_solver import GravityMixin, TimeBasedMixin
-from .collider import Collider
-from .constraint import ConstraintSolver
-from .constraint.backward import (
-    kernel_accumulate_constraint_solver_grads,
-    kernel_load_dL_dqacc_from_acc_grad,
-    kernel_manual_add_collision_constraints_bw,
-    kernel_manual_add_equality_constraints_bw,
-    kernel_manual_add_frictionloss_constraints_bw,
-    kernel_manual_add_joint_limit_constraints_bw,
-    kernel_manual_update_actuator_force_bw,
-)
-from .constraint.solver import (
-    kernel_add_dynamic_constraint,
-    kernel_add_equality_constraints,
-    kernel_add_inequality_constraints,
-    kernel_delete_dynamic_constraint,
-    kernel_resolve_post,
-)
 from ..kinematic_solver import (
     KinematicSolver,
     _balanced_variant_mapping,
@@ -208,13 +193,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
     _entities: list[RigidEntity] = gs.List()
-    # The parts the solver builds, which other Systems may depend on (see 'assemble_systems')
-    collider: Collider | None
-    constraint_solver: ConstraintSolver | None
-
-    # The constraint force of a substep, after its smooth acceleration, and its integration, which another System may
-    # take over (see 'System.relocations')
-    constraints = Phase()
+    # The constraint force of a substep, after its smooth acceleration: the contacts its collision detection finds,
+    # then the solve of the constraints (see RigidCollisionDetection and RigidConstraints). Its backward pass reverses
+    # the solve before the detection.
+    constraints = Phase("detection", "solve")
+    constraints_backward = Phase("solve", "detection")
+    # The integration of a substep, which another System may take over (see 'System.relocations')
     integration = Phase()
 
     # ------------------------------------------------------------------------------------
@@ -308,8 +292,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             else:
                 options.impratio = 1.0
 
-        self.collider = None
-        self.constraint_solver = None
         self._weight_scratch: WeightScratch | None = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
@@ -352,8 +334,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
         # Compute the pose of every link in the neutral configuration and update the pose of all the geometries,
         # including inactive variants for a given env: the step updates the active variant alone, so this is the only
-        # pose the inactive ones get (see func_update_geoms_link). The collider built next relies on these updated poses
-        # to determine whether some collision pairs must be filtered out.
+        # pose the inactive ones get (see func_update_geoms_link). The collider relies on these updated poses to
+        # determine whether some collision pairs must be filtered out.
         kernel_update_cartesian_space(
             self.dyn_state,
             self.dyn_info,
@@ -388,37 +370,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                     link_slice_np[0] = len(links_idx)
                     link_slice.from_numpy(link_slice_np)
 
-        self._init_collider()
-        self._init_constraint_solver()
-        collider_info = self.collider.collider_info
         self.register_errors(
             self.errno,
             {
-                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
-                    "Exceeding max number of broad phase candidate contact pairs "
-                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
-                    "option 'multiplier_collision_broad_phase'."
-                ),
-                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
-                    f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
-                    "Please increase the value of RigidSolver's option 'max_collision_pairs'."
-                ),
-                RigidErrorCode.OVERFLOW_CONTACTS: (
-                    f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
-                    "supported by the constraint solver. Please increase the value of RigidSolver's option "
-                    "'max_contacts'."
-                ),
-                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
-                    "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
-                    "filter this pair out via 'contype'/'conaffinity'."
-                ),
-                RigidErrorCode.INVALID_CONTACT_NAN: (
-                    "Collision detection reported a contact whose position, normal or penetration is not finite. This "
-                    "is a solver-internal error, please report it."
-                ),
-                RigidErrorCode.INVALID_FORCE_NAN: (
-                    "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
-                ),
                 RigidErrorCode.INVALID_ACC_NAN: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
                     "the controls given to the dofs."
@@ -1302,12 +1256,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.rigid_config,
             )
 
-    def _init_collider(self):
-        self.collider = Collider(self)
-
-    def _init_constraint_solver(self):
-        self.constraint_solver = ConstraintSolver(self)
-
     @mutates(derived=True)
     def update_forward_pos(self):
         """Run forward kinematics over links and geoms if they are not already up to date for the current pose.
@@ -1339,8 +1287,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         updates the forward kinematics in full and places every geom, whose poses the reversal reads.
         """
         is_recording = self._requires_grad and is_recording_launches()
-        if self.collider is not None:
-            self.collider._contact_data_cache.clear()
         self.substep_phase(**self.get_substep_values(is_recording))
 
     def get_substep_values(self, is_recording: bool) -> dict:
@@ -1351,92 +1297,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             force_update_all_geoms=is_recording,
             is_backward=False,
             noslip=self._options.noslip_iterations > 0,
-            collider_config=None if self.collider is None else self.collider.collider_config,
         )
-
-    def _constraint_force_grad(self):
-        """
-        Reverse the smooth acceleration together with the constraint solve, through the implicit function theorem.
-
-        Without constraints, the acceleration is the smooth one alone. Otherwise, dL_dqacc is seeded from acc.grad, the
-        adjoint solve runs, its outputs are folded back into the autodiff grad fields, then the constraint-row assembly
-        is reversed.
-        """
-        if self._disable_constraint:
-            kernel_manual_compute_actuator_force_bw(self.dyn_state, self.rigid_config)
-            kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
-            return
-
-        constraint_state = self.constraint_solver.constraint_state
-        # The actuator effort sums the frictionloss forces of the solve with the applied and passive efforts
-        kernel_manual_update_actuator_force_bw(
-            self.dyn_state, constraint_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
-        kernel_manual_compute_actuator_force_bw(self.dyn_state, self.rigid_config)
-        # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise (see
-        # "Pure read-write data accessors on the hot path" in CLAUDE.md). gs.use_zerocopy encodes every zero-copy
-        # availability condition for these buffers (standalone dense allocations with DLPack-supported dtypes; the
-        # platform gates live in gs.init). torch (MPS) and quadrants do not share a compute stream on Metal, so the
-        # writes are flushed before the next kernels (see set_base_links_quat).
-        if gs.use_zerocopy:
-            acc_grad = qd_to_torch(self.dyn_state.dofs.acc.grad, copy=False)
-            dL_dqacc = qd_to_torch(constraint_state.dL_dqacc, copy=False)
-            dL_dqacc.copy_(acc_grad)
-            acc_grad.zero_()
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-        else:
-            kernel_load_dL_dqacc_from_acc_grad(self.dyn_state, constraint_state, self.rigid_config)
-        self.constraint_solver.backward()
-        if gs.use_zerocopy:
-            force_grad = qd_to_torch(self.dyn_state.dofs.force.grad, copy=False)
-            dL_dforce = qd_to_torch(constraint_state.dL_dforce, copy=False)
-            force_grad.add_(dL_dforce)
-            mass_mat_grad = qd_to_torch(self.rigid_info.mass_mat.grad, copy=False)
-            dL_dM = qd_to_torch(constraint_state.dL_dM, copy=False)
-            mass_mat_grad.add_(dL_dM)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-        else:
-            kernel_accumulate_constraint_solver_grads(
-                self.dyn_state, constraint_state, self.rigid_info, self.rigid_config
-            )
-
-        kernel_manual_add_equality_constraints_bw(
-            self.dyn_state, constraint_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
-        kernel_manual_add_frictionloss_constraints_bw(
-            self.dyn_state, constraint_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
-
-        if self._enable_collision:
-            collider_state = self.collider.collider_state
-            qd_zero_grad(collider_state.contact_data.pos)
-            qd_zero_grad(collider_state.contact_data.normal)
-            qd_zero_grad(collider_state.contact_data.penetration)
-            # One flush for the zeroing batch; see qd_zero_grad in misc.py.
-            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-                torch.mps.synchronize()
-            kernel_manual_add_collision_constraints_bw(
-                self.dyn_state,
-                collider_state,
-                constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-            self.collider.backward_narrowphase()
-
-        if self._enable_joint_limit:
-            kernel_manual_add_joint_limit_constraints_bw(
-                self.dyn_state,
-                self.collider.collider_state,
-                constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                enable_collision=self._enable_collision,
-            )
 
     def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
         func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
@@ -1542,14 +1403,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             dynamics.add(kernel_wakeup_coupled_links)
         dynamics.add(kernel_update_forward_kinematics, kernel_forward_dynamics_without_qacc)
         # The smooth acceleration and the constraint solve are reversed together, through the implicit function
-        # theorem, which spares reversing the factor of the mass matrix
-        if not self._disable_constraint:
-            self.constraints.add(kernel_add_equality_constraints)
-        if self._enable_collision:
-            self.constraints.add(self.collider.detection)
-        if not self._disable_constraint:
-            self.constraints.add(kernel_add_inequality_constraints, self.constraint_solver.solve, kernel_resolve_post)
-        constraint_force = Phase(is_graph=is_graph, backward=self._constraint_force_grad)
+        # theorem, which spares reversing the factor of the mass matrix. The actuator effort the smooth acceleration
+        # starts from is reversed last, once the solve sent its own gradient to it. Without a constraint solve, the
+        # acceleration is the smooth one alone.
+        self.constraints_backward.add(kernel_manual_compute_actuator_force_bw)
+        if self._disable_constraint:
+            self.constraints_backward.add(kernel_manual_compute_qacc_bw)
+        constraint_force = Phase(is_graph=is_graph, backward=self.constraints_backward)
         constraint_force.add(kernel_compute_smooth_qacc, self.constraints)
         # Position, velocity and acceleration must be consistent when computing the accelerations of the links, which
         # is only possible right before the integration: the acceleration at the end of the substep is unknown, as it
@@ -1614,13 +1474,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     def set_state(self, f, state, envs_idx=None, *, partial: bool = False) -> None:
         if not self.is_active:
             return
-
-        if partial:
-            self.collider.reset(envs_idx)
-            self.constraint_solver.reset(envs_idx)
-        else:
-            self.collider.clear(envs_idx)
-            self.constraint_solver.clear(envs_idx)
 
         if (
             not self._requires_grad
@@ -1756,15 +1609,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     def data(self) -> Iterator[DataItem | ConfigItem]:
         yield from super().data
         yield from iter_data(self, "hibernation_state")
-        yield from self.collider.data
-        yield from self.constraint_solver.data
 
     def _restart(self):
-        """Clear the contact and equality caches of the last query and re-arm the once-per-step propeller guard of
-        each drone (see 'set_propellers_rpm').
-        """
-        self.collider._contact_data_cache.clear()
-        self.constraint_solver._eq_const_info_cache.clear()
+        """Re-arm the once-per-step propeller guard of each drone (see 'set_propellers_rpm')."""
         for entity in self.entities:
             if isinstance(entity, DroneEntity):
                 entity._prev_prop_t = -1
@@ -1783,9 +1630,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     @mutates(StateChange.GEOMETRY, links="links_idx")
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
-        if self.constraint_solver is not None:
-            self.constraint_solver.reset(envs_idx)
-
         if links_idx is None:
             links_idx = self._base_links_idx
 
@@ -1894,7 +1738,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         envs_idx,
                         self.dyn_state,
                         self.hibernation_state,
-                        self.collider.collider_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -1910,18 +1753,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
-        # See 'set_qpos'
-        if self.collider is not None:
-            self.collider.clear(envs_idx)
-
     def set_links_quat(self, quat, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_quat' instead.")
 
     @mutates(StateChange.GEOMETRY, links="links_idx")
     def set_base_links_quat(self, quat, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
-        if self.constraint_solver is not None:
-            self.constraint_solver.reset(envs_idx)
-
         if links_idx is None:
             links_idx = self._base_links_idx
 
@@ -2040,7 +1876,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         envs_idx,
                         self.dyn_state,
                         self.hibernation_state,
-                        self.collider.collider_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -2055,10 +1890,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         else:
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
-
-        # See 'set_qpos'
-        if self.collider is not None:
-            self.collider.clear(envs_idx)
 
     @mutates(StateChange.MODEL)
     def _set_links_info(self, values, links_idx, name, envs_idx=None, *, scale_inertia=False):
@@ -2247,9 +2078,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
-        if self.constraint_solver is not None:
-            self.constraint_solver.reset(envs_idx)
-
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             qs_mask = indices_to_mask(qs_idx)
@@ -2304,11 +2132,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         else:
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
-
-        # The contacts and their forces were found at the previous pose, so they are cleared, the sleepers alone keeping
-        # theirs (see 'Collider.clear')
-        if self.collider is not None:
-            self.collider.clear(envs_idx)
 
     @mutates(StateChange.MODEL)
     def set_global_sol_params(self, sol_params):
@@ -2491,8 +2314,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
-        self.constraint_solver.reset(envs_idx)
-
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
             position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
@@ -2511,10 +2332,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.clear_errno(envs_idx)
 
         self._update_forward_kinematics(envs_idx)
-
-        # See 'set_qpos'
-        if self.collider is not None:
-            self.collider.clear(envs_idx)
 
     def _wake_dofs(self, dofs_idx, envs_idx):
         # Revive any hibernated entity owning these (already sanitized) dofs before a state is written to them;
@@ -3393,13 +3210,35 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         return gs.List(equality for entity in self._entities for equality in entity.equalities)
 
 
-# The coupling forces other solvers apply to the links, and the velocity update of a contact solver taking over the
-# constraints (see RigidConstraints)
-RigidSolver.api(func_apply_coupling_force, update_qvel, update_qacc_from_qvel_delta)
+# The coupling forces other solvers apply to the links, the velocity update of a contact solver taking over the
+# constraints (see RigidConstraints), and the bounding boxes of the geoms the broad phase of the collision detection
+# refreshes
+RigidSolver.api(func_apply_coupling_force, update_qvel, update_qacc_from_qvel_delta, func_update_geom_aabbs)
+
+
+class RigidCollisionDetection(System):
+    """A System detecting the contacts of the rigid geoms in every substep, before the constraints are solved."""
+
+    slot = RigidSolver.constraints.detection
+    detect_contacts: Stages
+
+
+class RigidCollisionDetectionBackward(System):
+    """A System reversing its detection of the contacts of the rigid geoms, once the solve of the constraints is."""
+
+    slot = RigidSolver.constraints_backward.detection
+    detect_contacts_backward: Stages
 
 
 class RigidConstraints(System):
-    """A System solving the constraints of the rigid entities in place of the rigid solver, whose constraint force it drops."""
+    """A System solving the constraints of the rigid entities in every substep, the contacts detected included."""
 
-    slot = RigidSolver.constraints
+    slot = RigidSolver.constraints.solve
     solve_rigid_constraints: Stages
+
+
+class RigidConstraintsBackward(System):
+    """A System reversing its solve of the constraints of the rigid entities."""
+
+    slot = RigidSolver.constraints_backward.solve
+    solve_rigid_constraints_backward: Stages

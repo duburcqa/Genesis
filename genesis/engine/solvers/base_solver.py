@@ -689,3 +689,16 @@ def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(),
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]
+
+
+@qd.func
+def func_flag_error(i_b: int, code: int, errno: qd.Tensor):
+    """Flag an error of env i_b in the error flags of a solver.
+
+    A System registering its errors on a solver raises them there through this func, part of the API of every solver
+    (see 'Solver.register_errors').
+    """
+    errno[i_b] = errno[i_b] | code
+
+
+Solver.api(func_flag_error)

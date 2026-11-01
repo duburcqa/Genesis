@@ -10,6 +10,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
@@ -713,7 +714,7 @@ class RasterizerContext:
         Returns one (env_idx, mesh, seg_key) triple per arrow (see TrackedNodeList).
         """
         # Extract all contact information at once
-        contacts_info_all = self.sim.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+        contacts_info_all = self.sim.get_system(Collider).get_contacts(as_tensor=False, to_torch=False)
 
         arrows = []
         for env_i in envs_idx:

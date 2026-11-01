@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import numpy as np
 import torch
@@ -24,7 +24,7 @@ from genesis.engine.bvh import (
     func_no_filter,
     get_bvh_data,
 )
-from genesis.engine.pipeline import Coupler, Phase
+from genesis.engine.pipeline import Coupler, Enabled, Phase, RoleOf, System, register_system
 from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
     VERTICES,
@@ -39,6 +39,8 @@ from genesis.engine.solvers.rigid.abd.forward_dynamics import (
     update_qvel,
 )
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.engine.solvers.rigid.data import (
     DOFS,
     DofsState,
@@ -55,7 +57,7 @@ from genesis.engine.solvers.rigid.data import (
     VertsInfo,
     VertsState,
 )
-from genesis.engine.solvers.rigid.rigid_solver import RigidConstraints, RigidSolver
+from genesis.engine.solvers.rigid.rigid_solver import RigidCollisionDetection, RigidConstraints, RigidSolver
 from genesis.engine.step import Coupling, Integration, Preparation
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
@@ -550,11 +552,15 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
     # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
     is_differentiable = False
 
-    # SAP solves the constraints of the rigid entities itself, on the velocities their dynamics reach: their velocities
-    # are predicted in place of their constraint force, and their acceleration is recovered from the velocities the
-    # couplings solve before they are integrated
+    # SAP solves the constraints of the rigid entities itself, its own contacts included, on the velocities their
+    # dynamics reach: their velocities are predicted in place of their constraint force, and their acceleration is
+    # recovered from the velocities the couplings solve before they are integrated
     rigid_integration = Phase()
-    relocations = {RigidSolver.constraints: None, RigidSolver.integration: rigid_integration}
+    relocations = {
+        RoleOf(Collider, RigidCollisionDetection): None,
+        RoleOf(ConstraintSolver, RigidConstraints): None,
+        RigidSolver.integration: rigid_integration,
+    }
     solve_rigid_constraints = update_qvel
 
     # ------------------------------------------------------------------------------------
@@ -829,9 +835,6 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
             leaves_map = np.zeros((n_rigid_volume_elems, 4), dtype=gs.np_int)
             leaves_map[:, 0] = volume_elems_geom_idx
             queries.rigid_tet_filter.leaves_map.from_numpy(leaves_map)
-            queries.rigid_tet_filter.pairs_table.from_numpy(
-                qd_to_numpy(rigid_solver.collider.collider_info.collision_pair_idx)
-            )
 
         options = self.options
         self.sap_info = SAPInfo(
@@ -1087,6 +1090,32 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
     def active_solvers(self):
         """All the active solvers managed by the scene's simulator."""
         return self.sim.active_solvers
+
+    @property
+    def has_rigid_tet_contacts(self) -> bool:
+        """Whether the coupler detects the contacts between the tetrahedra of the rigid geoms."""
+        return any(
+            [
+                isinstance(handler, RigidRigidTetContactHandler) and handler.is_active
+                for handler in self.contact_handlers
+            ]
+        )
+
+
+@register_system
+class SAPRigidContactFilter(System):
+    """Restrict the contacts between the tetrahedra of the rigid geoms to the pairs of geoms the collider lets collide."""
+
+    def __init__(
+        self, sap_coupler: Annotated[SAPCoupler, Enabled("has_rigid_tet_contacts")], collider: Collider
+    ) -> None:
+        self._sap_coupler = sap_coupler
+        self._collider = collider
+
+    def build(self) -> None:
+        # The filter holds its own copy of the table the collider reads (see BVHQueryFilter)
+        pairs_table = self._sap_coupler.sap_state.queries.rigid_tet_filter.pairs_table
+        pairs_table.from_numpy(qd_to_numpy(self._collider.collider_info.collision_pair_idx))
 
 
 # ------------------------------------------------------------------------------------

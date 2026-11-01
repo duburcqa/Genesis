@@ -339,7 +339,6 @@ def kernel_manual_add_joint_limit_constraints_bw(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    enable_collision: qd.template(),
 ):
     """Manual reverse of the joint rows of `add_limit_constraints`. See the section header
     above for the shared `n_con` layout and upstream-grad conventions.
@@ -388,7 +387,7 @@ def kernel_manual_add_joint_limit_constraints_bw(
         n_con_counter = gs.qd_int(
             constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
         )
-        if qd.static(enable_collision):
+        if qd.static(rigid_config.enable_collision):
             n_con_counter = n_con_counter + gs.qd_int(
                 (collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b])
                 * qd.static(rigid_config.rows_per_contact)

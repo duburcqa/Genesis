@@ -10,6 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.base_solver import func_flag_error
 from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
@@ -311,7 +312,7 @@ def func_broad_phase_geoms(
                                     collider_state.broad_collision_pairs[n_broad, i_b][0] = i_ga
                                     collider_state.broad_collision_pairs[n_broad, i_b][1] = i_gb
                                 else:
-                                    errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS
+                                    func_flag_error(i_b, RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS, errno)
 
 
 @qd.func

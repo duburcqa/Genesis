@@ -9,6 +9,7 @@ import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -190,8 +191,8 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
         max_v_seen = max(max_v_seen, float(np.abs(v).max()))
     assert max_v_seen < 0.05, f"velocity spike during settling: max |v| = {max_v_seen:.4f}"
 
-    contacts = scene.rigid_solver.collider.collider_state.contact_data
-    n_contacts = int(scene.rigid_solver.collider.collider_state.n_contacts[0])
+    contacts = scene.sim.get_system(Collider).collider_state.contact_data
+    n_contacts = int(scene.sim.get_system(Collider).collider_state.n_contacts[0])
     normals = qd_to_numpy(contacts.normal, transpose=True)
     positions = qd_to_numpy(contacts.pos, transpose=True)
     ga = qd_to_numpy(contacts.geom_a, transpose=True)
@@ -771,7 +772,7 @@ def test_convexify(euler, show_viewer, gjk_collision):
 
     # Make sure that all the geometries in the scene are convex
     assert gs_sim.rigid_solver.dyn_info.geoms.is_convex.to_numpy().all()
-    assert not gs_sim.rigid_solver.collider.collider_config.has_nonconvex_nonterrain
+    assert not gs_sim.sim.get_system(Collider).collider_config.has_nonconvex_nonterrain
 
     # There should be only one geometry for the apple as it can be convexify without decomposition,
     # but for the others it is hard to tell... Let's use some reasonable guess.
@@ -957,7 +958,7 @@ def test_many_objects_collision(convexify, show_viewer, tol):
         ang = scene.rigid_solver.get_links_ang()
         vel_lin_all.append(com_vel.norm(dim=-1))
         vel_ang_all.append(ang.norm(dim=-1))
-        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=True)
+        contacts = scene.sim.get_system(Collider).get_contacts(as_tensor=True)
         link_a, link_b = contacts["link_a"], contacts["link_b"]
         pos, force = contacts["position"], contacts["force"]
         v_rel = (

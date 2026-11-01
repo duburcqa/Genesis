@@ -7,6 +7,7 @@ import pytest
 import trimesh
 
 import genesis as gs
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -61,7 +62,7 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
             ),
         )
     scene.build()
-    constraint_solver = scene.sim.rigid_solver.constraint_solver
+    constraint_solver = scene.sim.get_system(ConstraintSolver)
     assert constraint_solver.constraint_state.island.constraint_id.shape[0] >= constraint_solver.len_constraints
 
 
@@ -127,7 +128,7 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
 
     # The partition is rebuilt inside every step; inspect the one the solver actually used this step.
     solver = scene.rigid_solver
-    island_state = solver.constraint_solver.constraint_state.island
+    island_state = solver.sim.get_system(ConstraintSolver).constraint_state.island
 
     island_idx = qd_to_numpy(solver.hibernation_state.links_island_idx)
     island_of = {
@@ -174,7 +175,7 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     island_dof_start = qd_to_numpy(island_state.dof_slices.start)
     dof_id = qd_to_numpy(island_state.dof_id)
     island_constraint_n = qd_to_numpy(island_state.constraint_slices.n)
-    n_constraints = qd_to_numpy(solver.constraint_solver.constraint_state.n_constraints)
+    n_constraints = qd_to_numpy(solver.sim.get_system(ConstraintSolver).constraint_state.n_constraints)
     alone_dofs = list(range(box_alone.dof_start, box_alone.dof_start + box_alone.n_dofs))
     for i_env in range(island_idx.shape[1]):
         n = n_islands[i_env]
@@ -228,7 +229,7 @@ def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
     dual_arm.set_dofs_position([[0.9, -0.8], [0.1, 0.0]])
     dual_arm_welded.set_dofs_position([[0.9, -0.8], [0.1, 0.0]], dofs_idx_local=[6, 7])
-    n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
+    n_islands = scene.sim.get_system(ConstraintSolver).constraint_state.island.n_islands
 
     # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
     # then on. Until the arms touch the twins fall alike, at rest they settle alike up to the compliance of the weld.
@@ -279,7 +280,7 @@ def test_partition_track_changes(show_viewer, n_envs):
     scene.build(n_envs=n_envs)
 
     # The step rebuilds the partition; read the island count the solver actually used this step.
-    island_state = scene.rigid_solver.constraint_solver.constraint_state.island
+    island_state = scene.sim.get_system(ConstraintSolver).constraint_state.island
 
     scene.step()
     assert_equal(qd_to_numpy(island_state.n_islands), 2)
@@ -1197,7 +1198,7 @@ def test_hibernation_repartitioning(show_viewer, n_envs):
     solver = scene.sim.rigid_solver
     box1_idx = box1._idx_in_solver
     box2_idx = box2._idx_in_solver
-    island_state = solver.constraint_solver.constraint_state.island
+    island_state = solver.sim.get_system(ConstraintSolver).constraint_state.island
 
     def asleep(idx):
         return qd_to_numpy(solver.dyn_state.entities.is_hibernated, idx).all()

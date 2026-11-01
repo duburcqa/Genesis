@@ -2863,7 +2863,12 @@ class RigidEntity(KinematicEntity):
         contact_info : dict
             The contact information.
         """
-        contact_data = self._solver.collider.get_contacts(as_tensor=True, to_torch=True, is_padded=is_padded)
+        # See 'detect_collision'
+        from genesis.engine.solvers.rigid.collider import Collider
+
+        contact_data = self._solver.sim.get_system(Collider).get_contacts(
+            as_tensor=True, to_torch=True, is_padded=is_padded
+        )
         n_contacts = contact_data["n_contacts"] if is_padded else None
         if is_padded:
             del contact_data["n_contacts"]

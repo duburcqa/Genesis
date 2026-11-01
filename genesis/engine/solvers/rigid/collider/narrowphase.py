@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 import genesis.utils.simt as su
+from genesis.engine.solvers.base_solver import func_flag_error
 from genesis.engine.solvers.rigid.collider.mpr import MPRInfo, MPRState
 from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
 from genesis.engine.solvers.rigid.data import (
@@ -3917,12 +3918,12 @@ def _func_multicontact_write(
         # atomic_add below may still overshoot; in that case we write only the contacts that fit and set errno.
         max_candidate_contacts = collider_info.max_candidate_contacts[None]
         if collider_state.n_contacts[i_b] + n_con > max_candidate_contacts:
-            errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
+            func_flag_error(i_b, RigidErrorCode.OVERFLOW_COLLISION_PAIRS, errno)
         else:
             start_idx = qd.atomic_add(collider_state.n_contacts[i_b], n_con)
             n_con = qd.math.clamp(max_candidate_contacts - start_idx, 0, n_con)
             if n_con == 0:
-                errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
+                func_flag_error(i_b, RigidErrorCode.OVERFLOW_COLLISION_PAIRS, errno)
             for i in range(n_con):
                 i_c = start_idx + i
                 pos_i = qd.Vector(
@@ -4838,7 +4839,7 @@ def func_narrow_phase_any_vs_terrain(
                         collider_state.work_queue.i_ga[i_work] = i_ga
                         collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
-                        errno[i_b] = errno[i_b] | RigidErrorCode.UNSUPPORTED_COLLISION_PAIR
+                        func_flag_error(i_b, RigidErrorCode.UNSUPPORTED_COLLISION_PAIR, errno)
 
         qd.loop_config(
             name="narrowphase_terrain",

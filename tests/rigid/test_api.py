@@ -8,6 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.states.solvers import RigidSolverState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
@@ -63,11 +64,11 @@ def test_data_accessor(n_envs, batched, tol):
     for _ in range(400):
         scene.step()
 
-        gs_n_contacts = gs_s.collider.collider_state.n_contacts.to_numpy()
+        gs_n_contacts = gs_s.sim.get_system(Collider).collider_state.n_contacts.to_numpy()
         assert len(gs_n_contacts) == max(n_envs, 1)
         for as_tensor in (False, True):
             for to_torch in (False, True):
-                contacts_info = gs_s.collider.get_contacts(as_tensor, to_torch)
+                contacts_info = gs_s.sim.get_system(Collider).get_contacts(as_tensor, to_torch)
                 for value in contacts_info.values():
                     if n_envs > 0:
                         assert n_envs == len(value)
@@ -97,11 +98,11 @@ def test_data_accessor(n_envs, batched, tol):
 
     # 'is_padded' returns a fixed capacity (independent of the live contact count) plus per-env 'n_contacts',
     # with the live prefix identical to the trimmed result, for every (as_tensor, to_torch) and batching.
-    capacity = max(gs_s.collider.collider_info.max_candidate_contacts[None], 1)
+    capacity = max(gs_s.sim.get_system(Collider).collider_info.max_candidate_contacts[None], 1)
     for as_tensor in (False, True):
         for to_torch in (False, True):
-            trimmed = gs_s.collider.get_contacts(as_tensor, to_torch, is_padded=False)
-            padded = gs_s.collider.get_contacts(as_tensor, to_torch, is_padded=True)
+            trimmed = gs_s.sim.get_system(Collider).get_contacts(as_tensor, to_torch, is_padded=False)
+            padded = gs_s.sim.get_system(Collider).get_contacts(as_tensor, to_torch, is_padded=True)
             assert "n_contacts" not in trimmed
             padded_counts = padded.pop("n_contacts")
             assert isinstance(padded_counts, torch.Tensor if to_torch else np.ndarray)

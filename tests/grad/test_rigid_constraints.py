@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils.misc import qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -169,7 +170,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
     )
     pair.scene_fd.reset()
     pair.scene_fd.step()
-    cs = pair.scene_fd.rigid_solver.constraint_solver.constraint_state
+    cs = pair.scene_fd.sim.get_system(ConstraintSolver).constraint_state
     assert (qd_to_torch(cs.n_constraints_frictionloss) == 1).all()
 
     # The joint slides then sticks, holding a gravity load below its frictionloss, and the loss reads its actuator force
@@ -218,7 +219,7 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_v
     )
     pair.scene_fd.reset()
     pair.scene_fd.step()
-    cs = pair.scene_fd.rigid_solver.constraint_solver.constraint_state
+    cs = pair.scene_fd.sim.get_system(ConstraintSolver).constraint_state
     assert (qd_to_torch(cs.n_constraints_equality) == n_rows).all()
     with pytest.raises(gs.GenesisException, match="Screw constraints are not supported yet"):
         pair.scene_ana.rigid_solver.add_screw_constraint(0, 1, axis=(0.0, 0.0, 1.0), pitch=0.0)
@@ -256,7 +257,7 @@ def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, show
     )
     pair.scene_fd.reset()
     pair.scene_fd.step()
-    cs = pair.scene_fd.rigid_solver.constraint_solver.constraint_state
+    cs = pair.scene_fd.sim.get_system(ConstraintSolver).constraint_state
     assert qd_to_torch(cs.n_constraints_equality)[0] == 10
     assert qd_to_torch(cs.n_constraints_frictionloss)[0] == 1
 

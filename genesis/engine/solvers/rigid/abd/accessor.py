@@ -16,8 +16,6 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.data import (
-    ColliderState,
-    ConstraintState,
     DynInfo,
     DynState,
     HibernationState,
@@ -25,7 +23,12 @@ from genesis.engine.solvers.rigid.data import (
 )
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
-from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
+from .misc import (
+    func_apply_link_external_wrench,
+    func_equality_links,
+    func_wakeup_island,
+    func_wakeup_island_held_by_links,
+)
 
 
 class ConstraintType(IntEnum):
@@ -181,6 +184,111 @@ def kernel_clear_dynamic_constraints(
 
 
 @qd.kernel(fastcache=True)
+def kernel_add_dynamic_constraint(
+    link1_idx: int,
+    link2_idx: int,
+    anchor_link_idx: int,
+    envs_idx: qd.types.ndarray(),
+    eq_type: int,
+    anchor_pos: qd.types.ndarray(),
+    eq_data_tail: qd.types.ndarray(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Register a constraint between two links, taking their current relative pose as its reference.
+
+    The anchor is the point anchor_pos given in the frame of link anchor_link_idx. The constraint data holds:
+    [0:3]   the anchor, in the frame of link2
+    [3:6]   the anchor, in the frame of link1
+    [6:10]  the orientation of link2 relative to link1
+    [10:18] the type-specific entries of eq_data_tail (see func_equality_links and func_screw_frame)
+    Every selected env has an equality slot left (see RigidSolver._add_dynamic_constraint).
+    """
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        i_e = dyn_state.n_equalities[i_b]
+        anchor = gu.qd_transform_by_trans_quat(
+            gs.qd_vec3([anchor_pos[0], anchor_pos[1], anchor_pos[2]]),
+            dyn_state.links.pos[anchor_link_idx, i_b],
+            dyn_state.links.quat[anchor_link_idx, i_b],
+        )
+        pos1 = gu.qd_inv_transform_by_trans_quat(
+            anchor, dyn_state.links.pos[link1_idx, i_b], dyn_state.links.quat[link1_idx, i_b]
+        )
+        pos2 = gu.qd_inv_transform_by_trans_quat(
+            anchor, dyn_state.links.pos[link2_idx, i_b], dyn_state.links.quat[link2_idx, i_b]
+        )
+        relpose = gu.qd_quat_mul(
+            gu.qd_inv_quat(dyn_state.links.quat[link1_idx, i_b]), dyn_state.links.quat[link2_idx, i_b]
+        )
+
+        dyn_info.equalities.eq_type[i_e, i_b] = eq_type
+        dyn_info.equalities.eq_obj1id[i_e, i_b] = link1_idx
+        dyn_info.equalities.eq_obj2id[i_e, i_b] = link2_idx
+        for i_3 in qd.static(range(3)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_3] = pos2[i_3]
+            dyn_info.equalities.eq_data[i_e, i_b][i_3 + 3] = pos1[i_3]
+        for i_4 in qd.static(range(4)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_4 + 6] = relpose[i_4]
+        for i_t in qd.static(range(8)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_t + 10] = eq_data_tail[i_t]
+
+        dyn_info.equalities.sol_params[i_e, i_b] = qd.Vector(
+            [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
+        )
+
+        dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] + 1
+
+
+@qd.kernel(fastcache=True)
+def kernel_delete_dynamic_constraint(
+    link1_idx: int,
+    link2_idx: int,
+    envs_idx: qd.types.ndarray(),
+    eq_type: int,
+    dyn_state: DynState,
+    hibernation_state: HibernationState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        for i_e in range(rigid_info.n_equalities[None], dyn_state.n_equalities[i_b]):
+            link_a = dyn_info.equalities.eq_obj1id[i_e, i_b]
+            link_b = dyn_info.equalities.eq_obj2id[i_e, i_b]
+            if dyn_info.equalities.eq_type[i_e, i_b] == eq_type and (
+                (link_a == link1_idx and link_b == link2_idx) or (link_a == link2_idx and link_b == link1_idx)
+            ):
+                # Nothing else wakes a link held asleep by the deleted constraint (see the hibernation pass of
+                # func_build_islands)
+                if qd.static(rigid_config.use_hibernation):
+                    for i_side in range(2):
+                        i_l = link_a
+                        if i_side == 1:
+                            i_l = link_b
+                        if dyn_state.links.is_hibernated[i_l, i_b]:
+                            i_is = hibernation_state.links_island_idx[i_l, i_b]
+                            func_wakeup_island(
+                                i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
+                            )
+                if i_e < dyn_state.n_equalities[i_b] - 1:
+                    # Swap-remove must move the whole constraint record, not just its type,
+                    # otherwise the surviving slot keeps the deleted constraint's links/data.
+                    i_last = dyn_state.n_equalities[i_b] - 1
+                    dyn_info.equalities.eq_type[i_e, i_b] = dyn_info.equalities.eq_type[i_last, i_b]
+                    dyn_info.equalities.eq_obj1id[i_e, i_b] = dyn_info.equalities.eq_obj1id[i_last, i_b]
+                    dyn_info.equalities.eq_obj2id[i_e, i_b] = dyn_info.equalities.eq_obj2id[i_last, i_b]
+                    dyn_info.equalities.eq_data[i_e, i_b] = dyn_info.equalities.eq_data[i_last, i_b]
+                    dyn_info.equalities.sol_params[i_e, i_b] = dyn_info.equalities.sol_params[i_last, i_b]
+                dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] - 1
+
+
+@qd.kernel(fastcache=True)
 def kernel_wake_up_entities_by_links(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -216,42 +324,25 @@ def kernel_wake_up_entities_held_by_links(
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
     hibernation_state: HibernationState,
-    collider_state: ColliderState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Wake up the hibernated islands resting on or constrained to the specified links.
+    """Wake up the hibernated islands constrained to the specified links.
 
     A fixed link never sleeps, so moving it wakes nothing by itself, while the links it holds would stay asleep where
-    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in rigid/data.py) and the
-    equality constraints.
+    it was. Those it holds through an equality constraint are found here, and those resting on it by the collider (see
+    kernel_wake_up_entities_resting_on_links in collider/contact.py).
     """
     n_links = rigid_info.links_tree_idx.shape[0]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        n_contacts_hibernated = collider_state.n_contacts_hibernated[i_b]
-        for i_e in range(n_contacts_hibernated + dyn_state.n_equalities[i_b]):
-            i_la = -1
-            i_lb = -1
-            if i_e < n_contacts_hibernated:
-                i_c = collider_state.contact_sort_idx[i_e, i_b]
-                i_la = collider_state.contact_data.link_a[i_c, i_b]
-                i_lb = collider_state.contact_data.link_b[i_c, i_b]
-            else:
-                i_la, i_lb = func_equality_links(i_e - n_contacts_hibernated, i_b, n_links, dyn_info, rigid_config)
-            for i_l_ in range(links_idx.shape[0]):
-                i_l = links_idx[i_l_]
-                i_sleeper = -1
-                if i_la == i_l:
-                    i_sleeper = i_lb
-                elif i_lb == i_l:
-                    i_sleeper = i_la
-                if i_sleeper >= 0:
-                    if dyn_state.links.is_hibernated[i_sleeper, i_b]:
-                        i_is = hibernation_state.links_island_idx[i_sleeper, i_b]
-                        func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
+        for i_e in range(dyn_state.n_equalities[i_b]):
+            i_la, i_lb = func_equality_links(i_e, i_b, n_links, dyn_info, rigid_config)
+            func_wakeup_island_held_by_links(
+                i_la, i_lb, i_b, links_idx, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
+            )
 
 
 @qd.kernel(fastcache=True)

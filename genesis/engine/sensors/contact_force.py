@@ -2,10 +2,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Type
 
 import numpy as np
-import quadrants as qd
 import torch
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.options.sensors import Contact as ContactSensorOptions
 from genesis.options.sensors import ContactForce as ContactForceSensorOptions
 from genesis.utils.geom import inv_transform_by_quat, qd_inv_transform_by_quat, transform_by_quat
@@ -191,7 +193,7 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
     @classmethod
     def _update_raw_data(cls, shared_context: None, shared_metadata: ContactSensorMetadata, raw_data_T: torch.Tensor):
         assert shared_metadata.solver is not None
-        all_contacts = shared_metadata.solver.collider.get_contacts(as_tensor=True, to_torch=True)
+        all_contacts = shared_metadata.solver.sim.get_system(Collider).get_contacts(as_tensor=True, to_torch=True)
         link_a, link_b = all_contacts["link_a"], all_contacts["link_b"]
         if link_a.shape[-1] == 0:
             raw_data_T.zero_()
@@ -284,7 +286,7 @@ class ContactForceSensor(
         assert shared_metadata.solver is not None
 
         # Note that forcing GPU sync to operate on `slice(0, max(n_contacts))` is usually faster overall.
-        all_contacts = shared_metadata.solver.collider.get_contacts(as_tensor=True, to_torch=True)
+        all_contacts = shared_metadata.solver.sim.get_system(Collider).get_contacts(as_tensor=True, to_torch=True)
         force, link_a, link_b = all_contacts["force"], all_contacts["link_a"], all_contacts["link_b"]
         if shared_metadata.solver.n_envs == 0:
             force, link_a, link_b = force[None], link_a[None], link_b[None]

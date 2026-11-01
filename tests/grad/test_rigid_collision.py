@@ -5,6 +5,8 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils import set_random_seed
 from genesis.utils.geom import R_to_quat
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
@@ -343,7 +345,7 @@ def test_contact_detection_jacobian_matches_fd():
         ),
     )
     scene.build()
-    collider = scene.sim.rigid_solver.collider
+    collider = scene.sim.get_system(Collider)
 
     box1.set_quat(R_to_quat(gs.euler_to_R([np.deg2rad(3.0), np.deg2rad(3.0), np.deg2rad(3.0)])))
     box0_init_pos = box0.get_pos().clone()
@@ -483,7 +485,7 @@ def test_constraint_solver_backward_matches_fd():
     )
     scene.build()
     rigid_solver = scene._sim.rigid_solver
-    constraint_solver = rigid_solver.constraint_solver
+    constraint_solver = rigid_solver.sim.get_system(ConstraintSolver)
 
     for _ in range(25):
         scene.step()
@@ -529,7 +531,7 @@ def test_constraint_solver_backward_matches_fd():
         constraint_solver_resolve()
         # Collapse to a Python scalar right away: the reduction reads a zero-copy view of qacc, and a deferred
         # evaluation (MPS is lazy) would otherwise run only after the next call overwrites the buffer in place.
-        return float(((qd_to_torch(constraint_solver.qacc) - target_qacc) ** 2).mean())
+        return float(((qd_to_torch(constraint_solver.constraint_state.qacc) - target_qacc) ** 2).mean())
 
     init_input_mass = qd_to_numpy(rigid_solver.rigid_info.mass_mat, copy=True)
     init_input_jac = qd_to_numpy(constraint_solver.constraint_state.jac, copy=True)
@@ -538,11 +540,11 @@ def test_constraint_solver_backward_matches_fd():
     init_input_force = qd_to_numpy(rigid_solver.dyn_state.dofs.qf_smooth, copy=True)
 
     set_random_seed(0)
-    init_output_qacc = qd_to_torch(constraint_solver.qacc)
+    init_output_qacc = qd_to_torch(constraint_solver.constraint_state.qacc)
     target_qacc = torch.from_numpy(np.random.randn(*init_output_qacc.shape)).to(device=gs.device)
     target_qacc = target_qacc * init_output_qacc.abs().mean()
 
-    output_qacc = qd_to_torch(constraint_solver.qacc, copy=True).requires_grad_(True)
+    output_qacc = qd_to_torch(constraint_solver.constraint_state.qacc, copy=True).requires_grad_(True)
     loss = ((output_qacc - target_qacc) ** 2).mean()
     dL_dqacc = tensor_to_array(torch.autograd.grad(loss, output_qacc)[0])
     constraint_solver.constraint_state.dL_dqacc.from_numpy(dL_dqacc)

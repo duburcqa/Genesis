@@ -13,7 +13,7 @@ from genesis.engine.boundaries.boundaries import CubeBoundaryBox
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.pipeline import Inline, Stages, System
-from genesis.engine.solvers.base_solver import FRAMES
+from genesis.engine.solvers.base_solver import FRAMES, func_flag_error
 from genesis.engine.solvers.particle_solver import PARTICLES, ParticlesRender, VVertsRender, VVertsSupport
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
@@ -1032,7 +1032,7 @@ def kernel_flag_non_finite_pos(f: int, mpm_state: MPMState, errno: qd.Tensor):
     """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
     for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
         if not qd_isfinite(mpm_state.particles.pos[f, i_p, i_b]):
-            errno[i_b] = errno[i_b] | MPMErrorCode.INVALID_PARTICLE_NAN
+            func_flag_error(i_b, MPMErrorCode.INVALID_PARTICLE_NAN, errno)
 
 
 @qd.kernel(fastcache=True)

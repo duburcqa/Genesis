@@ -9,6 +9,8 @@ from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
 from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
@@ -523,7 +525,7 @@ def test_energy_analytical_and_conservation(
         pe_a.append(sphere_a.get_potential_energy())
         ke_b.append(sphere_b.get_kinetic_energy())
         pe_b.append(sphere_b.get_potential_energy())
-        if impact_step < 0 and scene.rigid_solver.collider.collider_state.n_contacts.to_numpy().any():
+        if impact_step < 0 and scene.sim.get_system(Collider).collider_state.n_contacts.to_numpy().any():
             impact_step = i
     assert impact_step > 0
 
@@ -1109,9 +1111,9 @@ def test_cholesky_tiling(monkeypatch, tol):
 
         scene.step()
         assert not scene.rigid_solver.get_error_envs_mask().any()
-        assert (scene.rigid_solver.constraint_solver.constraint_state.n_constraints.to_numpy() > 0).all()
+        assert (scene.sim.get_system(ConstraintSolver).constraint_state.n_constraints.to_numpy() > 0).all()
 
-        Mgrad = scene.rigid_solver.constraint_solver.constraint_state.Mgrad.to_numpy()
+        Mgrad = scene.sim.get_system(ConstraintSolver).constraint_state.Mgrad.to_numpy()
         assert np.linalg.norm(Mgrad) > 5.0
         values.append(Mgrad)
 
@@ -1170,7 +1172,7 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
         )
     scene.build(n_envs=2)
     solver = scene.rigid_solver
-    constraint_state = solver.constraint_solver.constraint_state
+    constraint_state = solver.sim.get_system(ConstraintSolver).constraint_state
     dofs = solver.dyn_state.dofs
     assert solver.rigid_config.enable_tiled_island_seed == (n_grid > 0)
 

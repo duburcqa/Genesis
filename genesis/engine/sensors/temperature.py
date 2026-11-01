@@ -11,6 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.data import ColliderState, DynState
 from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions, TemperatureProperties
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
@@ -651,7 +652,7 @@ class TemperatureGridSensor(
         )
 
         # Contact area buffers
-        n_c_max = int(solver.collider.collider_info.max_candidate_contacts[None])
+        n_c_max = int(solver.sim.get_system(Collider).collider_info.max_candidate_contacts[None])
         self._shared_metadata.contact_area_buffer = torch.zeros(
             (n_c_max, solver._B), device=gs.device, dtype=gs.tc_float
         )
@@ -714,7 +715,7 @@ class TemperatureGridSensor(
             raw_data_T,
         )
         # 3) Contact heat transfer
-        collider_state = solver.collider.collider_state
+        collider_state = solver.sim.get_system(Collider).collider_state
         shared_metadata.contact_area_buffer.zero_()
         _kernel_compute_contact_areas(
             shared_metadata.contact_area_buffer,

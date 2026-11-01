@@ -7,7 +7,7 @@ terrain), and contact management.
 """
 
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import numpy as np
 import torch
@@ -21,14 +21,18 @@ import genesis.utils.geom as gu
 from genesis.engine.pipeline import Enabled, Phase, Stages, System, register_system
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
-from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, ColliderStaticConfig
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, ColliderStaticConfig, RigidErrorCode
+from genesis.engine.solvers.rigid.rigid_solver import (
+    RigidCollisionDetection,
+    RigidCollisionDetectionBackward,
+    RigidSolver,
+)
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
-    assign_indexed_tensor,
     get_gpu_core_count,
     get_gpu_cores_per_unit,
     has_zerocopy_view,
-    indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
     tensor_to_array,
@@ -40,12 +44,14 @@ from .broadphase import func_broad_phase
 from .constants import CCD_ALGORITHM_CODE, Layout, PerEnv, Queued, WithEPA, WithoutEPA
 from .contact import (
     collider_kernel_get_contacts,
-    collider_kernel_reset,
     func_clamp_prune_contacts,
     func_clamp_prune_contacts_coop,
+    func_contact_order_set,
+    func_promote_woken_contacts,
     func_set_upstream_grad,
     kernel_collider_clear,
     kernel_masked_collider_clear,
+    kernel_wake_up_entities_resting_on_links,
 )
 from .gjk import GJK
 from .mpr import MPR
@@ -61,20 +67,18 @@ from .narrowphase import (
 )
 from .support_field import SupportField
 
-if TYPE_CHECKING:
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
-
-
 NEUTRAL_COLLISION_RES_ABS = 0.01
 NEUTRAL_COLLISION_RES_REL = 0.05
 
 
-class Collider(System):
+@register_system
+class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     """
     Detect the contacts of the rigid geoms: their broad phase, the narrow phase of each family of pairs, the pruning.
 
     The stages of the detection are the Systems filling its slots (see Broadphase, Narrowphase and Pruning), which a
-    scene holds when it has pairs of their family.
+    scene holds when it has pairs of their family. A scene disabling the collisions holds the collider still, which
+    then detects no contact.
     """
 
     # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients runs the
@@ -91,9 +95,10 @@ class Collider(System):
     collider_info: ColliderInfo
     collider_state: ColliderState
 
-    def __init__(self, rigid_solver: "RigidSolver"):
+    def __init__(self, rigid_solver: RigidSolver) -> None:
         self._solver = rigid_solver
 
+    def build(self) -> None:
         self._mc_perturbation = 1e-3 if self._solver._enable_mujoco_compatibility else 5e-3
         self._mc_tolerance = 1e-3 if self._solver._enable_mujoco_compatibility else 1.5e-2
         self._box_MAXCONPAIR = 16
@@ -139,6 +144,79 @@ class Collider(System):
 
         # Make sure that the initial state is clean
         self.clear()
+
+        rigid_solver = self._solver
+        collider_info = self.collider_info
+        rigid_solver.register_errors(
+            rigid_solver.errno,
+            {
+                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                    "Exceeding max number of broad phase candidate contact pairs "
+                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
+                    "option 'multiplier_collision_broad_phase'."
+                ),
+                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                    f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
+                    "Please increase the value of RigidSolver's option 'max_collision_pairs'."
+                ),
+                RigidErrorCode.OVERFLOW_CONTACTS: (
+                    f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
+                    "supported by the constraint solver. Please increase the value of RigidSolver's option "
+                    "'max_contacts'."
+                ),
+                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                    "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
+                    "filter this pair out via 'contype'/'conaffinity'."
+                ),
+                RigidErrorCode.INVALID_CONTACT_NAN: (
+                    "Collision detection reported a contact whose position, normal or penetration is not finite. This "
+                    "is a solver-internal error, please report it."
+                ),
+            },
+        )
+
+        # The contacts and their forces were found at the previous pose, so a change of the geometry clears them, the
+        # sleepers alone keeping theirs (see 'clear'). The checkpoint of the collider is restored after that of the
+        # rigid solver, whose restore changes the geometry, so the contacts it holds are the ones that remain.
+        self._fixed_links_idx = np.array([link.idx for link in rigid_solver.links if link.is_fixed], dtype=gs.np_int)
+        rigid_solver.subscribe(Subscriber(frozenset((StateChange.GEOMETRY,)), callback=self._clear_moved))
+        self.detection.add(self._clear_contacts_readout)
+
+    @property
+    def detect_contacts(self) -> tuple[Callable, ...]:
+        """The detection of the contacts, which a scene disabling the collisions skips."""
+        return (self.detection,) if self._solver.rigid_config.enable_collision else ()
+
+    @property
+    def detect_contacts_backward(self) -> tuple[Callable, ...]:
+        """The reversal of the narrow phase, which a scene disabling the collisions skips."""
+        return (self.backward_narrowphase,) if self._solver.rigid_config.enable_collision else ()
+
+    def _clear_contacts_readout(self) -> None:
+        """Drop the readout of the contacts the last query cached, which the next detection invalidates."""
+        self._contact_data_cache.clear()
+
+    def _clear_moved(self, change: StateChange, envs_idx, links_idx: np.ndarray | None) -> None:
+        """Clear the contacts of the environments whose geometry changed, after waking the sleepers resting on moved fixed links.
+
+        A fixed link never sleeps, so the links resting on it would stay asleep where it was otherwise.
+        """
+        if self._solver.rigid_config.use_hibernation:
+            fixed_links_idx = self._fixed_links_idx
+            if links_idx is not None:
+                fixed_links_idx = np.intersect1d(links_idx, fixed_links_idx)
+            if fixed_links_idx.size:
+                kernel_wake_up_entities_resting_on_links(
+                    fixed_links_idx,
+                    self._solver._scene._sanitize_envs_idx(envs_idx),
+                    self._solver.dyn_state,
+                    self._solver.hibernation_state,
+                    self.collider_state,
+                    self._solver.dyn_info,
+                    self._solver.rigid_info,
+                    self._solver.rigid_config,
+                )
+        self.clear(envs_idx)
 
     @property
     def has_possible_pairs(self) -> bool:
@@ -805,30 +883,6 @@ class Collider(System):
             self.collider_info.terrain_scale.from_numpy(entity.terrain_scale)
             self.collider_info.terrain_xyz_maxmin.from_numpy(xyz_maxmin)
 
-    def reset(self, envs_idx=None, *, cache_only: bool = True) -> None:
-        self._contact_data_cache.clear()
-        if gs.use_zerocopy and self._contact_data is not None:
-            envs_mask = indices_to_mask(envs_idx)
-            if not cache_only:
-                first_time = qd_to_torch(self.collider_state.first_time, copy=False)
-                assign_indexed_tensor(first_time, envs_mask, True)
-
-            if self.collider_config.has_non_box_plane_convex_convex:
-                pairs_mask = (slice(None), *envs_mask)
-                normal = qd_to_torch(self.collider_state.contact_cache.normal, copy=False)
-                penetration = qd_to_torch(self.collider_state.contact_cache.penetration, copy=False)
-                assign_indexed_tensor(normal, pairs_mask, 0.0)
-                assign_indexed_tensor(penetration, pairs_mask, 0.0)
-
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-            return
-
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
-        collider_kernel_reset(
-            envs_idx, self.collider_state, self._solver.rigid_config, self.collider_config, cache_only
-        )
-
     def clear(self, envs_idx=None):
         """Remove the contacts of the environments 'envs_idx' (None for all of them), with their forces.
 
@@ -1070,6 +1124,11 @@ class Collider(System):
         )
 
 
+# The order of the contacts kept by the sleepers and of those of the islands woken, which the constraint solver keeps
+# when it builds its islands
+Collider.api(func_contact_order_set, func_promote_woken_contacts)
+
+
 @register_system
 class Broadphase(System):
     """Update the bounding boxes of the geoms, then find the pairs whose boxes overlap, the first detection stage."""
@@ -1077,7 +1136,7 @@ class Broadphase(System):
     slot = Collider.detection.broadphase
     detect: Stages
 
-    def __init__(self, collider: Collider, rigid_solver: "RigidSolver") -> None:
+    def __init__(self, collider: Collider, rigid_solver: RigidSolver) -> None:
         self._collider = collider
 
     @property
@@ -1108,7 +1167,7 @@ class ConvexConvexFirstContact(Narrowphase):
     def __init__(
         self,
         collider: Annotated[Collider, Enabled("has_convex_pairs", narrowphase_layout=Queued)],
-        rigid_solver: "RigidSolver",
+        rigid_solver: RigidSolver,
         mpr: MPR[Queued],
         gjk: GJK[Queued, WithoutEPA],
         support_field: SupportField,
@@ -1130,7 +1189,7 @@ class ConvexConvex[LayoutT: Layout](Narrowphase):
     def __init__(
         self,
         collider: Annotated[Collider, Enabled("has_convex_pairs", narrowphase_layout=LayoutT)],
-        rigid_solver: "RigidSolver",
+        rigid_solver: RigidSolver,
         mpr: MPR[LayoutT],
         gjk: GJK[LayoutT, WithEPA],
         support_field: SupportField,
@@ -1157,7 +1216,7 @@ class PrimitivePrimitive(Narrowphase):
     detect = func_narrow_phase_convex_specializations
 
     def __init__(
-        self, collider: Annotated[Collider, Enabled("has_primitive_pairs")], rigid_solver: "RigidSolver"
+        self, collider: Annotated[Collider, Enabled("has_primitive_pairs")], rigid_solver: RigidSolver
     ) -> None:
         pass
 
@@ -1171,7 +1230,7 @@ class ConvexTerrain(Narrowphase):
     def __init__(
         self,
         collider: Annotated[Collider, Enabled("has_terrain_pairs")],
-        rigid_solver: "RigidSolver",
+        rigid_solver: RigidSolver,
         mpr: MPR[Queued],
         support_field: SupportField,
     ) -> None:
@@ -1185,7 +1244,7 @@ class NonconvexNonconvex(Narrowphase):
     detect = func_narrow_phase_nonconvex_vs_nonterrain
 
     def __init__(
-        self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: "RigidSolver", sdf: SDF
+        self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: RigidSolver, sdf: SDF
     ) -> None:
         pass
 
@@ -1197,9 +1256,7 @@ class Pruning(System):
     slot = Collider.detection.pruning
     prune: Stages
 
-    def __init__(
-        self, collider: Annotated[Collider, Enabled("has_possible_pairs")], rigid_solver: "RigidSolver"
-    ) -> None:
+    def __init__(self, collider: Annotated[Collider, Enabled("has_possible_pairs")], rigid_solver: RigidSolver) -> None:
         self._collider = collider
         self._requires_grad = rigid_solver._requires_grad
 
