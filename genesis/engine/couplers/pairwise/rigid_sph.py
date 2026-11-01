@@ -33,7 +33,6 @@ def func_collide_with_rigid_geom_pressure(
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     rigid_config: qd.template(),
-    collider_config: qd.template(),
 ):
     """
     Return the velocity of a smoothed particle hydrodynamics (SPH) particle colliding with a coupled rigid geom.
@@ -42,9 +41,7 @@ def func_collide_with_rigid_geom_pressure(
     geom.
     """
     signed_dist = sdf.sdf_func_world(i_g, i_b, pos_world, geoms_state, geoms_info, sdf_info)
-    normal_rigid = sdf.sdf_func_normal_world(
-        i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-    )
+    normal_rigid = sdf.sdf_func_normal_world(i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info)
 
     # A larger coupling softness extends the influence of the geom further away from it
     influence = qd.min(qd.exp(-signed_dist / max(1e-10, geoms_info.coup_softness[i_g])), 1)
@@ -87,7 +84,6 @@ def kernel_sph_rigid(
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     rigid_config: qd.template(),
-    collider_config: qd.template(),
 ):
     """Collide the sorted smoothed particle hydrodynamics particles with the coupled rigid geoms.
 
@@ -112,7 +108,6 @@ def kernel_sph_rigid(
                         rigid_info,
                         sdf_info,
                         rigid_config,
-                        collider_config,
                     )
                     func_set_particle_vel(i_p, i_b, vel, sph_state.particles_reordered.vel)
 

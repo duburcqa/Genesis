@@ -57,7 +57,6 @@ def func_fem_rigid(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """
     Return the velocity of a surface vertex colliding with the coupled rigid geoms (see func_collide_with_rigid).
@@ -65,16 +64,7 @@ def func_fem_rigid(
     The mass of the element of its triangle is spread evenly over the vertices of the triangle.
     """
     return func_collide_with_rigid(
-        i_b,
-        pos,
-        vel,
-        mass / 3.0,
-        dyn_state.geoms,
-        dyn_state.links,
-        dyn_info.geoms,
-        rigid_info,
-        sdf_info,
-        collider_config,
+        i_b, pos, vel, mass / 3.0, dyn_state.geoms, dyn_state.links, dyn_info.geoms, rigid_info, sdf_info
     )
 
 

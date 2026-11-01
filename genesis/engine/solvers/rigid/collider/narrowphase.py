@@ -46,14 +46,7 @@ from .utils import func_closest_points_on_segments, func_is_discrete_geoms, func
 
 @qd.func
 def func_contact_sphere_sdf(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
-    collider_config: qd.template(),
+    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, sdf_info: SDFInfo
 ):
     is_col = False
     penetration = gs.qd_float(0.0)
@@ -67,14 +60,7 @@ def func_contact_sphere_sdf(
     if center_to_b_dist < sphere_radius:
         is_col = True
         normal = sdf.sdf_func_normal_world(
-            i_gb,
-            i_b,
-            sphere_center,
-            dyn_state.geoms,
-            dyn_info.geoms,
-            rigid_info,
-            sdf_info,
-            collider_config,
+            i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
         )
         penetration = sphere_radius - center_to_b_dist
         contact_pos = sphere_center - (sphere_radius - 0.5 * penetration) * normal
@@ -486,14 +472,7 @@ def func_add_polytope_vertex_contacts_sdf(
         grad_center = qd.Vector.zero(gs.qd_float, 3)
         if is_vert_kept:
             grad_center = sdf.sdf_func_grad_world_local(
-                i_gb,
-                center_a_world,
-                gb_pos,
-                gb_quat,
-                dyn_info.geoms,
-                rigid_info,
-                sdf_info,
-                collider_config,
+                i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
             )
         normal_center = gu.qd_normalize(grad_center, EPS)
         # When two comparably-sized bodies meet "across" each other (the crossed-thin-rod regime: A's center sits within
@@ -609,14 +588,7 @@ def func_add_polytope_vertex_contacts_sdf(
             if i_k * block_dim + tid < n_max and i_v >= 0:
                 vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ga_pos, ga_quat)
                 grad_v = sdf.sdf_func_grad_world_local(
-                    i_gb,
-                    vertex_pos,
-                    gb_pos,
-                    gb_quat,
-                    dyn_info.geoms,
-                    rigid_info,
-                    sdf_info,
-                    collider_config,
+                    i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
                 )
                 # Per-vertex grad magnitude classifies the local grid SDF regime.
                 # - Smoothed (|grad| < 0.5): trilinear interpolation has smoothed across a feature. The pen value is
@@ -1260,7 +1232,6 @@ def func_contact_vertex_sdf(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     is_col = False
     penetration = gs.qd_float(0.0)
@@ -1290,7 +1261,7 @@ def func_contact_vertex_sdf(
         center_a = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos, ga_quat)
         normal_sample = center_a if dyn_info.geoms.is_convex[i_ga] else contact_pos
         normal = sdf.sdf_func_normal_world_local(
-            i_gb, normal_sample, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
+            i_gb, normal_sample, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
         )
 
         # Shift contact_pos from the deepest vertex (interior side) by half the penetration along the outward normal
@@ -1314,7 +1285,6 @@ def func_contact_nonconvex_convex_sdf(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     # Contact between geoms in a mixed-convexity pair where A is the smaller-AABB side (whether convex or not) and B
     # is the other side, used in lieu of the symmetric two-pass dispatch of func_narrow_phase_nonconvex_vs_nonterrain.
@@ -1364,18 +1334,7 @@ def func_contact_nonconvex_convex_sdf(
 
     if (not can_use_sd_reject) or sd_center <= rbound_a:
         is_col, normal, penetration, contact_pos = func_contact_vertex_sdf(
-            i_ga,
-            i_gb,
-            i_b,
-            ga_pos,
-            ga_quat,
-            gb_pos,
-            gb_quat,
-            dyn_state,
-            dyn_info,
-            rigid_info,
-            sdf_info,
-            collider_config,
+            i_ga, i_gb, i_b, ga_pos, ga_quat, gb_pos, gb_quat, dyn_state, dyn_info, rigid_info, sdf_info
         )
 
     return is_col, normal, penetration, contact_pos
@@ -1392,7 +1351,6 @@ def func_contact_convex_convex_sdf(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
     enable_edge_detection_fallback: qd.template(),
 ):
     EPS = rigid_info.EPS[None]
@@ -1439,9 +1397,7 @@ def func_contact_convex_convex_sdf(
     pos_a = pos_v_closest
     if sd_v_closest < 0.0:
         is_col = True
-        normal = sdf.sdf_func_normal_world(
-            i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info, collider_config
-        )
+        normal = sdf.sdf_func_normal_world(i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info)
         penetration = -sd_v_closest
         contact_pos = pos_a
     elif enable_edge_detection_fallback:  # check edge surrounding it
@@ -1455,20 +1411,12 @@ def func_contact_convex_convex_sdf(
             p_1 = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
             vec_01 = gu.qd_normalize(p_1 - p_0, EPS)
 
-            sdf_grad_0_b = sdf.sdf_func_grad_world(
-                i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
-            )
-            sdf_grad_1_b = sdf.sdf_func_grad_world(
-                i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
-            )
+            sdf_grad_0_b = sdf.sdf_func_grad_world(i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
+            sdf_grad_1_b = sdf.sdf_func_grad_world(i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
 
             # check if the edge on a is facing towards mesh b (I am not 100% sure about this, subject to removal)
-            sdf_grad_0_a = sdf.sdf_func_grad_world(
-                i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
-            )
-            sdf_grad_1_a = sdf.sdf_func_grad_world(
-                i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
-            )
+            sdf_grad_0_a = sdf.sdf_func_grad_world(i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
+            sdf_grad_1_a = sdf.sdf_func_grad_world(i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
             normal_edge_0 = sdf_grad_0_a - sdf_grad_0_a.dot(vec_01) * vec_01
             normal_edge_1 = sdf_grad_1_a - sdf_grad_1_a.dot(vec_01) * vec_01
 
@@ -1482,9 +1430,9 @@ def func_contact_convex_convex_sdf(
                     )
                     while cur_length > ga_sdf_cell_size:
                         p_mid = 0.5 * (p_0 + p_1)
-                        side = sdf.sdf_func_grad_world(
-                            i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
-                        ).dot(vec_01)
+                        side = sdf.sdf_func_grad_world(i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, sdf_info).dot(
+                            vec_01
+                        )
                         if side < 0:
                             p_0 = p_mid
                         else:
@@ -1498,14 +1446,7 @@ def func_contact_convex_convex_sdf(
                     if new_penetration > 0.0:
                         is_col = True
                         normal = sdf.sdf_func_normal_world(
-                            i_gb,
-                            i_b,
-                            p,
-                            dyn_state.geoms,
-                            dyn_info.geoms,
-                            rigid_info,
-                            sdf_info,
-                            collider_config,
+                            i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
                         )
                         contact_pos = p
                         penetration = new_penetration

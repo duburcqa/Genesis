@@ -44,7 +44,6 @@ def func_pbd_collide_with_rigid_geom(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     """
     Return the position and velocity of a sorted position based dynamics (PBD) particle pushed out of a rigid geom.
@@ -53,9 +52,7 @@ def func_pbd_collide_with_rigid_geom(
     displacement over the substep. The momentum it gains is taken from the link of the geom, friction aside.
     """
     signed_dist = sdf.sdf_func_world(i_g, i_b, pos_world, geoms_state, geoms_info, sdf_info)
-    contact_normal = sdf.sdf_func_normal_world(
-        i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-    )
+    contact_normal = sdf.sdf_func_normal_world(i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info)
     new_pos = pos_world
     new_vel = vel
     particle_radius = pbd_info.particle_size[None] / 2
@@ -78,7 +75,6 @@ def kernel_pbd_rigid_collide(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     """Push the sorted position based dynamics particles out of the coupled rigid geoms.
 
@@ -102,7 +98,6 @@ def kernel_pbd_rigid_collide(
                         dyn_info.geoms,
                         rigid_info,
                         sdf_info,
-                        collider_config,
                     )
                     func_set_particle_pos(i_p, i_b, pos, pbd_state.particles_reordered.pos)
                     func_set_particle_vel(i_p, i_b, vel, pbd_state.particles_reordered.vel)

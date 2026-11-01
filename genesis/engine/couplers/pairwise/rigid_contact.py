@@ -20,7 +20,6 @@ def func_collide_with_rigid_geom(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     """
     Return the velocity of a point colliding with a coupled rigid geom, applying the reaction to its link.
@@ -33,9 +32,7 @@ def func_collide_with_rigid_geom(
     influence = qd.min(qd.exp(-signed_dist / max(1e-10, geoms_info.coup_softness[i_g])), 1)
 
     if influence > 0.1:
-        normal_rigid = sdf.sdf_func_normal_world(
-            i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-        )
+        normal_rigid = sdf.sdf_func_normal_world(i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info)
         vel = func_collide_in_rigid_geom(
             i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
         )
@@ -54,7 +51,6 @@ def func_collide_with_rigid(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     """Return the velocity of a point colliding with every coupled rigid geom in turn.
 
@@ -63,16 +59,6 @@ def func_collide_with_rigid(
     for i_g in range(geoms_info.needs_coup.shape[0]):
         if geoms_info.needs_coup[i_g]:
             vel = func_collide_with_rigid_geom(
-                i_g,
-                i_b,
-                pos_world,
-                vel,
-                mass,
-                geoms_state,
-                links_state,
-                geoms_info,
-                rigid_info,
-                sdf_info,
-                collider_config,
+                i_g, i_b, pos_world, vel, mass, geoms_state, links_state, geoms_info, rigid_info, sdf_info
             )
     return vel

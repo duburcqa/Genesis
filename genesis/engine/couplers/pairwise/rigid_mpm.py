@@ -58,20 +58,10 @@ def func_mpm_rigid(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ) -> qd.types.vector(3):
     """Return the velocity of a cell of the grid colliding with the coupled rigid geoms (see func_collide_with_rigid)."""
     return func_collide_with_rigid(
-        i_b,
-        pos,
-        vel,
-        mass,
-        dyn_state.geoms,
-        dyn_state.links,
-        dyn_info.geoms,
-        rigid_info,
-        sdf_info,
-        collider_config,
+        i_b, pos, vel, mass, dyn_state.geoms, dyn_state.links, dyn_info.geoms, rigid_info, sdf_info
     )
 
 
@@ -88,7 +78,6 @@ def func_cpic_cell_separation(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ) -> int:
     """
     Return the first coupled rigid geom separating a particle from a cell of its stencil, -1 for none, unless an earlier
@@ -101,7 +90,7 @@ def func_cpic_cell_separation(
         for i_g in range(rigid_mpm_cpic.rigid_normal.shape[1]):
             if i_g_sep == -1 and dyn_info.geoms.needs_coup[i_g]:
                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                    i_g, i_b, cell_pos, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info, collider_config
+                    i_g, i_b, cell_pos, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
                 )
                 if rigid_mpm_cpic.rigid_normal[i_p, i_g, i_b].dot(sdf_normal_cell) < 0:
                     i_g_sep = i_g
@@ -156,7 +145,6 @@ def kernel_update_cpic_rigid_normal(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_config: qd.template(),
 ):
     """Record the outward normal of every coupled rigid geom at the active material point method particles.
 
@@ -174,7 +162,6 @@ def kernel_update_cpic_rigid_normal(
                         dyn_info.geoms,
                         rigid_info,
                         sdf_info,
-                        collider_config,
                     )
                     # The normal of a geom a particle penetrates keeps the side the particle came from
                     if sdf_normal.dot(rigid_mpm_cpic.rigid_normal[i_p, i_g, i_b]) >= 0:
