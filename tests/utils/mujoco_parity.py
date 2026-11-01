@@ -619,7 +619,10 @@ def check_mujoco_data_consistency(
     gs_n_contacts = gs_sim.get_system(Collider).collider_state.n_contacts.to_numpy()[0]
     mj_n_contacts = mj_sim.data.ncon
     assert gs_n_contacts == mj_n_contacts, f"contact count differs: gs={gs_n_contacts} mj={mj_n_contacts}"
-    gs_n_constraints = gs_sim.get_system(ConstraintSolver).constraint_state.n_constraints.to_numpy()[0]
+    gs_constraint_solver = gs_sim.get_system(ConstraintSolver)
+    gs_n_constraints = 0
+    if gs_constraint_solver is not None:
+        gs_n_constraints = gs_constraint_solver.constraint_state.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
 
@@ -654,14 +657,13 @@ def check_mujoco_data_consistency(
             gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, qvel_prev=qvel_prev, tol=tol, efc_atol=efc_atol
         )
 
-        gs_efc_force = gs_sim.get_system(ConstraintSolver).constraint_state.efc_force.to_numpy()[:gs_n_constraints, 0]
+        gs_efc_force = gs_constraint_solver.constraint_state.efc_force.to_numpy()[:gs_n_constraints, 0]
         mj_efc_force = mj_sim.data.efc_force
         assert_allclose(gs_efc_force[gs_sidx], mj_efc_force[mj_sidx], atol=efc_atol, rtol=tol)
 
         # Solver statistics of the last iteration, per island (both engines solve per island, see build_genesis_sim),
         # matched through the MuJoCo island of the island's first dof. A Genesis island without any constraint has no
         # MuJoCo counterpart (its dofs sit outside every MuJoCo island) and is skipped.
-        gs_constraint_solver = gs_sim.get_system(ConstraintSolver)
         gs_island_state = gs_constraint_solver.constraint_state.island
         gs_grad = qd_to_numpy(gs_constraint_solver.constraint_state.grad, transpose=True)[
             0, : gs_sim.rigid_solver.n_dofs
@@ -669,7 +671,7 @@ def check_mujoco_data_consistency(
         gs_islands_inertia = qd_to_numpy(gs_island_state.inertia, transpose=True)[0]
         gs_islands_ls_improvement = qd_to_numpy(gs_island_state.ls_improvement, transpose=True)[0]
         gs_n_islands = qd_to_numpy(gs_island_state.n_islands)[0]
-        gs_dofs_island = qd_to_numpy(gs_island_state.dofs_island_idx, transpose=True)[0]
+        gs_dofs_island = qd_to_numpy(gs_sim.rigid_solver.hibernation_state.dofs_island_idx, transpose=True)[0]
         gs_constraints_island = qd_to_numpy(gs_island_state.constraint_island_idx, transpose=True)[0, :gs_n_constraints]
         gs_to_mj_dof = dict(zip(gs_dofs_idx, mj_dofs_idx))
         for gs_island in range(gs_n_islands):
@@ -749,7 +751,7 @@ def check_mujoco_data_consistency(
 
     # Acceleration pre- VS post-implicit damping gs_qacc_post = gs_sim.rigid_solver.dyn_state.dofs.acc.to_numpy()[:, 0]
     if gs_n_constraints:
-        gs_qacc_pre = gs_sim.get_system(ConstraintSolver).constraint_state.qacc.to_numpy()[:, 0]
+        gs_qacc_pre = gs_constraint_solver.constraint_state.qacc.to_numpy()[:, 0]
     else:
         gs_qacc_pre = gs_qacc_smooth
     mj_qacc_pre = mj_sim.data.qacc
