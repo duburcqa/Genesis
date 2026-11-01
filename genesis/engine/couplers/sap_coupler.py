@@ -532,6 +532,8 @@ class RigidRigidContactType(IntEnum):
 
 
 class ContactMode(IntEnum):
+    """The friction regime of a semi-analytic primal (SAP) contact: sticking, sliding or separating."""
+
     STICK = 0
     SLIDE = 1
     NO_CONTACT = 2

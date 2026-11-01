@@ -21,6 +21,11 @@ SDF_COARSE_CELLS = Size("sdf_coarse_cells")
 
 
 class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
+    """
+    The signed distance field (SDF) grid of each geom: its frame, resolution, cell size, maximum distance and first
+    node, and those of its coarse min-grid.
+    """
+
     T_mesh_to_sdf: qd.Tensor = field((float, (4, 4)))
     sdf_res: qd.Tensor = field((int, 3))
     sdf_max: qd.Tensor = field(float)
@@ -32,6 +37,11 @@ class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
 
 
 class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
+    """
+    The nodes of the signed distance field (SDF) grids of all geoms: the signed distance, its gradient, the closest
+    vertex and the coarse minima.
+    """
+
     geoms_info: SDFGeomInfo
     geoms_sdf_val: qd.Tensor = field(float)
     geoms_sdf_grad: qd.Tensor = field(

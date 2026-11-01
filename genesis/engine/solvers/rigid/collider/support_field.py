@@ -22,6 +22,10 @@ SUPPORT_CANDIDATES = Size("support_candidates")
 
 
 class SupportFieldInfo(Data, kind=DataKind.CONSTANT):
+    """
+    The support tables of the geoms, listing the vertices supporting the directions of each cell (see SupportField).
+    """
+
     # First cell of the table of each geom, the geoms of one trimesh sharing one table
     support_cell_start: qd.Tensor = field(int, shape=(GEOMS,))
     # First extra candidate of each cell, past those of its record, its extras ending where those of the next start

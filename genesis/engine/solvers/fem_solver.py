@@ -237,6 +237,8 @@ class FEMInfo(Data, kind=DataKind.CONSTANT, shape=()):
 
 
 class FEMStaticConfig(StaticConfig):
+    """The compile-time configuration of the kernels of the finite element method (FEM) solver."""
+
     # Whether the vertices of the implicit solver may be constrained, which drops their rows from its Newton solve
     enable_vertex_constraints: bool
     # Whether a material linearizes its energy around the rotation of the deformation gradient of each element

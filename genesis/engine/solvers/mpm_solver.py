@@ -134,6 +134,8 @@ class MPMInfo(Data, kind=DataKind.CONSTANT):
 
 
 class MPMStaticConfig(StaticConfig):
+    """The compile-time configuration of the kernels of the material point method (MPM) solver."""
+
     # Whether the singular value decomposition of the deformation gradient is computed, which a material reading it
     # and the backward pass require. Otherwise J is the determinant of the advected deformation gradient.
     is_svd_needed: bool

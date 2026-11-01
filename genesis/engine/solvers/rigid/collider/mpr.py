@@ -19,12 +19,19 @@ if TYPE_CHECKING:
 
 
 class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, WORKERS)):
+    """
+    The vertices of the Minkowski portal refinement (MPR) simplex of each worker: the support points on the two
+    geoms and their difference.
+    """
+
     v1: qd.Tensor = field((float, 3))
     v2: qd.Tensor = field((float, 3))
     v: qd.Tensor = field((float, 3))
 
 
 class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
+    """The scratch of the Minkowski portal refinement (MPR) of each worker: its simplex and the status of its portal."""
+
     simplex_support: MPRSimplexSupport
     simplex_size: qd.Tensor = field(int)
     # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
@@ -33,6 +40,8 @@ class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
 
 
 class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """The tolerances and the iteration cap of the Minkowski portal refinement (MPR)."""
+
     CCD_EPS: qd.Tensor = field(float)
     CCD_TOLERANCE: qd.Tensor = field(float)
     CCD_ITERATIONS: qd.Tensor = field(float)

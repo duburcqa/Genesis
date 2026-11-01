@@ -9,6 +9,10 @@ from genesis.utils.data import ENVS, Data, DataKind, field
 
 
 class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """
+    The nearest hit of a ray cast against the rigid geoms in each environment: its distance, geom, point and normal.
+    """
+
     distance: qd.Tensor = field(float)
     geom_idx: qd.Tensor = field(int)
     hit_point: qd.Tensor = field((float, 3))
