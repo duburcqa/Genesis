@@ -45,6 +45,30 @@ from .utils import func_closest_points_on_segments, func_is_discrete_geoms, func
 
 
 @qd.func
+def func_contact_sphere_sdf(
+    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, sdf_info: SDFInfo
+):
+    is_col = False
+    penetration = gs.qd_float(0.0)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+
+    sphere_center = dyn_state.geoms.pos[i_ga, i_b]
+    sphere_radius = dyn_info.geoms.data[i_ga][0]
+
+    center_to_b_dist = sdf.sdf_func_world(i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, sdf_info)
+    if center_to_b_dist < sphere_radius:
+        is_col = True
+        normal = sdf.sdf_func_normal_world(
+            i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
+        )
+        penetration = sphere_radius - center_to_b_dist
+        contact_pos = sphere_center - (sphere_radius - 0.5 * penetration) * normal
+
+    return is_col, normal, penetration, contact_pos
+
+
+@qd.func
 def func_add_polytope_vertex_contacts_sdf(
     i_ga: int,
     i_gb: int,
@@ -1191,6 +1215,244 @@ def func_add_polytope_vertex_contacts_sdf_shell(
                 use_atomic=qd.static(rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL),
                 errno=errno,
             )
+
+
+@qd.func
+def func_contact_vertex_sdf(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+):
+    is_col = False
+    penetration = gs.qd_float(0.0)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+
+    for i_v in range(dyn_info.geoms.vert_start[i_ga], dyn_info.geoms.vert_end[i_ga]):
+        vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ga_pos, ga_quat)
+        if func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state):
+            new_penetration = -sdf.sdf_func_world_local(i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
+            if new_penetration > penetration:
+                is_col = True
+                contact_pos = vertex_pos
+                penetration = new_penetration
+
+    if is_col:
+        # Sample B's SDF gradient at A's geometric center when A is a convex geom (primitive or convexified mesh). For
+        # any convex shape the centroid of its vertices is by construction inside its hull, so the sampling point sits
+        # deep inside A's surface and several SDF cells away from B's zero-isosurface in this post-penetration
+        # configuration; the tri-linear interpolation of B's gradient there is dominated by the smooth interior and not
+        # by the cell-aligned noise that contaminates the gradient evaluated at the deepest iterated vertex. Without
+        # this override the contact normal acquires a tangential component that flips frame to frame as the deepest
+        # vertex migrates between neighbouring tessellated points, driving spheres at rest into a ~m/s vertical jitter
+        # and a slow lateral drift. We use `geoms_info.center` - already populated and used by MPR for the same
+        # purpose - rather than A's frame origin so the property generalises beyond primitives whose modeller happened
+        # to centre the pivot.
+        center_a = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos, ga_quat)
+        normal_sample = center_a if dyn_info.geoms.is_convex[i_ga] else contact_pos
+        normal = sdf.sdf_func_normal_world_local(
+            i_gb, normal_sample, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+        )
+
+        # Shift contact_pos from the deepest vertex (interior side) by half the penetration along the outward normal
+        # so it lands at the midpoint between A's surface and B's surface.
+        contact_pos = contact_pos + 0.5 * penetration * normal
+
+    return is_col, normal, penetration, contact_pos
+
+
+@qd.func
+def func_contact_nonconvex_convex_sdf(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+):
+    # Contact between geoms in a mixed-convexity pair where A is the smaller-AABB side (whether convex or not) and B
+    # is the other side, used in lieu of the symmetric two-pass dispatch of func_narrow_phase_nonconvex_vs_nonterrain.
+    # A's vertex enumeration alone finds the deepest penetration into B - in a mixed pair the smaller geom is always
+    # the one penetrating the larger - and skipping the other side's O(n_verts) scan kills the cost that dominates
+    # when the larger side is a static mesh with many tens of thousands of vertices. A bounding-sphere-vs-SDF coarse
+    # reject at A's centre mirrors MPR's "if no support certifies overlap, exit" pattern: every point of A lies within
+    # rbound_a of geoms_info.center[i_ga], so when B's SDF at A's centre exceeds rbound_a no point of A can reach B's
+    # zero level set and the entire vertex scan is skipped.
+    is_col = False
+    penetration = gs.qd_float(0.0)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+
+    # rbound_a is the radius of the smallest sphere centred at geoms_info.center[i_ga] that contains A's AABB.
+    # func_compute_geom_rbound returns half the AABB diagonal, which is correct only when the geom centre coincides
+    # with the AABB midpoint - true for primitives but not for arbitrary decomposed convex mesh pieces, whose centroid
+    # (used as geoms_info.center by MPR) is offset. Iterating the 8 AABB corners gives the tight per-centre bound and
+    # ensures the reject test never discards a pair whose vertices could still be inside B.
+    center_local = dyn_info.geoms.center[i_ga]
+    rbound_a_sq = gs.qd_float(0.0)
+    for k in qd.static(range(8)):
+        delta = rigid_info.geoms_init_AABB[i_ga, k] - center_local
+        d_sq = delta.dot(delta)
+        if d_sq > rbound_a_sq:
+            rbound_a_sq = d_sq
+    rbound_a = qd.sqrt(rbound_a_sq)
+
+    # The reject is only valid when the SDF value at A's centre is the true distance to B's surface. For SPHERE and
+    # PLANE B that is the analytical branch of sdf_func_world_local - exact everywhere. For grid-based SDFs the query
+    # returns the true trilinear interpolation only when the point falls inside the SDF grid; outside the grid
+    # sdf_func_world_local routes to sdf_func_proxy_sdf, which returns ||P - grid_center||_world + sdf_max. That proxy
+    # is NOT a one-sided bound on true_sdf: with R_mesh the mesh's bounding radius from grid_center, the gap
+    # proxy - true_sdf lies in [sdf_max - R_mesh, sdf_max + R_mesh]. Typical grids use a 20% padding so
+    # sdf_max ~ 0.2*R_mesh < R_mesh, and the proxy can overestimate true_sdf by up to ~1.2*R_mesh - large enough to
+    # satisfy proxy > rbound_a while true_sdf < rbound_a, silently missing a real contact. Falling through to the
+    # vertex scan when outside the grid costs at most one extra func_contact_vertex_sdf pass on the smaller side and
+    # keeps the reject correct in all cases.
+    center_a_world = gu.qd_transform_by_trans_quat(center_local, ga_pos, ga_quat)
+    # SPHERE B has an analytical SDF; grid-based B is only safe when the query point falls inside the grid.
+    can_use_sd_reject = dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
+    if not can_use_sd_reject:
+        pos_mesh = gu.qd_inv_transform_by_trans_quat(center_a_world, gb_pos, gb_quat)
+        pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_gb])
+        can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, sdf_info)
+    sd_center = sdf.sdf_func_world_local(i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
+
+    if (not can_use_sd_reject) or sd_center <= rbound_a:
+        is_col, normal, penetration, contact_pos = func_contact_vertex_sdf(
+            i_ga, i_gb, i_b, ga_pos, ga_quat, gb_pos, gb_quat, dyn_state, dyn_info, rigid_info, sdf_info
+        )
+
+    return is_col, normal, penetration, contact_pos
+
+
+@qd.func
+def func_contact_convex_convex_sdf(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_va_ws: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
+    enable_edge_detection_fallback: qd.template(),
+):
+    EPS = rigid_info.EPS[None]
+
+    gb_vert_start = dyn_info.geoms.vert_start[i_gb]
+    ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+    ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+    gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+    gb_quat = dyn_state.geoms.quat[i_gb, i_b]
+
+    is_col = False
+    penetration = gs.qd_float(0.0)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+
+    i_va = i_va_ws
+    if i_va == -1:
+        # start traversing on the vertex graph with a smart initial vertex
+        pos_vb = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[gb_vert_start], gb_pos, gb_quat)
+        i_va = sdf.sdf_func_find_closest_vert(i_ga, i_b, pos_vb, dyn_state, dyn_info, sdf_info)
+    i_v_closest = i_va
+    pos_v_closest = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v_closest], ga_pos, ga_quat)
+    sd_v_closest = sdf.sdf_func_world(i_gb, i_b, pos_v_closest, dyn_state.geoms, dyn_info.geoms, sdf_info)
+
+    while True:
+        for i_neighbor_ in range(
+            collider_info.vert_neighbor_start[i_va],
+            collider_info.vert_neighbor_start[i_va] + collider_info.vert_n_neighbors[i_va],
+        ):
+            i_neighbor = collider_info.vert_neighbors[i_neighbor_]
+            pos_neighbor = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
+            sd_neighbor = sdf.sdf_func_world(i_gb, i_b, pos_neighbor, dyn_state.geoms, dyn_info.geoms, sdf_info)
+            if sd_neighbor < sd_v_closest - 1e-5:  # 1e-5 (0.01mm) to avoid endless loop due to numerical instability
+                i_v_closest = i_neighbor
+                sd_v_closest = sd_neighbor
+                pos_v_closest = pos_neighbor
+
+        if i_v_closest == i_va:  # no better neighbor
+            break
+        else:
+            i_va = i_v_closest
+
+    # i_va is the deepest vertex
+    pos_a = pos_v_closest
+    if sd_v_closest < 0.0:
+        is_col = True
+        normal = sdf.sdf_func_normal_world(i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info)
+        penetration = -sd_v_closest
+        contact_pos = pos_a
+    elif enable_edge_detection_fallback:  # check edge surrounding it
+        for i_neighbor_ in range(
+            collider_info.vert_neighbor_start[i_va],
+            collider_info.vert_neighbor_start[i_va] + collider_info.vert_n_neighbors[i_va],
+        ):
+            i_neighbor = collider_info.vert_neighbors[i_neighbor_]
+
+            p_0 = pos_v_closest
+            p_1 = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
+            vec_01 = gu.qd_normalize(p_1 - p_0, EPS)
+
+            sdf_grad_0_b = sdf.sdf_func_grad_world(i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
+            sdf_grad_1_b = sdf.sdf_func_grad_world(i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
+
+            # check if the edge on a is facing towards mesh b (I am not 100% sure about this, subject to removal)
+            sdf_grad_0_a = sdf.sdf_func_grad_world(i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
+            sdf_grad_1_a = sdf.sdf_func_grad_world(i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
+            normal_edge_0 = sdf_grad_0_a - sdf_grad_0_a.dot(vec_01) * vec_01
+            normal_edge_1 = sdf_grad_1_a - sdf_grad_1_a.dot(vec_01) * vec_01
+
+            if normal_edge_0.dot(sdf_grad_0_b) < 0 or normal_edge_1.dot(sdf_grad_1_b) < 0:
+                # check if closest point is between the two points
+                if sdf_grad_0_b.dot(vec_01) < 0 and sdf_grad_1_b.dot(vec_01) > 0:
+                    cur_length = (p_1 - p_0).norm()
+                    ga_sdf_cell_size_vec = sdf_info.geoms_info.sdf_cell_size[i_ga]
+                    ga_sdf_cell_size = qd.min(
+                        qd.min(ga_sdf_cell_size_vec[0], ga_sdf_cell_size_vec[1]), ga_sdf_cell_size_vec[2]
+                    )
+                    while cur_length > ga_sdf_cell_size:
+                        p_mid = 0.5 * (p_0 + p_1)
+                        side = sdf.sdf_func_grad_world(i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, sdf_info).dot(
+                            vec_01
+                        )
+                        if side < 0:
+                            p_0 = p_mid
+                        else:
+                            p_1 = p_mid
+
+                        cur_length = 0.5 * cur_length
+
+                    p = 0.5 * (p_0 + p_1)
+                    new_penetration = -sdf.sdf_func_world(i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, sdf_info)
+
+                    if new_penetration > 0.0:
+                        is_col = True
+                        normal = sdf.sdf_func_normal_world(
+                            i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
+                        )
+                        contact_pos = p
+                        penetration = new_penetration
+                        break
+
+    # The contact point must be offsetted by half the penetration depth, for consistency with MPR
+    contact_pos = contact_pos + 0.5 * penetration * normal
+
+    return is_col, normal, penetration, contact_pos, i_va
 
 
 @qd.func
