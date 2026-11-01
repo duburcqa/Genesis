@@ -141,8 +141,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         self._options = options
 
     def build(self) -> None:
-        solver = self._solver
-        config = solver.rigid_config
+        config = self._solver.rigid_config
         self._n_iterations = int(self._options.iterations)
 
         # Note that it must be over-estimated because friction parameters and joint limits may be updated dynamically.
@@ -156,16 +155,16 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         rows_per_contact = config.rows_per_contact
         self.len_constraints = (
             rows_per_contact * self._options.max_contacts
-            + sum(joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in solver.joints)
-            + solver.n_dofs
-            + solver.n_candidate_equalities_ * 6
+            + sum([joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in self._solver.joints])
+            + self._solver.n_dofs
+            + self._solver.n_candidate_equalities_ * 6
             + self._options.max_dynamic_constraints
         )
 
         # A Jacobian row reaches the dofs of the kinematic chains of the two links it couples. Each pass of the walk
         # moves every link one ancestor up, adding the dofs of the ancestor it passes to its chain.
-        links_n_dofs = np.array([link.n_dofs for link in solver.links], dtype=gs.np_int)
-        links_parent_idx = np.array([link.parent_idx for link in solver.links], dtype=gs.np_int)
+        links_n_dofs = np.array([link.n_dofs for link in self._solver.links], dtype=gs.np_int)
+        links_parent_idx = np.array([link.parent_idx for link in self._solver.links], dtype=gs.np_int)
         links_chain_n_dofs = links_n_dofs.copy()
         links_ancestor_idx = links_parent_idx
         while (links_ancestor_idx >= 0).any():
@@ -178,14 +177,14 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         is_serialized = config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = ConstraintState(
             sizes=dict(
-                envs=solver._B,
-                dofs=solver.n_dofs_,
-                trees=solver.n_trees_,
+                envs=self._solver._B,
+                dofs=self._solver.n_dofs_,
+                trees=self._solver.n_trees_,
                 constraints=max(1, self.len_constraints),
                 contacts=self._options.max_contacts,
                 rows_per_contact=rows_per_contact,
                 nt_vec_slots=nt_vec_n_slots,
-                jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
+                jac_dofs=min(self._solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
                 noslip_lanes=32 if config.enable_cooperative_noslip else 1,
                 tile_classes=n_tile_classes,
             ),
@@ -206,20 +205,20 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
                 rcm=not config.sparse_solve,
                 island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
                 worklists=not (config.enable_tiled_island_seed and not config.is_single_island),
-                backward=not solver.requires_grad,
+                backward=not self._solver.requires_grad,
             ),
-            requires_grad=solver.requires_grad,
+            requires_grad=self._solver.requires_grad,
             # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
             # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
             # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no
             # kernel may access both, the factor living in forward_dynamics.py alone.
-            _binds={ConstraintState.nt_H: solver.rigid_info.mass_mat_tiled_scratch}
+            _binds={ConstraintState.nt_H: self._solver.rigid_info.mass_mat_tiled_scratch}
             if config.enable_register_tiled_mass
             else None,
         )
         self.reset()
 
-        solver.register_errors(
+        self._solver.register_errors(
             {
                 RigidErrorCode.INVALID_FORCE_NAN: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
@@ -228,7 +227,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         )
         # The warm start and the rows of the constraints were found at the previous pose, so a change of the geometry
         # moving a link drops them. See 'Collider.build' for the filter and the order of the restore.
-        solver.subscribe(
+        self._solver.subscribe(
             Subscriber(
                 frozenset((StateChange.GEOMETRY,)),
                 callback=lambda change, envs_idx, links_idx: self.reset(envs_idx),

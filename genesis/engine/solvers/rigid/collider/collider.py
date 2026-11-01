@@ -135,9 +135,8 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # Make sure that the initial state is clean
         self.clear()
 
-        rigid_solver = self._solver
         collider_info = self.collider_info
-        rigid_solver.register_errors(
+        self._solver.register_errors(
             {
                 RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
@@ -168,8 +167,8 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # clears them, the sleepers alone keeping theirs (see 'clear'), while a change of the visual geometry alone
         # reaches no link of the filter. The checkpoint of the collider is restored after that of the rigid solver,
         # whose restore changes the geometry, so the contacts it holds are the ones that remain.
-        self._fixed_links_idx = np.array([link.idx for link in rigid_solver.links if link.is_fixed], dtype=gs.np_int)
-        rigid_solver.subscribe(
+        self._fixed_links_idx = np.array([link.idx for link in self._solver.links if link.is_fixed], dtype=gs.np_int)
+        self._solver.subscribe(
             Subscriber(frozenset((StateChange.GEOMETRY,)), callback=self._clear_moved, links_filter=slice(None))
         )
         self.detection.add(self._clear_contacts_readout)
@@ -829,14 +828,13 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
 
     def _init_terrain_state(self):
         if self.collider_config.has_terrain:
-            solver = self._solver
-            links_idx = solver.dyn_info.geoms.link_idx.to_numpy()[
-                solver.dyn_info.geoms.type.to_numpy() == gs.GEOM_TYPE.TERRAIN
+            links_idx = self._solver.dyn_info.geoms.link_idx.to_numpy()[
+                self._solver.dyn_info.geoms.type.to_numpy() == gs.GEOM_TYPE.TERRAIN
             ]
-            entity_idx = solver.dyn_info.links.entity_idx.to_numpy()[links_idx[0]]
+            entity_idx = self._solver.dyn_info.links.entity_idx.to_numpy()[links_idx[0]]
             if isinstance(entity_idx, np.ndarray):
                 entity_idx = entity_idx[0]
-            entity = solver._entities[entity_idx]
+            entity = self._solver._entities[entity_idx]
 
             rc = np.array(entity.terrain_hf.shape, dtype=gs.np_int)
             xyz_maxmin = np.array(

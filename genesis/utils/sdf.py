@@ -69,8 +69,7 @@ class SDF(System):
         self.sdf_info = None
 
     def build(self) -> None:
-        rigid_solver = self._solver
-        geoms = rigid_solver.geoms
+        geoms = self._solver.geoms
         geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
         grids_idx_by_key: dict[tuple[str, "SignedDistanceFieldDescription"], int] = {}
         grids_desc = []
@@ -116,7 +115,7 @@ class SDF(System):
                 grids_sdf_coarse_res[geoms_grid_idx],
                 np.concatenate(grids_sdf_coarse_val, dtype=gs.np_float),
                 self.sdf_info,
-                rigid_solver.rigid_config,
+                self._solver.rigid_config,
             )
 
 
