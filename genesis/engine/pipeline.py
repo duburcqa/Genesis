@@ -494,7 +494,7 @@ class Phase:
 
     The kernels of a run are fused into one kernel between two Python stages, and captured as a graph with `is_graph`,
     which a kernel holding a device loop (`qd.graph.do_while`) requires. A nested Phase runs inline, fused with the
-    stages around it, unless it `is_launched_apart`, its own launches then bounding the runs around it. While the
+    stages around it, unless it is a graph, its own launches then bounding the runs around it. While the
     launches are recorded for a backward pass, every stage runs on its own instead, all of them reversed as one by
     `backward` when given (see custom_backward).
     """
@@ -503,11 +503,9 @@ class Phase:
         self,
         *slots: str,
         is_graph: "bool | Callable[[System], bool]" = False,
-        is_launched_apart: bool = False,
         backward: Callable[[], None] | None = None,
     ) -> None:
         self.is_graph = is_graph
-        self.is_launched_apart = is_launched_apart
         self.backward = backward
         # The phases of the slots, which run in declaration order
         self.slots = {name: Phase() for name in slots}
@@ -532,7 +530,7 @@ class Phase:
         if system is None:
             return self
         is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
-        phase = Phase(*self.slots, is_graph=is_graph, is_launched_apart=self.is_launched_apart, backward=self.backward)
+        phase = Phase(*self.slots, is_graph=is_graph, backward=self.backward)
         vars(system)[self.name] = phase
         return phase
 
@@ -568,9 +566,7 @@ class Phase:
         return [
             item
             for stage, args in self.items
-            for item in (
-                stage.get_items() if isinstance(stage, Phase) and not stage.is_launched_apart else [(stage, args)]
-            )
+            for item in (stage.get_items() if isinstance(stage, Phase) and not stage.is_graph else [(stage, args)])
         ]
 
     def get_launches(self) -> tuple[_Launch, ...]:

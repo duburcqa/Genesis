@@ -83,13 +83,9 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     """
 
     # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients runs the
-    # detection as no graph. It is launched apart from the substep around it (see 'RigidSolver._build_substep').
+    # detection as no graph, inline with the substep around it.
     detection = Phase(
-        "broadphase",
-        "narrowphase",
-        "pruning",
-        is_graph=lambda collider: not collider._solver.requires_grad,
-        is_launched_apart=True,
+        "broadphase", "narrowphase", "pruning", is_graph=lambda collider: not collider._solver.requires_grad
     )
 
     collider_config: ColliderStaticConfig

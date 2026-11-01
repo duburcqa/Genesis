@@ -1390,10 +1390,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         on the host, captured as graphs: the compile time of a kernel grows faster than its size while one more graph
         replay costs next to nothing.
         """
-        # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients fuses
-        # the stages into kernels captured as no graph
-        is_graph = not self._requires_grad
-        dynamics = Phase(is_graph=is_graph)
+        dynamics = Phase()
         # Coupling forces from the previous coupling phase may target hibernated links, which only exist when another
         # solver is active (see kernel_wakeup_coupled_links in abd/misc.py)
         if self._use_hibernation and len(self.sim.active_solvers) > 1:
@@ -1406,7 +1403,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.constraints_backward.add(kernel_manual_compute_actuator_force_bw)
         if self._disable_constraint:
             self.constraints_backward.add(kernel_manual_compute_qacc_bw)
-        constraint_force = Phase(is_graph=is_graph, backward=self.constraints_backward)
+        constraint_force = Phase(backward=self.constraints_backward)
         constraint_force.add(kernel_compute_smooth_qacc, self.constraints)
         # Position, velocity and acceleration must be consistent when computing the accelerations of the links, which
         # is only possible right before the integration: the acceleration at the end of the substep is unknown, as it
@@ -1415,7 +1412,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         if not self._enable_mujoco_compatibility:
             self.integration.add(kernel_update_forward_kinematics_after_integration)
         self.integration.add(self._set_forward_updated)
-        self.substep_phase = Phase(is_graph=is_graph)
+        # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients fuses
+        # the stages into kernels captured as no graph
+        self.substep_phase = Phase(is_graph=not self._requires_grad)
         self.substep_phase.add(dynamics, constraint_force, self.integration)
 
     def _set_forward_updated(self) -> None:
