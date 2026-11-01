@@ -1104,7 +1104,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
 
 @register_system
 class SAPRigidContactFilter(System):
-    """Restrict the contacts between the tetrahedra of the rigid geoms to the pairs of geoms the collider lets collide."""
+    """Restrict the contacts between the tetrahedra of rigid geoms to the pairs of geoms the collider lets collide."""
 
     def __init__(
         self, sap_coupler: Annotated[SAPCoupler, Enabled("has_rigid_tet_contacts")], collider: Collider

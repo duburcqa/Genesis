@@ -1,4 +1,4 @@
-"""The data of the rigid solver and of its parts."""
+"""The data of the rigid solver and of the Systems detecting its contacts and solving its constraints."""
 
 from enum import IntEnum
 
@@ -11,10 +11,10 @@ from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, 
 
 
 class RigidErrorCode(IntEnum):
-    """The error flags the rigid solver and its parts write in its errno (see 'Solver.register_errors')."""
+    """The error flags of the rigid solver, its collider and its constraint solver (see 'Solver.register_errors')."""
 
-    OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
-    OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
+    OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000001
+    OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000010
     OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
     UNSUPPORTED_COLLISION_PAIR = 0b00000000000000000000000000001000
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000

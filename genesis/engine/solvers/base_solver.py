@@ -268,18 +268,21 @@ class Solver(RBC, Dynamics, Integration):
 
     def register_errors(self, errno: qd.Tensor, messages: dict[int, str]) -> None:
         """
-        Declare the error flags the kernels of the solver write per env, one bit per error, and the message of each.
+        Declare error flags the kernels write per env in the errno of the solver, one bit per error, and their messages.
 
-        `errno` is an array of the solver, which the base solver references. 'check_errno' raises the message of the
-        first flagged error, in the order of `messages`. It reads `_errno_latched`, the union of every flag `errno` held
-        since the last reset of each env, which no restore of the state rewinds (see 'update_errno'), so a solver clears
-        the flags of some envs through 'clear_errno'. The flags of the backward pass come after those of `messages`
-        (see 'StepOperation.backward').
+        `errno` is an array of the solver, which the base solver references, and the Systems working on the solver
+        declare their own flags in it, which they raise through 'func_flag_error'. 'check_errno' raises the message of
+        the first flagged error, in the order of their bits, which follows the order of the stages flagging them, the
+        flags of the backward pass last (see 'StepOperation.backward'). It reads `_errno_latched`, the union of every
+        flag `errno` held since the last reset of each env, which no restore of the state rewinds (see 'update_errno'),
+        so a solver clears the flags of some envs through 'clear_errno'.
         """
         # Each error owns its bit, those of the backward pass included
         assert not messages.keys() & self._error_messages.keys(), f"{type(self).__name__} reuses a reserved error bit."
         self._errno = errno
-        self._error_messages = {**messages, **self._error_messages}
+        self._error_messages = dict(
+            sorted({**self._error_messages, **messages}.items(), key=lambda item: (item[0] in SolverErrorCode, item[0]))
+        )
 
     def update_errno(self) -> None:
         """

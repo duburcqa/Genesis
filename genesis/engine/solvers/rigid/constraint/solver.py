@@ -445,10 +445,11 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         return weld_const_info
 
     def backward(self):
-        """Adjoint solve of the constraint force computation.
+        """Run the adjoint solve of the constraint forces from the upstream gradient its caller writes in dL_dqacc.
 
-        The caller must pre-populate the upstream gradient constraint_state.dL_dqacc (see
-        RigidSolver._constraint_force_grad)."""
+        The backward pass of a substep seeds it from the gradient of the acceleration (see
+        'solve_rigid_constraints_backward').
+        """
         if not self._solver._requires_grad:
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 

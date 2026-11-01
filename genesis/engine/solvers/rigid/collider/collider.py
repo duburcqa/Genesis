@@ -197,7 +197,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         self._contact_data_cache.clear()
 
     def _clear_moved(self, change: StateChange, envs_idx, links_idx: np.ndarray | None) -> None:
-        """Clear the contacts of the environments whose geometry changed, after waking the sleepers resting on moved fixed links.
+        """Clear the contacts of the envs whose geometry changed, waking the sleepers on moved fixed links first.
 
         A fixed link never sleeps, so the links resting on it would stay asleep where it was otherwise.
         """
