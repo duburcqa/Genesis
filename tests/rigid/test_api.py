@@ -1096,7 +1096,7 @@ def test_inertial_property_setters(
     # entity be weighed side by side through one pair of buffers. Sentinels are written over every row first: those of
     # the tree that is not weighed must come back untouched.
     SENTINEL = -7.0
-    scratch = solver.data_manager.weight_scratch
+    scratch = solver._weight_scratch
     dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
     untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
     for buffer in (scratch.jac_row, scratch.solve_out):

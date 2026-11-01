@@ -17,6 +17,7 @@ from genesis.engine.solvers.rigid.data import (
     HibernationState,
     RigidErrorCode,
     RigidSimStaticConfig,
+    WeightScratch,
     cholesky_tile_size_for,
 )
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
@@ -309,6 +310,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
         self.collider = None
         self.constraint_solver = None
+        self._weight_scratch: WeightScratch | None = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
 
@@ -985,14 +987,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             )
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
 
-        # The computation needs one vector of size n_dofs and one mass-matrix solve against it. Build time borrows
-        # both from the constraint solver, so that a scene never writing an inertial property allocates no scratch of
-        # its own.
+        # The computation needs one vector of size n_dofs and one mass-matrix solve against it. Build time borrows the
+        # scratch of the implicit damping, which no step has used yet, so that a scene never writing an inertial property
+        # allocates no scratch of its own.
         if in_place:
-            constraint_state = self.constraint_solver.constraint_state
-            jac_row, solve_out = constraint_state.grad, constraint_state.Mgrad
+            jac_row, solve_out = self.dyn_state.dofs.qf_damping_implicit, self.dyn_state.dofs.qacc_damping_implicit
         else:
-            jac_row, solve_out = self.data_manager.weight_scratch.jac_row, self.data_manager.weight_scratch.solve_out
+            if self._weight_scratch is None:
+                self._weight_scratch = WeightScratch(sizes=dict(dofs=self.n_dofs_, envs=self._B))
+            jac_row, solve_out = self._weight_scratch.jac_row, self._weight_scratch.solve_out
         kernel_refresh_invweight_and_meaninertia(
             envs_idx,
             jac_row,
@@ -2146,14 +2149,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         if not self._options.batch_links_info or self.n_envs == 0:
             values = values[None]
         # The weights are solved again rather than scaled by the mass ratio: a weight follows the mass alone for a body
-        # whose degrees of freedom carry no armature, which a model loaded from a file has.
+        # whose degrees of freedom carry no armature, which a model loaded from a file has. Their scratch is allocated
+        # by the first inertial property written, so that a scene writing none allocates none of it.
+        if self._weight_scratch is None:
+            self._weight_scratch = WeightScratch(sizes=dict(dofs=self.n_dofs_, envs=self._B))
         if name == "mass":
             kernel_set_links_mass(
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
+                self._weight_scratch.jac_row,
+                self._weight_scratch.solve_out,
                 self.dyn_state,
                 self.hibernation_state,
                 self.dyn_info,
@@ -2168,8 +2174,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
+                self._weight_scratch.jac_row,
+                self._weight_scratch.solve_out,
                 self.dyn_state,
                 self.hibernation_state,
                 self.dyn_info,
@@ -2183,8 +2189,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
+                self._weight_scratch.jac_row,
+                self._weight_scratch.solve_out,
                 self.dyn_state,
                 self.hibernation_state,
                 self.dyn_info,

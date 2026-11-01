@@ -1518,9 +1518,6 @@ class DataManager(Data):
     dyn_state: DynState
     kinematics_scratch: KinematicsScratch
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
-    # Scratch of the inverse-weight computation, which borrows the buffers of the constraint solver at build time, so a
-    # scene that never writes a mass, a center of mass or an inertia allocates none of it
-    weight_scratch: WeightScratch = field(lazy=True)
     # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so a scene that never
     # solves inverse kinematics allocates none of it
     ik_scratch: IKScratch = field(lazy=True)
