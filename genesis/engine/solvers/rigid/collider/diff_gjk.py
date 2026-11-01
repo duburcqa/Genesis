@@ -146,7 +146,7 @@ def func_gjk_contact(
             gjk_state.polytope.horizon_nedges[i_b] = 0
 
             # Construct the initial polytope from the GJK simplex
-            epa.func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, gjk_info)
+            epa.func_safe_epa_init(i_b, gjk_state, gjk_info)
 
             if i == 0:
                 # In default configuration, we use the extended EPA algorithm to find multiple contact points.
@@ -553,7 +553,7 @@ def func_extended_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        flag = epa.func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, gjk_info)
+        flag = epa.func_safe_epa_witness(i_b, i_f_nearest, gjk_state, gjk_info)
         if flag == gjk.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
@@ -633,7 +633,7 @@ def func_add_diff_contact_input(
     is_face_degenerate = normal_norm < gjk_info.diff_contact_min_normal_norm[None]
 
     # (b) Check if the origin is very close to the face (which means very small penetration depth).
-    proj_o = func_project_origin_to_plane(mink1, mink2, mink3, normal)
+    proj_o = func_project_origin_to_plane(mink1, normal)
     origin_dist = proj_o.norm()
     is_origin_close_to_face = origin_dist < gjk_info.diff_contact_min_penetration[None]
 
@@ -800,7 +800,7 @@ def func_differentiable_contact(
 
     # Project the origin onto the affine plane of the face: This operation is guaranteed to be numerically stable, as
     # the normal length is guaranteed to be larger than the minimum normal norm in [gjk_info].
-    proj_o = func_project_origin_to_plane(mink1, mink2, mink3, normal)
+    proj_o = func_project_origin_to_plane(mink1, normal)
 
     # Compute the affine coordinates of the origin's projection on the face: This operation is also guaranteed to be
     # numerically stable, as the normal length is guaranteed to be larger than the minimum normal norm in
@@ -957,9 +957,7 @@ def func_plane_normal(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.typ
 
 
 @qd.func
-def func_project_origin_to_plane(
-    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), normal: qd.types.vector(3)
-):
+def func_project_origin_to_plane(v1: qd.types.vector(3), normal: qd.types.vector(3)):
     """
     Project the origin onto the plane defined by a point on the plane and its normal.
 

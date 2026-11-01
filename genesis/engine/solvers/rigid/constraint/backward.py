@@ -8,9 +8,7 @@ from . import solver
 
 
 @qd.func
-def func_matvec_Ap(
-    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
-):
+def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo):
     """
     Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
 
@@ -45,7 +43,7 @@ def func_matvec_Ap(
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo
 ):
     """Conjugate-gradient (CG) solve of A u = g for a single environment [i_b].
 

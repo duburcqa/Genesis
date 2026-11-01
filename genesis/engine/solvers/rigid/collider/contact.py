@@ -541,7 +541,6 @@ def func_set_contact(
     collider_state: ColliderState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
     errno: qd.Tensor,
 ):
     """

@@ -757,7 +757,6 @@ def func_search_single_island(
     stride: int,
     dyn_state: DynState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_coop: qd.template(),
@@ -952,12 +951,7 @@ def func_exit_single_island(
 
 @qd.func
 def func_linesearch_islands_serial(
-    i_b: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Line search of every island of one env by a single thread, then the step applied.
 
@@ -1190,7 +1184,6 @@ def func_linesearch_islands_coop(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):

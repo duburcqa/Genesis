@@ -168,7 +168,6 @@ def func_gjk_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    dyn_state: DynState,
     collider_state: ColliderState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
@@ -289,7 +288,7 @@ def func_gjk_contact(
                         collider_config,
                     )
                 elif nsimplex == 4:
-                    polytope_flag = func_epa_init_polytope_4d(i_ga, i_gb, i_b, gjk_state, gjk_info)
+                    polytope_flag = func_epa_init_polytope_4d(i_b, gjk_state, gjk_info)
 
                 # Polytope 3D could be used as a fallback for 2D and 4D cases
                 if (
@@ -371,7 +370,7 @@ def func_gjk_contact(
             gjk_state.polytope.horizon_nedges[i_b] = 0
 
             # Construct the initial polytope from the GJK simplex
-            func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, gjk_info)
+            func_safe_epa_init(i_b, gjk_state, gjk_info)
 
             # Run EPA from the polytope
             gjk_state.nearest_face[i_b] = func_safe_epa(

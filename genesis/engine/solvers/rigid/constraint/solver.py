@@ -2375,7 +2375,7 @@ def func_copy_cone_free_hessian_island(i_b: int, i_island: int, constraint_state
 
 @qd.func
 def func_update_cone_free_hessian_flip(
-    i_b: int, i_c: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int, i_c: int, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Accumulate a flipped constraint's signed J^T D J rank-1 block into the packed cone-free Hessian.
 
@@ -2411,12 +2411,7 @@ def func_update_cone_free_hessian_flip(
 
 @qd.func
 def func_hessian_direct_batch(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the Hessian block H = M + J.T @ D @ J of island i_island.
 
@@ -2427,6 +2422,7 @@ def func_hessian_direct_batch(
     diagonal by island, so the off-block entries are left untouched. The island's constraints are listed in
     constraint_id[constraint.start : +constraint.n].
     """
+
     n = constraint_state.island.dof_slices.n[i_island, i_b]
     if qd.static(rigid_config.is_single_island):
         # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
@@ -2605,7 +2601,6 @@ def func_island_assemble_factor_solve_tiled(
     tid: int,
     sh_L,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     TileCls: qd.template(),
@@ -3316,11 +3311,7 @@ def func_island_hessian_assemble_all(
 
 @qd.func
 def func_island_tiled_factor_solve_all(
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    write_L: bool,
+    constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template(), write_L: bool
 ):
     """Barrier-free per-island factor + solve over the compact (env, island) work-list, one launch per island size
     class (see island_tile_caps).
@@ -3447,7 +3438,6 @@ def func_cholesky_factor_direct_batch(
 def func_hessian_and_cholesky_factor_direct_batch(
     i_b: int,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     compute_envelope: qd.template() = False,
@@ -3466,7 +3456,6 @@ def func_hessian_and_cholesky_factor_direct_batch(
 @qd.func
 def func_hessian_and_cholesky_factor_direct(
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     compute_envelope: qd.template() = False,
@@ -3930,12 +3919,7 @@ def func_cone_rank_update_whole_env(
 
 @qd.func
 def func_factor_island_incremental_or_direct(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Maintain one island's Cholesky factor for the current active set, choosing per island between an incremental
     rank-1 update/downdate and a direct refactor.
@@ -4032,7 +4016,7 @@ def func_factor_island_incremental_or_direct(
 
 @qd.func
 def func_hessian_and_cholesky_factor_incremental_batch(
-    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     is_degenerated = False
     # An env holding one island maintains its factor as the whole env, through the changed-row list; the per-island
@@ -4728,9 +4712,7 @@ def _func_cone_cost_diff_along_alpha(
 
 
 @qd.func
-def func_relatch_cone(
-    i_cone: int, i_b: int, normal_force: float, constraint_state: ConstraintState, rigid_config: qd.template()
-):
+def func_relatch_cone(i_cone: int, i_b: int, normal_force: float, constraint_state: ConstraintState):
     """Move the latch of cone i_cone of env i_b toward normal_force and return it (see cone_latch in rigid/data.py).
 
     normal_force is the normal force of the iterate just reached. The first row update of a solve seeds the latch at
@@ -5065,7 +5047,7 @@ def _func_update_efc_force(constraint_state: ConstraintState, rigid_config: qd.t
 
 
 @qd.func
-def _func_update_qfrc_constraint_coop(constraint_state: ConstraintState, rigid_config: qd.template()):
+def _func_update_qfrc_constraint_coop(constraint_state: ConstraintState):
     """Compute qfrc_constraint = J^T @ efc_force with one thread per (dof, env), adjacent lanes varying the dof.
 
     The lanes of a warp then read consecutive dofs of every row of the batch-first Jacobian (see jac_layout in
@@ -5182,12 +5164,7 @@ def func_update_constraint(
 
 @qd.func
 def func_update_gradient_batch(
-    i_b: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Gradient of every island of one env that still iterates and its Newton direction Mgrad through the island's
     factor. The dofs are walked through the island list by offset where it holds consecutive indices, and over the
@@ -5232,8 +5209,6 @@ def func_update_gradient_no_solve(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Compute the gradient only (no Cholesky solve), used with a fused factor+solve that consumes grad directly.
@@ -5260,11 +5235,7 @@ def func_update_gradient_no_solve(
 
 @qd.func
 def func_update_gradient(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the gradient of every env and its solve (Mgrad = H^-1 grad for Newton, M^-1 grad for CG), one
     thread per env."""
@@ -5284,9 +5255,7 @@ def initialize_Jaref(qacc: qd.Tensor, constraint_state: ConstraintState, rigid_c
 
 
 @qd.func
-def _initialize_Jaref_body(
-    i_c: int, i_b: int, n_dofs: int, qacc: qd.template(), constraint_state: ConstraintState, rigid_config: qd.template()
-):
+def _initialize_Jaref_body(i_c: int, i_b: int, qacc: qd.template(), constraint_state: ConstraintState):
     Jaref = -constraint_state.aref[i_c, i_b]
     for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
         i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
@@ -5334,9 +5303,7 @@ def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: Constraint
 
 
 @qd.func
-def initialize_Ma(
-    Ma: qd.Tensor, qacc: qd.Tensor, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
-):
+def initialize_Ma(Ma: qd.Tensor, qacc: qd.Tensor, rigid_info: RigidInfo, rigid_config: qd.template()):
     _B = rigid_info.mass_mat.shape[2]
     n_dofs = qacc.shape[0]
 
@@ -5363,7 +5330,6 @@ def func_solve_init(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     write_L: bool,
@@ -5476,10 +5442,8 @@ def func_solve_init(
         func_island_hessian_assemble_all(constraint_state, rigid_info, rigid_config)
         func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False, is_enabled=True)
         if qd.static(not rigid_config.has_scalar_seed_factor):
-            func_update_gradient_no_solve(
-                dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config
-            )
-            func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config, write_L)
+            func_update_gradient_no_solve(dyn_state, hibernation_state, constraint_state, rigid_config)
+            func_island_tiled_factor_solve_all(constraint_state, rigid_info, rigid_config, write_L)
             func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=not write_L)
     else:
         # Where the solve is seeded one env per thread (see has_per_env_solve_seed in rigid/data.py), the factor, the
@@ -5564,13 +5528,7 @@ def func_solve_init(
 
 @qd.func
 def func_solve_iter(
-    i_b: int,
-    it: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """One Newton / CG iteration of one env, every pass confined to the islands still iterating.
 
@@ -5629,12 +5587,7 @@ def func_solve_iter(
 
 @qd.func
 def func_solve_seed_batch(
-    i_b: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Seed the Newton solve of one env with its Hessian factor, its gradient, its first search direction and its
     convergence certificate.
@@ -5693,12 +5646,7 @@ def func_solve_body(
 
 @qd.kernel(fastcache=True)
 def _kernel_solve_monolith(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    _n_iterations: int,
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     _B = constraint_state.grad.shape[1]
 
@@ -5735,8 +5683,8 @@ def func_solve_body_monolith(
     # consumes, then the solve kernel runs. Keeping the init inside the entrypoint (rather than in resolve, before the
     # dispatch) is what lets each arm declare its own init behavior - the dispatcher may run a different arm on the next
     # step during autotuning.
-    func_solve_init(dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=True)
-    _kernel_solve_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations)
+    func_solve_init(dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config, write_L=True)
+    _kernel_solve_monolith(dyn_state, constraint_state, rigid_info, rigid_config)
 
 
 # =====================================================================================================================

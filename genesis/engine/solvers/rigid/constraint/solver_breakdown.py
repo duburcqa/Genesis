@@ -177,11 +177,7 @@ def _func_update_qfrc_constraint_per_dof(
 
 @qd.func
 def _func_update_gradient(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Step 5: update the gradient of every env still iterating, one env per thread.
 
@@ -203,7 +199,6 @@ def _func_islands_linesearch_and_apply(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -280,7 +275,6 @@ def _func_islands_linesearch_and_apply(
 @qd.func
 def _func_islands_update_search_direction(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
-    dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
@@ -345,14 +339,13 @@ def _kernel_solve_graph(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     while qd.graph.do_while(graph_counter):
         # Every island's line search in lockstep, the step applied and the CG gradients saved per island
         _func_islands_linesearch_and_apply(
-            graph_counter, dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config
+            graph_counter, dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config
         )
         if qd.static(not rigid_config.enable_cooperative_constraint_kernels):
             _func_update_constraint_forces(constraint_state, rigid_config)
@@ -372,9 +365,9 @@ def _kernel_solve_graph(
             solver.func_island_tiled_factor_solve_all(constraint_state, rigid_info, rigid_config, write_L=False)
             solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=True)
         else:
-            _func_update_gradient(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            _func_update_gradient(dyn_state, constraint_state, rigid_info, rigid_config)
         _func_islands_update_search_direction(
-            graph_counter, dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config
+            graph_counter, hibernation_state, constraint_state, rigid_info, rigid_config
         )
 
 
@@ -401,9 +394,7 @@ def func_solve_decomposed(
     in rigid/data.py): the seed and every factor then run one env per thread.
     """
     # The graph maintains the assembled Hessian in nt_H, so the seed leaves it there (write_L=False).
-    solver.func_solve_init(
-        dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=False
-    )
+    solver.func_solve_init(dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config, write_L=False)
     if _n_iterations <= 0:
         return
     if gs.use_zerocopy:
@@ -414,11 +405,5 @@ def func_solve_decomposed(
     else:
         constraint_state.graph_counter.fill(_n_iterations)
     _kernel_solve_graph(
-        constraint_state.graph_counter,
-        dyn_state,
-        hibernation_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
+        constraint_state.graph_counter, dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config
     )

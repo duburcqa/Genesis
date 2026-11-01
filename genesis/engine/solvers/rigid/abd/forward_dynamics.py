@@ -145,7 +145,7 @@ def func_collide_in_rigid_geom(
 
 
 @qd.func
-def func_crb_initialize(i_l: int, i_b: int, dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
+def func_crb_initialize(i_l: int, i_b: int, dyn_state: DynState, rigid_config: qd.template()):
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
@@ -233,9 +233,7 @@ def func_crb_fold(
 
 
 @qd.func
-def func_mass_mat_force(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
-):
+def func_mass_mat_force(i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     """Apply the composite inertia of one link to each of its own degrees of freedom."""
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
@@ -1164,7 +1162,6 @@ def func_solve_mass_block(
     vec: qd.Tensor,
     out: qd.Tensor,
     rigid_info: RigidInfo,
-    rigid_config: qd.template(),
 ):
     """Solve M x = y for the degrees of freedom in [blocks_dof_start, blocks_dof_end), leaving the other rows as is.
 
@@ -1225,7 +1222,7 @@ def func_solve_mass_batch(
         is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
         if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
             block_end = rigid_info.dofs_mass_block_end[i_d]
-            func_solve_mass_block(i_b, i_d, block_end, vec, out, rigid_info, rigid_config)
+            func_solve_mass_block(i_b, i_d, block_end, vec, out, rigid_info)
 
 
 @qd.func
@@ -1369,7 +1366,7 @@ def func_init_link_invweight(
                         else:
                             jac_row[i_d, i_b] = dyn_state.dofs.cdof_ang[i_d, i_b][i_r]
                     j_l = dyn_info.links.parent_idx[J_l]
-                func_solve_mass_block(i_b, dof_start, dof_end, jac_row, solve_out, rigid_info, rigid_config)
+                func_solve_mass_block(i_b, dof_start, dof_end, jac_row, solve_out, rigid_info)
                 for i_d in range(dof_start, dof_end):
                     weight = weight + jac_row[i_d, i_b] * solve_out[i_d, i_b]
 
@@ -1385,7 +1382,6 @@ def func_init_dofs_invweight(
     i_b: int,
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
-    dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -1430,7 +1426,7 @@ def func_init_dofs_invweight(
                         for j_d in range(block_start, block_end):
                             jac_row[j_d, i_b] = 0.0
                         jac_row[i_d, i_b] = 1.0
-                        func_solve_mass_block(i_b, block_start, block_end, jac_row, solve_out, rigid_info, rigid_config)
+                        func_solve_mass_block(i_b, block_start, block_end, jac_row, solve_out, rigid_info)
                         weight = weight + solve_out[i_d, i_b]
                     weight = weight / group_n_dofs
 
@@ -1772,15 +1768,7 @@ def func_update_acc(
 
 
 @qd.func
-def func_bias_force(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
-):
-    BW = qd.static(is_backward)
-
+def func_bias_force(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
@@ -1804,7 +1792,7 @@ def func_bias_force(
 
 
 @qd.func
-def func_compute_qacc(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
+def func_compute_qacc(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
     # for what a block is), the blocks of the sleeping dofs left as they are. The fused mass factor solves it already
     # where enable_fused_smooth_acc_solve holds (see rigid/data.py).
@@ -1814,9 +1802,7 @@ def func_compute_qacc(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidI
             is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
             if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
                 block_end = rigid_info.dofs_mass_block_end[i_d]
-                func_solve_mass_block(
-                    i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info, rigid_config
-                )
+                func_solve_mass_block(i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info)
 
     # A hibernated tree keeps the acceleration it was put to sleep with. The actuator effort of a dof starts from its
     # applied and passive efforts, the constraint solve adding the frictionloss one (see func_update_actuator_force in
@@ -1826,7 +1812,6 @@ def func_compute_qacc(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidI
         if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
             dof_start = rigid_info.trees_dof_start[i_t]
             for i_d in range(dof_start, dof_start + rigid_info.trees_n_dofs[i_t]):
-                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
                 dyn_state.dofs.acc[i_d, i_b] = dyn_state.dofs.acc_smooth[i_d, i_b]
                 dyn_state.dofs.qf_actuator[i_d, i_b] = (
                     dyn_state.dofs.qf_applied[i_d, i_b] + dyn_state.dofs.qf_passive[i_d, i_b]
@@ -1884,9 +1869,7 @@ def func_midpoint_has_fixed_children(
 
 
 @qd.func
-def func_midpoint_is_aligned(
-    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
-):
+def func_midpoint_is_aligned(i_l: int, i_b: int, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Whether the center of mass of the free body sits at its joint origin.
 
     Alignment moves the frame of an aligned free body onto its center of mass at load, and the build shrinks the mass
@@ -2438,12 +2421,9 @@ def func_implicit_damping(dyn_state: DynState, dyn_info: DynInfo, rigid_info: Ri
                             dyn_state.dofs.qf_damping_implicit,
                             dyn_state.dofs.qacc_damping_implicit,
                             rigid_info,
-                            rigid_config,
                         )
                     else:
-                        func_solve_mass_block(
-                            i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc, rigid_info, rigid_config
-                        )
+                        func_solve_mass_block(i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc, rigid_info)
             if qd.static(not rigid_config.enable_mujoco_compatibility):
                 for i_d in range(tree_dof_start, tree_dof_end):
                     dyn_state.dofs.acc[i_d, i_b] = (

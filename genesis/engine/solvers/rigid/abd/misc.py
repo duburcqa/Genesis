@@ -376,7 +376,6 @@ def kernel_init_link_fields(
     links_quat: qd.types.ndarray(),
     dyn_state: DynState,
     dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     n_links = links_parent_idx.shape[0]
@@ -754,7 +753,6 @@ def kernel_init_entity_fields(
     entities_gravity_compensation: qd.types.ndarray(),
     dyn_state: DynState,
     dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     n_entities = entities_dof_start.shape[0]
@@ -946,7 +944,7 @@ def func_apply_link_external_wrench(
 
 
 @qd.func
-def func_clear_external_force(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
+def func_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
@@ -997,8 +995,8 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_external_force(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
-    func_clear_external_force(dyn_state, rigid_info, rigid_config)
+def kernel_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
+    func_clear_external_force(dyn_state, rigid_config)
 
 
 @qd.func

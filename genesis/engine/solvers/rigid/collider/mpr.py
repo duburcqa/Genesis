@@ -83,7 +83,7 @@ class MPR[LayoutT: Layout](System):
 
 
 @qd.func
-def mpr_swap(i_ga: int, i_gb: int, i_b: int, i: int, j: int, mpr_state: MPRState):
+def mpr_swap(i_b: int, i: int, j: int, mpr_state: MPRState):
     mpr_state.simplex_support.v1[i, i_b], mpr_state.simplex_support.v1[j, i_b] = (
         mpr_state.simplex_support.v1[j, i_b],
         mpr_state.simplex_support.v1[i, i_b],
@@ -164,7 +164,7 @@ def mpr_point_tri_depth(
 
 
 @qd.func
-def mpr_portal_dir(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
+def mpr_portal_dir(i_b: int, mpr_state: MPRState):
     v2v1 = mpr_state.simplex_support.v[2, i_b] - mpr_state.simplex_support.v[1, i_b]
     v3v1 = mpr_state.simplex_support.v[3, i_b] - mpr_state.simplex_support.v[1, i_b]
     direction = v2v1.cross(v3v1).normalized()
@@ -172,7 +172,7 @@ def mpr_portal_dir(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
 
 
 @qd.func
-def mpr_portal_encapsules_origin(i_ga: int, i_gb: int, i_b: int, direction: qd.types.vector(3), mpr_state: MPRState):
+def mpr_portal_encapsules_origin(i_b: int, direction: qd.types.vector(3), mpr_state: MPRState):
     # Pure sign test: at the boundary both outcomes are equally valid and the result is value-continuous, so any
     # epsilon would only shift the decision without protecting anything.
     dot = mpr_state.simplex_support.v[1, i_b].dot(direction)
@@ -278,7 +278,7 @@ def compute_support(
 
 
 @qd.func
-def mpr_find_pos(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState, mpr_info: MPRInfo, rigid_config: qd.template()):
+def mpr_find_pos(i_b: int, mpr_state: MPRState, mpr_info: MPRInfo, rigid_config: qd.template()):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 
     # Only look into the direction of the portal for consistency with penetration depth computation
@@ -293,7 +293,7 @@ def mpr_find_pos(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState, mpr_info: 
     # Must use <= so that the all-zero weights of the non-mujoco-compatible path (which skips the tetrahedron
     # volumes above) still enter the portal-direction fallback.
     if sum_ <= mpr_info.CCD_EPS[None] * qd.abs(b).sum():
-        direction = mpr_portal_dir(i_ga, i_gb, i_b, mpr_state)
+        direction = mpr_portal_dir(i_b, mpr_state)
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
             i1, i2 = i % 3 + 1, (i + 1) % 3 + 1
@@ -343,7 +343,7 @@ def mpr_find_pos(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState, mpr_info: 
 
 
 @qd.func
-def mpr_find_penetr_touch(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
+def mpr_find_penetr_touch(i_b: int, mpr_state: MPRState):
     is_col = True
     penetration = gs.qd_float(0.0)
     normal = -mpr_state.simplex_support.v[0, i_b].normalized()
@@ -352,7 +352,7 @@ def mpr_find_penetr_touch(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
 
 
 @qd.func
-def mpr_find_penetr_segment(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
+def mpr_find_penetr_segment(i_b: int, mpr_state: MPRState):
     is_col = True
     # Anchor the contact direction to the ray (v1 - v0) rather than the raw support point: a degenerate flat-face
     # support tie can leave v1 with an arbitrary lateral offset, making its direction noise while the ray stays
@@ -514,7 +514,7 @@ def func_mpr_contact_from_centers(
         elif stage == MPR_STAGE.REFINE or stage == MPR_STAGE.PENETRATION:
             direction = mpr_portal_dir(i_b, mpr_state)
             if stage == MPR_STAGE.REFINE:
-                if mpr_portal_encapsules_origin(i_ga, i_gb, i_b, direction, mpr_state):
+                if mpr_portal_encapsules_origin(i_b, direction, mpr_state):
                     stage = MPR_STAGE.PENETRATION
 
         v, v1, v2 = compute_support(
@@ -701,7 +701,7 @@ def func_mpr_contact_from_centers(
                 else:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.APPROXIMATE
 
-                pos = mpr_find_pos(i_ga, i_gb, i_b, mpr_state, mpr_info, rigid_config)
+                pos = mpr_find_pos(i_b, mpr_state, mpr_info, rigid_config)
                 is_col = True
                 stage = MPR_STAGE.DONE
             else:

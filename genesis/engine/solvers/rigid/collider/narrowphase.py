@@ -2713,7 +2713,6 @@ def func_convex_convex_contact(
                                     ga_quat_current,
                                     gb_pos_current,
                                     gb_quat_current,
-                                    dyn_state,
                                     collider_state,
                                     gjk_state,
                                     dyn_info,
@@ -2970,13 +2969,11 @@ def _func_multicontact_run_detection(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
     mpr_info: MPRInfo,
     gjk_info: GJKInfo,
     support_field_info: SupportFieldInfo,
@@ -3087,7 +3084,6 @@ def _func_multicontact_run_detection(
                     ga_quat,
                     gb_pos,
                     gb_quat,
-                    dyn_state,
                     collider_state,
                     gjk_state,
                     dyn_info,
@@ -3274,13 +3270,11 @@ def _func_multicontact_detect(
                         ga_quat_current,
                         gb_pos_current,
                         gb_quat_current,
-                        dyn_state,
                         collider_state,
                         mpr_state,
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         mpr_info,
                         gjk_info,
                         support_field_info,
@@ -3983,7 +3977,6 @@ def func_narrowphase_contact0(
             )
 
             geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
-            tolerance = func_compute_mc_tolerance(i_ga, i_gb, dyn_info, rigid_info, collider_info, rigid_config)
 
             ga_pos = dyn_state.geoms.pos[i_ga, i_b]
             ga_quat = dyn_state.geoms.quat[i_ga, i_b]
@@ -4539,8 +4532,6 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
     collider_config: qd.template(),
     errno: qd.Tensor,
 ):
-    EPS = rigid_info.EPS[None]
-
     if qd.static(collider_config.has_nonconvex_nonterrain):
         n_max = qd.static(collider_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
         # The pairs of an env are split over chunks, every pair detected by one block whose lanes split its work. Pair

@@ -669,13 +669,7 @@ def func_update_geoms(
 
 @qd.func
 def func_forward_velocity_link(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), is_backward: qd.template()
 ):
     """Compute the Cartesian velocity of link i_l of env i_b from its parent's velocity and its dof velocities.
 
@@ -1296,9 +1290,7 @@ def kernel_forward_kinematics_replay(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_geoms_replay(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
-):
+def kernel_update_geoms_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     # The reversed kernels place every geom (see reverse_cartesian_space)
     func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)
 
