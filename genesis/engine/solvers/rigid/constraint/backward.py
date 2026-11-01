@@ -242,33 +242,6 @@ def kernel_load_dL_dqacc_from_acc_grad(
 
 
 @qd.kernel(fastcache=True)
-def kernel_manual_update_actuator_force_bw(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Reverse func_update_actuator_force in solver.py: the actuator effort grad of a dof goes to its frictionloss row."""
-    EPS = rigid_info.EPS[None]
-    n_dofs = dyn_state.dofs.acc.shape[0]
-    _B = dyn_state.dofs.acc.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        i_c = constraint_state.n_constraints_equality[i_b]
-        for i_d in range(n_dofs):
-            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-            if dyn_info.dofs.frictionloss[I_d] > EPS:
-                is_awake = True
-                if qd.static(rigid_config.use_hibernation):
-                    is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
-                if is_awake:
-                    constraint_state.efc_force.grad[i_c, i_b] += dyn_state.dofs.qf_actuator.grad[i_d, i_b]
-                i_c = i_c + 1
-
-
-@qd.kernel(fastcache=True)
 def kernel_accumulate_constraint_solver_grads(
     dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):

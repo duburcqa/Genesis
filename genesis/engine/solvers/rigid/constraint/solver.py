@@ -47,7 +47,6 @@ from .backward import (
     kernel_manual_add_equality_constraints_bw,
     kernel_manual_add_frictionloss_constraints_bw,
     kernel_manual_add_joint_limit_constraints_bw,
-    kernel_manual_update_actuator_force_bw,
     kernel_solve_adjoint_u,
 )
 from .island import (
@@ -5922,7 +5921,7 @@ def func_resolve_post(
     func_update_contact_force(
         dyn_state, hibernation_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
     )
-    func_update_actuator_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+    func_update_actuator_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
 @qd.func
@@ -5932,11 +5931,13 @@ def func_update_actuator_force(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
+    is_backward: qd.template(),
 ):
     """Add the frictionloss effort of each awake dof to its actuator effort (see func_compute_qacc in forward_dynamics.py).
 
     The effort is the force of the frictionloss row of the dof, whose rows follow the equality rows in ascending dof
-    order (see add_frictionloss_constraints). kernel_manual_update_actuator_force_bw in backward.py reverses it.
+    order (see add_frictionloss_constraints). is_backward reverses it, the actuator effort grad of a dof going to its
+    frictionloss row.
     """
     EPS = rigid_info.EPS[None]
     n_dofs = dyn_state.dofs.acc.shape[0]
@@ -5952,8 +5953,23 @@ def func_update_actuator_force(
                 if qd.static(rigid_config.use_hibernation):
                     is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
                 if is_awake:
-                    dyn_state.dofs.qf_actuator[i_d, i_b] += constraint_state.efc_force[i_c, i_b]
+                    if qd.static(is_backward):
+                        constraint_state.efc_force.grad[i_c, i_b] += dyn_state.dofs.qf_actuator.grad[i_d, i_b]
+                    else:
+                        dyn_state.dofs.qf_actuator[i_d, i_b] += constraint_state.efc_force[i_c, i_b]
                 i_c = i_c + 1
+
+
+@qd.kernel(fastcache=True)
+def kernel_manual_update_actuator_force_bw(
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Reverse func_update_actuator_force."""
+    func_update_actuator_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward=True)
 
 
 @qd.kernel(fastcache=True)
