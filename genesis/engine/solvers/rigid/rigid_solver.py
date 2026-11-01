@@ -14,7 +14,6 @@ from genesis.engine.materials import Rigid
 from genesis.engine.pipeline import Phase, Stages, System
 from genesis.engine.solvers.rigid.data import (
     HibernationState,
-    RigidData,
     RigidErrorCode,
     RigidSimStaticConfig,
     WeightScratch,

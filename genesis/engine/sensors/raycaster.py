@@ -27,7 +27,6 @@ from .base_sensor import (
 if TYPE_CHECKING:
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.mesh import Mesh
-    from genesis.utils.ring_buffer import TensorRingBuffer
 
     from .sensor_manager import SensorManager
 

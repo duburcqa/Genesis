@@ -238,7 +238,7 @@ def insert_errno_before_call(lines, function_call_pattern, errno_value, comment,
         raise ValueError(f"Could not find function call: {function_call_pattern}")
 
     indent_size = len(lines[call_line_idx]) - len(lines[call_line_idx].lstrip())
-    errno_line = f"{' ' * indent_size}errno[{index_var}] |= {errno_value}  # {comment}"
+    errno_line = f"{' ' * indent_size}func_flag_error({index_var}, {errno_value}, errno)  # {comment}"
     lines.insert(call_line_idx, errno_line)
 
     return lines
@@ -263,7 +263,7 @@ def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, com
         raise ValueError(f"Could not find function call: {function_call_pattern}")
     for call_line_idx in reversed(call_indices):
         indent_size = len(lines[call_line_idx]) - len(lines[call_line_idx].lstrip())
-        errno_line = f"{' ' * indent_size}errno[{index_var}] |= {errno_value}  # {comment}"
+        errno_line = f"{' ' * indent_size}func_flag_error({index_var}, {errno_value}, errno)  # {comment}"
         lines.insert(call_line_idx, errno_line)
     return lines
 
@@ -327,8 +327,8 @@ def create_modified_narrowphase_file(tmp_path: Path):
     content = "\n".join(lines)
 
     # Debug: Check if errno was actually inserted
-    assert content.count(f"|= {ERRNO_CALLED_GJK_K1}") >= 1, "contact0 GJK errno marker not inserted"
-    assert content.count(f"|= {ERRNO_CALLED_GJK_K2}") >= 1, "multicontact GJK errno marker not inserted"
+    assert content.count(f", {ERRNO_CALLED_GJK_K1}, errno)") >= 1, "contact0 GJK errno marker not inserted"
+    assert content.count(f", {ERRNO_CALLED_GJK_K2}, errno)") >= 1, "multicontact GJK errno marker not inserted"
 
     temp_narrowphase_path = tmp_path / "narrow.py"
     with open(temp_narrowphase_path, "w") as f:

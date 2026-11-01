@@ -14,7 +14,6 @@ from genesis.engine.solvers.base_solver import func_flag_error
 from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
-    ConstraintState,
     DynInfo,
     DynState,
     RigidErrorCode,

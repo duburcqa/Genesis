@@ -7,7 +7,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 import quadrants as qd
@@ -11,10 +10,9 @@ from genesis.engine.solvers.rigid.collider import Collider
 from genesis.options.sensors import Contact as ContactSensorOptions
 from genesis.options.sensors import ContactForce as ContactForceSensorOptions
 from genesis.utils.geom import inv_transform_by_quat, qd_inv_transform_by_quat, transform_by_quat
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_torch, tensor_to_array
-from genesis.utils.ring_buffer import TensorRingBuffer
+from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, Sensor, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
