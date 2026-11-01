@@ -1471,7 +1471,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         return state
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
-    def set_state(self, f, state, envs_idx=None, *, partial: bool = False) -> None:
+    def set_state(self, f, state, envs_idx=None) -> None:
         if not self.is_active:
             return
 
@@ -1531,8 +1531,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 cfrc_coupling_ang_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 if self.n_geoms:
                     torch.where(envs_mask[:, None], state.friction_ratio, fric_dst, out=fric_dst)
-                if not partial:
-                    n_equalities_dst.masked_fill_(envs_mask, self.n_equalities)
+                n_equalities_dst.masked_fill_(envs_mask, self.n_equalities)
                 if self._use_hibernation:
                     links_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     awake_steps_dst.masked_fill_(envs_mask[:, None], 0)
@@ -1557,8 +1556,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 cfrc_coupling_ang_dst[envs_idx] = 0.0
                 if self.n_geoms:
                     fric_dst[envs_idx] = state.friction_ratio[envs_idx]
-                if not partial:
-                    n_equalities_dst[envs_idx] = self.n_equalities
+                n_equalities_dst[envs_idx] = self.n_equalities
                 if self._use_hibernation:
                     links_hibernated_dst[envs_idx] = 0
                     awake_steps_dst[envs_idx] = 0
@@ -1584,8 +1582,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.rigid_info,
                 self.rigid_config,
             )
-            if not partial:
-                kernel_clear_dynamic_constraints(envs_idx, self.dyn_state, self.rigid_info, self.rigid_config)
+            kernel_clear_dynamic_constraints(envs_idx, self.dyn_state, self.rigid_info, self.rigid_config)
             if self._use_hibernation:
                 kernel_reset_hibernation(
                     envs_idx,
@@ -1597,12 +1594,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 )
         self.clear_errno(envs_idx)
 
-        if not partial:
-            self._update_forward_kinematics(envs_idx)
-        else:
-            self._is_forward_pos_updated = False
-            self._is_forward_vel_updated = False
-
+        self._update_forward_kinematics(envs_idx)
         self._restart()
 
     @property

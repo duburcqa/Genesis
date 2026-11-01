@@ -877,7 +877,7 @@ class KinematicSolver(Solver):
         return state
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
-    def set_state(self, f, state, envs_idx=None, *, partial: bool = False) -> None:
+    def set_state(self, f, state, envs_idx=None) -> None:
         if not self.is_active:
             return
 
@@ -893,13 +893,9 @@ class KinematicSolver(Solver):
             self.rigid_info,
             self.rigid_config,
         )
-        if not partial:
-            kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-            self._is_forward_pos_updated = True
-            self._is_forward_vel_updated = True
-        else:
-            self._is_forward_pos_updated = False
-            self._is_forward_vel_updated = False
+        kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+        self._is_forward_pos_updated = True
+        self._is_forward_vel_updated = True
 
     def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
