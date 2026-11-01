@@ -43,11 +43,15 @@ def func_fem_mpm(
 
     mass_mpm = gs.qd_float(0.0)
     mpm_base, _, mpm_w = func_quadratic_bspline_stencil(pos, inv_dx)
+    grid_res = qd.Vector([mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2], mpm_state.grid.mass.shape[3]])
     new_vel = vel
     for mpm_offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
         cell_ijk = mpm_base - grid_offset + mpm_offset
         i_x, i_y, i_z = cell_ijk[0], cell_ijk[1], cell_ijk[2]
-        mpm_grid_mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
+        # A vertex outside the domain of the grid exchanges nothing with the cells the grid lacks
+        mpm_grid_mass = gs.qd_float(0.0)
+        if (cell_ijk >= 0).all() and (cell_ijk < grid_res).all():
+            mpm_grid_mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
 
         mpm_weight = gs.qd_float(1.0)
         for d in qd.static(range(3)):
