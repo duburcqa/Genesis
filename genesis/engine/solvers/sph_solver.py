@@ -91,8 +91,8 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
 
 class SPHSolver(ParticleSolver):
     material_cls = SPH.Base
-    sph_state: SPHState | None
-    sph_info: SPHInfo | None
+    sph_state: SPHState | None = None
+    sph_info: SPHInfo | None = None
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -124,9 +124,6 @@ class SPHSolver(ParticleSolver):
         # The rest density the incompressibility solves target, the one of the first particle
         # TODO: Support per-particle density
         self._density0: float | None = None
-
-        self.sph_state = None
-        self.sph_info = None
 
     def build(self):
         super().build()

@@ -356,12 +356,11 @@ class RigidMPMAttachment(Integration):
     The springs are allocated the first time a particle is attached, which most scenes never do (see 'attach').
     """
 
-    rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None
+    rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None = None
 
     def __init__(self, rigid_solver: RigidSolver, mpm_solver: MPMSolver) -> None:
         self._rigid_solver = rigid_solver
         self._mpm_solver = mpm_solver
-        self.rigid_mpm_attachment_info = None
 
     def substep_post_coupling(self, f: int) -> None:
         """Pull the attached particles of the next frame toward their link."""

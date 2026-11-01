@@ -340,10 +340,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     material_cls = FEM.Base
     has_frames = True
 
-    fem_static_config: FEMStaticConfig | None
-    fem_state: FEMState | None
-    fem_info: FEMInfo | None
-    vertex_constraints: FEMVertexConstraintsInfo | None
+    fem_static_config: FEMStaticConfig | None = None
+    fem_state: FEMState | None = None
+    fem_info: FEMInfo | None = None
+    vertex_constraints: FEMVertexConstraintsInfo | None = None
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -376,10 +376,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # boundary
         self.boundary = FloorBoundary(height=self._floor_height)
 
-        self.fem_state = None
-        self.fem_info = None
-        self.fem_static_config = None
-        self.vertex_constraints = None
         # See 'newton_vertex_constraints'
         self._newton_vertex_constraints: FEMVertexConstraintsInfo | None = None
         self._material_dispatcher: FEMMaterialDispatcher | None = None

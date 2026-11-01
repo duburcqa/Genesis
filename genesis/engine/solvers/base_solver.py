@@ -232,8 +232,7 @@ class Solver(RBC, Dynamics, Integration):
         self._errno_host_context: str | None = None
 
     def _add_force_field(self, force_field):
-        dispatcher = self.force_fields_dispatcher
-        dispatcher.fields = make_static_tuple((*dispatcher.fields, force_field))
+        self.force_fields_dispatcher.fields = make_static_tuple((*self.force_fields_dispatcher.fields, force_field))
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""

@@ -152,8 +152,8 @@ class PBDSolver(ParticleSolver):
     material_cls = PBD.Base
     MATERIAL = PBDMaterial
 
-    pbd_state: PBDState | None
-    pbd_info: PBDInfo | None
+    pbd_state: PBDState | None = None
+    pbd_info: PBDInfo | None = None
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -174,9 +174,6 @@ class PBDSolver(ParticleSolver):
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
         self.boundary = CubeBoundary(lower=self._lower_bound, upper=self._upper_bound)
-
-        self.pbd_state = None
-        self.pbd_info = None
 
     def build(self):
         super().build()

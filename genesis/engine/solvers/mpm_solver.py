@@ -437,9 +437,9 @@ class MPMSolver(ParticleSolver, Coupling):
     grid_couplings = Inline(kernel_mpm_grid_op, func_mpm_grid_couplings)
     g2p = Inline(kernel_g2p, func_mpm_cell_velocity)
 
-    mpm_static_config: MPMStaticConfig | None
-    mpm_state: MPMState | None
-    mpm_info: MPMInfo | None
+    mpm_static_config: MPMStaticConfig | None = None
+    mpm_state: MPMState | None = None
+    mpm_info: MPMInfo | None = None
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -477,9 +477,6 @@ class MPMSolver(ParticleSolver, Coupling):
         # boundary
         self.setup_boundary()
 
-        self.mpm_state = None
-        self.mpm_info = None
-        self.mpm_static_config = None
         self.material_dispatcher: MPMMaterialDispatcher | None = None
 
     def setup_boundary(self):
