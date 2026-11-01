@@ -56,7 +56,6 @@ class SFSolver(TimeBasedMixin, Solver):
         self.solver_iters = options.solver_iters
         self.decay = options.decay
 
-        self.t = 0.0
         self.inlet_s = options.inlet_s
 
         self.jets = ()
@@ -68,7 +67,6 @@ class SFSolver(TimeBasedMixin, Solver):
         super().build()
 
         if self.is_active:
-            self.t = 0.0
             self.sf_state = SFState(sizes=dict(sf_grid=self.n_grid, jets=len(self.jets)))
             self.sf_info = SFInfo(values=dict(substep_dt=self.substep_dt, inlet_s=self.inlet_s, decay=self.decay))
 
@@ -88,13 +86,12 @@ class SFSolver(TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f):
-        kernel_advect_and_impulse(self.t, self.sf_state, self.sf_info, self.jets)
+    def substep_pre_coupling(self, f, t):
+        kernel_advect_and_impulse(t, self.sf_state, self.sf_info, self.jets)
         kernel_divergence(self.sf_state)
         for i_iter in range(self.solver_iters):
             kernel_pressure_jacobi(i_iter % 2, self.sf_state)
         kernel_subtract_gradient(self.solver_iters % 2, self.sf_state)
-        self.t += self.substep_dt
 
     def substep_post_coupling(self, f):
         return

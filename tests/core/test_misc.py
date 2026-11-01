@@ -758,17 +758,17 @@ def test_derived_substeps(show_viewer, tol):
 
     # A step advances the step dt whatever the rate: the fall accumulates once per substep, at the solver dt, for as
     # many substeps as the ratio gives.
-    t_built = sf_solver.t
+    t_built = scene.sim.cur_t
     for _ in range(N_STEPS):
         scene.step()
     n_substeps = N_STEPS * solver.substeps
     expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
 
-    # Solvers integrating on a grid rather than on bodies read the interval off the same resolution, so their own
-    # clock advances one step dt per scene step however many substeps the ratio gives them.
+    # Solvers integrating on a grid rather than on bodies read the interval off the same resolution, and the time their
+    # substeps are handed advances one step dt per scene step however many substeps the ratio gives them.
     assert_equal(sf_solver.substeps, SUBSTEPS)
-    assert_allclose(sf_solver.t - t_built, N_STEPS * 0.01, tol=gs.EPS)
+    assert_allclose(scene.sim.cur_t - t_built, N_STEPS * 0.01, tol=gs.EPS)
 
     # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
     # made rather than as a scene is built.
