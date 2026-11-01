@@ -60,7 +60,7 @@ from genesis.utils.data import (
 from genesis.utils.misc import data_to_array, has_zerocopy_view, qd_to_torch
 
 # The type of the annotation of a compile-time parameter
-Template = type(qd.template())
+_Template = type(qd.template())
 
 # The System classes the simulator creates when a scene calls for them, in registration order (see register_system)
 _SYSTEM_CLASSES: list[type["System"]] = []
@@ -100,7 +100,7 @@ class System:
     Its Data are its public attributes. Its dependencies are the parameters of its constructor, typed with a System
     class to use the API of that System, or with a Data struct to read it alone, `X | None` for an optional one (see
     'assemble_systems'). It allocates the Data whose sizes the scene decides in `build`, once its dependencies are
-    built. The roles it plays are the role classes it derives from, each routing one of its stages (see 'get_roles').
+    built. The roles it plays are the role classes it derives from, each routing one of its stages (see '_get_roles').
     """
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
@@ -114,7 +114,7 @@ class System:
     _boundary_items: BoundaryItems | None = None
     # The slots the roles of other Systems, or the stages their owner adds to a slot, move to while this System exists,
     # None dropping them (see RoleOf)
-    relocations: ClassVar[dict["RoleOf | Phase", "SlotRef | Phase | None"]] = {}
+    relocations: ClassVar[dict["RoleOf | Phase", "_SlotRef | Phase | None"]] = {}
     # The Systems and the structs its constructor depends on, whose Data its stages bind, the structs read-only
     _dependencies: "tuple[System, ...]" = ()
     _data_dependencies: ClassVar[dict[str, Data]] = {}
@@ -302,7 +302,7 @@ def register_system(cls: type[System]) -> type[System]:
     return cls
 
 
-class SlotRef(NamedTuple):
+class _SlotRef(NamedTuple):
     """A slot of a phase, or an extension point, that a System class offers, by attribute and slot name."""
 
     owner: type
@@ -317,11 +317,11 @@ class RoleOf(NamedTuple):
     role: type
 
 
-# The entry point of a role: one stage or several, run in order (see 'get_roles')
+# The entry point of a role: one stage or several, run in order (see '_get_roles')
 type Stages = Callable | tuple[Callable, ...]
 
 
-def get_roles(cls: type) -> list[type]:
+def _get_roles(cls: type) -> list[type]:
     """
     Return the roles a System class plays: the classes it derives from that declare a slot.
 
@@ -377,17 +377,17 @@ class Enabled:
         return True
 
 
-class CallArg(NamedTuple):
+class _CallArg(NamedTuple):
     """A parameter that no Data provides, given by name when the Phase runs instead."""
 
     name: str
 
 
-class Launch(NamedTuple):
+class _Launch(NamedTuple):
     """
     A kernel fusing a run of kernel stages, or a Python stage, with its arguments.
 
-    An argument is its bound value, or the CallArg naming it, whose positions `call_args` lists.
+    An argument is its bound value, or the _CallArg naming it, whose positions `call_args` lists.
     """
 
     fn: Callable
@@ -395,7 +395,7 @@ class Launch(NamedTuple):
     call_args: tuple[tuple[int, str], ...]
 
 
-class FusedStage(NamedTuple):
+class _FusedStage(NamedTuple):
     """
     A kernel stage of a fused kernel: the kernel, and the names its parameters take in the fused kernel, in order.
 
@@ -407,7 +407,7 @@ class FusedStage(NamedTuple):
     is_method: bool
 
 
-def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -> tuple[Callable, tuple[str, ...]]:
+def _make_fused_kernel(name: str, stages: Sequence[_FusedStage], is_graph: bool) -> tuple[Callable, tuple[str, ...]]:
     """
     Generate the kernel calling the bodies of the given kernels in order, and return it with its parameter names.
 
@@ -429,7 +429,7 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
         lines.append(f"func_{i} = qd.func(requires_top_level=True)(fn_{i})")
         for i_param, (name_, parameter) in enumerate(zip(names, inspect.signature(kernel.fn).parameters.values())):
             if is_method and i_param == 0:
-                annotation = (Template, "qd.template()")
+                annotation = (_Template, "qd.template()")
             else:
                 source = f"inspect.signature(fn_{i}).parameters['{parameter.name}'].annotation"
                 annotation = (parameter.annotation, source)
@@ -439,7 +439,7 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
                 annotation_other = annotations[name_][0]
                 assert (
                     type(annotation_other) is type(annotation[0])
-                    if isinstance(annotation_other, Template)
+                    if isinstance(annotation_other, _Template)
                     else annotation_other == annotation[0]
                 ), f"Parameter '{name_}' of '{kernel.fn.__qualname__}' is annotated otherwise in another kernel."
             annotations.setdefault(name_, annotation)
@@ -454,10 +454,10 @@ def make_fused_kernel(name: str, stages: Sequence[FusedStage], is_graph: bool) -
     lines += ["", "", decorator, f"def {name}({signature}):", *calls, ""]
     source = "\n".join(lines)
 
-    return load_generated(source, name), tuple(annotations)
+    return _load_generated(source, name), tuple(annotations)
 
 
-def load_generated(source: str, name: str) -> Any:
+def _load_generated(source: str, name: str) -> Any:
     """
     Return the object of the given name a generated source defines, written to the cache directory and imported from
     there.
@@ -512,7 +512,7 @@ class Phase:
         self.slots = {name: Phase() for name in slots}
         # The stages, in order, with their arguments
         self.items: list[tuple[Callable, tuple[Any, ...]]] = [(phase, ()) for phase in self.slots.values()]
-        self._launches: tuple[Launch, ...] | None = None
+        self._launches: tuple[_Launch, ...] | None = None
         # The System class declaring the Phase and its attribute, for a declaration (see '__set_name__')
         self.owner: type | None = None
         self.name = ""
@@ -522,10 +522,10 @@ class Phase:
         if self.owner is None:
             self.owner, self.name = owner, name
 
-    def __getattr__(self, slot: str) -> SlotRef:
+    def __getattr__(self, slot: str) -> _SlotRef:
         if slot not in vars(self).get("slots", {}):
             raise AttributeError(f"The phase has no slot '{slot}'.")
-        return SlotRef(self.owner, self.name, slot)
+        return _SlotRef(self.owner, self.name, slot)
 
     def __get__(self, system: "System | None", owner: type) -> "Phase":
         if system is None:
@@ -558,7 +558,7 @@ class Phase:
             # it
             if isinstance(stage, QuadrantsCallable) and not stage._is_wrapped_kernel:
                 kernel_name = f"kernel_{stage.fn.__name__.removeprefix('func_')}"
-                stage, _ = make_fused_kernel(kernel_name, [FusedStage(stage, tuple(names), False)], is_graph=False)
+                stage, _ = _make_fused_kernel(kernel_name, [_FusedStage(stage, tuple(names), False)], is_graph=False)
             self.items.append((stage, tuple(args)))
         self._launches = None
 
@@ -572,13 +572,13 @@ class Phase:
             )
         ]
 
-    def get_launches(self) -> tuple[Launch, ...]:
+    def get_launches(self) -> tuple[_Launch, ...]:
         """Return the launches running the Phase, the kernel stages between two Python stages fused."""
         if self._launches is not None:
             return self._launches
         # The kernels and Python stages to launch, with their arguments
         calls: list[tuple[Callable, tuple[Any, ...]]] = []
-        run: list[tuple[FusedStage, tuple[Any, ...]]] = []
+        run: list[tuple[_FusedStage, tuple[Any, ...]]] = []
         # The name of each object of the run in the fused kernel, by parameter name and identity: objects of one name,
         # such as the states of two instances of a template, are numbered apart
         fused_names: dict[tuple[str, int], str] = {}
@@ -590,14 +590,14 @@ class Phase:
                     names[0] = "owner"
                     item, args = item.quadrants_callable, (item.instance, *args)
                 for i, (name, arg) in enumerate(zip(names, args)):
-                    if not isinstance(arg, CallArg):
+                    if not isinstance(arg, _CallArg):
                         n_named = len([key for key in fused_names if key[0] == name])
                         names[i] = fused_names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
-                run.append((FusedStage(item, tuple(names), is_method), args))
+                run.append((_FusedStage(item, tuple(names), is_method), args))
                 continue
             if run:
                 stages = [stage_ for stage_, _ in run]
-                kernel, names = make_fused_kernel(f"fused_{stages[0].kernel.fn.__name__}", stages, self.is_graph)
+                kernel, names = _make_fused_kernel(f"fused_{stages[0].kernel.fn.__name__}", stages, self.is_graph)
                 args_by_name = {n: a for stage_, args_ in run for n, a in zip(stage_.names, args_)}
                 calls.append((kernel, tuple([args_by_name[name] for name in names])))
                 run.clear()
@@ -606,7 +606,7 @@ class Phase:
                 calls.append((item, args))
         self._launches = tuple(
             [
-                Launch(fn, args, tuple([(i, arg.name) for i, arg in enumerate(args) if isinstance(arg, CallArg)]))
+                _Launch(fn, args, tuple([(i, arg.name) for i, arg in enumerate(args) if isinstance(arg, _CallArg)]))
                 for fn, args in calls
             ]
         )
@@ -633,7 +633,7 @@ class Phase:
                 if isinstance(stage, (Phase, Inline)):
                     stage(**values)
                 else:
-                    stage(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
+                    stage(*[values[arg.name] if isinstance(arg, _CallArg) else arg for arg in args])
 
 
 class Inline:
@@ -722,7 +722,7 @@ class Inline:
         args_by_name = dict(zip(inspect.signature(fn).parameters, self._args))
         # The name of each object in the kernel generated, by parameter name and identity: objects of one name, such as
         # the info structs of two couplings, are numbered apart (see 'Phase.get_launches')
-        bound_names = {(name, id(arg)): name for name, arg in args_by_name.items() if not isinstance(arg, CallArg)}
+        bound_names = {(name, id(arg)): name for name, arg in args_by_name.items() if not isinstance(arg, _CallArg)}
         params_new: list[ast.arg] = []
         calls_data: list[list[str]] = []
         for i, (func, args) in enumerate(self.items):
@@ -734,7 +734,7 @@ class Inline:
             names_bound = []
             for name, arg in zip(names, args):
                 # A parameter that the scope of the func leaves unbound takes the value the kernel binds to its name
-                if isinstance(arg, CallArg):
+                if isinstance(arg, _CallArg):
                     name_bound = name
                 else:
                     n_named = len([key for key in bound_names if key[0] == name])
@@ -771,7 +771,7 @@ class Inline:
 
         tree = ast.fix_missing_locations(ReplaceHook().visit(tree))
         lines += ["", "", f"@qd.kernel(fastcache={self.kernel.is_pure})", ast.unparse(funcdef), ""]
-        kernel = load_generated("\n".join(lines), funcdef.name)
+        kernel = _load_generated("\n".join(lines), funcdef.name)
         return kernel, tuple(args_by_name.values())
 
     def __call__(self, **values: Any) -> None:
@@ -779,7 +779,7 @@ class Inline:
         if not self.items and not self._is_run_without_funcs:
             return
         kernel, args = self.get_launch()
-        kernel(*[values[arg.name] if isinstance(arg, CallArg) else arg for arg in args])
+        kernel(*[values[arg.name] if isinstance(arg, _CallArg) else arg for arg in args])
 
 
 def _check_writes(
@@ -790,7 +790,7 @@ def _check_writes(
         return
     written_names = {path[0] for path in get_written_paths(fn, owner, frozenset(_API_FUNCS))}
     for name, arg in zip(names, args):
-        if name in written_names and not isinstance(arg, CallArg) and id(arg) not in writable_ids:
+        if name in written_names and not isinstance(arg, _CallArg) and id(arg) not in writable_ids:
             raise TypeError(
                 f"'{fn.__qualname__}' writes '{name}', which {type(_scope_system).__name__} changes through the API of "
                 "its owner alone."
@@ -798,10 +798,10 @@ def _check_writes(
 
 
 def _bind(scope: dict[str, list[Any]], name: str) -> Any:
-    """Return the Data of the given name in a scope, the CallArg naming it if none (see '_get_scope')."""
+    """Return the Data of the given name in a scope, the _CallArg naming it if none (see '_get_scope')."""
     values = scope.get(name, ())
     assert len(values) < 2, f"Data '{name}' is ambiguous among the dependencies of the System."
-    return values[0] if values else CallArg(name)
+    return values[0] if values else _CallArg(name)
 
 
 class _Dependency(NamedTuple):
@@ -854,7 +854,7 @@ def _is_component(cls: type) -> bool:
     """
     if not (isinstance(cls, type) and issubclass(cls, System)):
         return False
-    return not get_roles(cls) and cls not in _SYSTEM_CLASSES
+    return not _get_roles(cls) and cls not in _SYSTEM_CLASSES
 
 
 def _get_owned_attrs(cls: type) -> dict[str, type]:
@@ -1091,7 +1091,7 @@ def _route_roles(systems: Sequence[System]) -> None:
             if target is not None:
                 _get_declared(_get_owner(systems, system, target.owner), target.name).items += source.items
             source.items.clear()
-    relocations: dict[RoleOf, tuple[SlotRef | Phase | None, System]] = {}
+    relocations: dict[RoleOf, tuple[_SlotRef | Phase | None, System]] = {}
     for system in systems:
         for role_of, slot in type(system).relocations.items():
             if not isinstance(role_of, RoleOf):
@@ -1102,14 +1102,14 @@ def _route_roles(systems: Sequence[System]) -> None:
                 )
             relocations[role_of] = (slot, system)
     for system in systems:
-        for role in get_roles(type(system)):
+        for role in _get_roles(type(system)):
             role_ofs = [
                 role_of for role_of in relocations if role_of.role is role and isinstance(system, role_of.system)
             ]
             slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
             if slot is None:
                 continue
-            slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot
+            slot = _SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot
             owner = _get_owner(systems, system, slot.owner)
             if owner is None:
                 continue
