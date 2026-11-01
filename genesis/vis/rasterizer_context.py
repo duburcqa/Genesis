@@ -17,6 +17,7 @@ from genesis.ext.pyrender.jit_render import JITRenderer
 from genesis.utils.misc import qd_to_numpy, sanitize_index, tensor_to_array
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.particle_entity import ParticleEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
@@ -208,6 +209,8 @@ class RasterizerContext:
         self.vverts_nodes = dict()
         self._per_env_vverts_entity_uids: set = set()
         self.static_nodes = dict()  # used across all frames
+        # The tetrahedra drawn for the particles of each entity, when particles are rendered as tetrahedra
+        self._particles_tets_meshes: dict["ParticleEntity", trimesh.Trimesh] = {}
         self.dynamic_nodes = dict()  # nodes that live within single frame
         self.external_nodes = dict()  # nodes added by external user
         self.links_init_AABB_size: np.ndarray | None = None
@@ -266,8 +269,9 @@ class RasterizerContext:
             self.on_camera_frustum()
 
         self.on_rigid()
-        self.on_particles(self.sim.mpm_solver, self.visualize_mpm_boundary, boundary_color=(1.0, 1.0, 0.0, 1.0))
-        self.on_particles(self.sim.sph_solver, self.visualize_sph_boundary, boundary_color=(0.0, 1.0, 1.0, 1.0))
+        self.on_particles(self.sim.mpm_solver, self.visualize_mpm_boundary, (1.0, 1.0, 0.0, 1.0), ("recon", "visual"))
+        self.on_particles(self.sim.sph_solver, self.visualize_sph_boundary, (0.0, 1.0, 1.0, 1.0), ("recon",))
+        self.on_particles(self.sim.pbd_solver, self.visualize_pbd_boundary, (0.0, 1.0, 1.0, 1.0), ("recon",))
         self.on_pbd()
         self.on_fem()
         self.on_sensors()
@@ -279,6 +283,7 @@ class RasterizerContext:
             (self.update_rigid, rigid_solvers),
             (partial(self.update_particles, self.sim.mpm_solver), (self.sim.mpm_solver,)),
             (partial(self.update_particles, self.sim.sph_solver), (self.sim.sph_solver,)),
+            (partial(self.update_particles, self.sim.pbd_solver), (self.sim.pbd_solver,)),
             (self.update_pbd, (self.sim.pbd_solver,)),
             (self.update_fem, (self.sim.fem_solver,)),
         )
@@ -677,13 +682,7 @@ class RasterizerContext:
                         for env_i, i_b in enumerate(self.rendered_envs_idx):
                             if i_b not in geom_envs_idx:
                                 continue
-                            node = self.vverts_nodes[(i_b, geom.uid)]
-                            geom_vverts = vverts[env_i, v_start:v_end, :]
-                            update_data = self._scene.reorder_vertices(node, geom_vverts.astype(np.float32))
-                            self.jit.update_buffer(node, "pos", update_data)
-                            normal_data = self.jit.update_normal(node, update_data)
-                            if normal_data is not None:
-                                self.jit.update_buffer(node, "normal", normal_data)
+                            self._update_node_verts(self.vverts_nodes[(i_b, geom.uid)], vverts[env_i, v_start:v_end, :])
 
         # One conversion of the geom poses per solver and visual mode, and one transposed copy the buffer flush uploads
         # as is: each node then takes a view of both, and the reductions the draw order and the scene bounds need run
@@ -748,29 +747,33 @@ class RasterizerContext:
                                 arrows.append((env_i, arrow, None))
         return arrows
 
-    def on_particles(self, solver, visualize_boundary, boundary_color):
+    def on_particles(self, solver, visualize_boundary, boundary_color, vis_modes):
         """
-        Add the nodes of the entities of an MPM or SPH solver, and the wireframe of its boundary if visualized.
+        Add the nodes of the entities of a particle solver, and the wireframe of its boundary if visualized.
 
-        An entity drawn as particles is one sphere per particle, while one drawn as a reconstructed mesh, or as a visual
-        mesh for a solver skinning it on its particles, is drawn again at every update (see 'draw_particles').
+        An entity drawn as particles is one sphere, or one tetrahedron, per particle (see 'render_particle_as'), while
+        one drawn in a visual mode of `vis_modes` is drawn again at every update (see 'draw_particles').
         """
         if not solver.is_active:
             return
 
-        vis_modes = ("recon", "visual") if solver.vverts_render is not None else ("recon",)
+        radius = solver.particle_radius * self.particle_size_scale
         for entity in solver.entities:
             if entity.surface.vis_mode in vis_modes:
                 self.add_dynamic_node(entity, None)
             elif entity.surface.vis_mode == "particle":
                 for env_i, idx in enumerate(self.rendered_envs_idx):
-                    mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                    if self.render_particle_as == "sphere":
+                        mesh = mu.create_sphere(radius, subdivisions=1)
+                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        tfs[:, :3, 3] = entity.init_particles
+                    else:
+                        mesh = self._particles_tets_meshes[entity] = mu.create_tets_mesh(entity.n_particles, radius)
+                        tfs = None
                     mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
-
-                    tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
-                    tfs[:, :3, 3] = entity.init_particles
+                    is_smooth = self.render_particle_as == "sphere"
                     self.add_static_node(
-                        entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
+                        entity, pyrender.Mesh.from_trimesh(mesh, smooth=is_smooth, poses=tfs, envs=env_i), i_b=idx
                     )
         if any([entity.surface.vis_mode in vis_modes for entity in solver.entities]):
             self.tracked_nodes[solver] = TrackedNodeList(
@@ -792,20 +795,31 @@ class RasterizerContext:
                 )
 
     def update_particles(self, solver):
-        """Move the spheres of the entities of an MPM or SPH solver drawn as particles, and draw the others again."""
+        """Move the particles of the entities of a particle solver drawn as particles, and draw the others again."""
         if not solver.is_active:
             return
 
         if any([entity.surface.vis_mode == "particle" for entity in solver.entities]):
             particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
+            particles_vel_all = qd_to_numpy(solver.particles_render.vel, transpose=True)
             for entity in solver.entities:
                 if entity.surface.vis_mode == "particle":
                     for idx in self.rendered_envs_idx:
-                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
-
+                        particles = particles_all[idx, entity.particle_start : entity.particle_end]
                         node = self.static_nodes[(idx, entity.uid)]
-                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+                        if self.render_particle_as == "sphere":
+                            tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+                        else:
+                            # TODO: crashes in 'gu.z_up_to_R', whose numba 'reshape' rejects the non-contiguous slice of
+                            # the 'qd_to_numpy(..., transpose=True)' array passed here (see genesis/utils/geom.py)
+                            new_verts = mu.transform_tets_mesh_verts(
+                                self._particles_tets_meshes[entity].vertices,
+                                positions=particles,
+                                zs=particles_vel_all[idx, entity.particle_start : entity.particle_end],
+                            )
+                            self._update_node_verts(node, new_verts)
         if solver in self.tracked_nodes:
             self.tracked_nodes[solver].update()
 
@@ -845,118 +859,42 @@ class RasterizerContext:
         return meshes
 
     def on_pbd(self):
-        if self.sim.pbd_solver.is_active:
-            for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
-                    # Apply surface visual with UVs to the trimesh
-                    pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
-                        pbd_entity.surface, uvs=pbd_entity.vmesh.uvs, n_verts=len(pbd_entity.vmesh.trimesh.vertices)
-                    )
+        """Add the nodes of the PBD entities drawn as their visual mesh, which their particles skin (see 'update_pbd')."""
+        if not self.sim.pbd_solver.is_active:
+            return
+        for pbd_entity in self.sim.pbd_solver.entities:
+            if pbd_entity.surface.vis_mode == "visual":
+                # Apply surface visual with UVs to the trimesh
+                pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
+                    pbd_entity.surface, uvs=pbd_entity.vmesh.uvs, n_verts=len(pbd_entity.vmesh.trimesh.vertices)
+                )
                 for env_i, idx in enumerate(self.rendered_envs_idx):
-                    if pbd_entity.surface.vis_mode == "recon":
-                        self.add_dynamic_node(pbd_entity, None)
-                    elif pbd_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
-                            mesh = mu.create_sphere(
-                                self.sim.pbd_solver.particle_radius * self.particle_size_scale, subdivisions=1
-                            )
-                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
-                                pbd_entity.surface, n_verts=len(mesh.vertices)
-                            )
-                            tfs = np.tile(np.eye(4), (pbd_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = pbd_entity.init_particles
-                            self.add_static_node(
-                                pbd_entity,
-                                pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i),
-                                i_b=idx,
-                            )
-                        elif self.render_particle_as == "tet":
-                            mesh = mu.create_tets_mesh(
-                                pbd_entity.n_particles, self.sim.pbd_solver.particle_radius * self.particle_size_scale
-                            )
-                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
-                                pbd_entity.surface, n_verts=len(mesh.vertices)
-                            )
-                            pbd_entity._tets_mesh = mesh
-                            self.add_static_node(
-                                pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=False, envs=env_i), i_b=idx
-                            )
-                    elif pbd_entity.surface.vis_mode == "visual":
-                        self.add_static_node(
-                            pbd_entity,
-                            pyrender.Mesh.from_trimesh(
-                                pbd_entity.vmesh.trimesh,
-                                smooth=pbd_entity.surface.smooth,
-                                double_sided=pbd_entity._surface.double_sided,
-                                envs=env_i,
-                            ),
-                            i_b=idx,
-                        )
-            if any(pbd_entity.surface.vis_mode == "recon" for pbd_entity in self.sim.pbd_solver.entities):
-                self.tracked_nodes[self.sim.pbd_solver] = TrackedNodeList(
-                    self, partial(self.draw_particles, self.sim.pbd_solver, vis_modes=("recon",))
-                )
-
-            # boundary
-            if self.visualize_pbd_boundary:
-                self.add_node(
-                    pyrender.Mesh.from_trimesh(
-                        mu.create_box(
-                            bounds=np.array(
-                                [self.sim.pbd_solver.boundary.lower, self.sim.pbd_solver.boundary.upper],
-                                dtype=np.float32,
-                            ),
-                            wireframe=True,
-                            color=(0.0, 1.0, 1.0, 1.0),
-                        ),
-                        smooth=True,
+                    mesh = pyrender.Mesh.from_trimesh(
+                        pbd_entity.vmesh.trimesh,
+                        smooth=pbd_entity.surface.smooth,
+                        double_sided=pbd_entity._surface.double_sided,
+                        envs=env_i,
                     )
-                )
+                    self.add_static_node(pbd_entity, mesh, i_b=idx)
 
     def update_pbd(self):
-        if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos, transpose=True)
-            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel, transpose=True)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos, transpose=True)
-            for pbd_entity in self.sim.pbd_solver.entities:
+        """Move the vertices of the visual meshes of the PBD entities to where their particles skin them."""
+        if not self.sim.pbd_solver.is_active:
+            return
+        vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos, transpose=True)
+        for pbd_entity in self.sim.pbd_solver.entities:
+            if pbd_entity.surface.vis_mode == "visual":
                 for idx in self.rendered_envs_idx:
-                    particles_env = particles_all[idx]
-                    particles_vel_env = particles_vel_all[idx]
-                    vverts_env = vverts_all[idx]
+                    vverts = vverts_all[idx, pbd_entity.vvert_start : pbd_entity.vvert_end]
+                    self._update_node_verts(self.static_nodes[(idx, pbd_entity.uid)], vverts)
 
-                    # TODO: need to support multi-env visulaization for tet mode (it's using static node)
-                    if pbd_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
-                            tfs = np.tile(np.eye(4), (pbd_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
-
-                            node = self.static_nodes[(idx, pbd_entity.uid)]
-                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
-
-                        elif self.render_particle_as == "tet":
-                            # TODO: crashes in 'gu.z_up_to_R', whose numba 'reshape' rejects the non-contiguous slice of
-                            # the 'qd_to_numpy(..., transpose=True)' array passed here (see genesis/utils/geom.py)
-                            new_verts = mu.transform_tets_mesh_verts(
-                                pbd_entity._tets_mesh.vertices,
-                                positions=particles_env[pbd_entity.particle_start : pbd_entity.particle_end],
-                                zs=particles_vel_env[pbd_entity.particle_start : pbd_entity.particle_end],
-                            )
-                            node = self.static_nodes[(idx, pbd_entity.uid)]
-                            update_data = self._scene.reorder_vertices(node, new_verts.astype(np.float32))
-                            self.jit.update_buffer(node, "pos", update_data)
-                            normal_data = self.jit.update_normal(node, update_data)
-                            if normal_data is not None:
-                                self.jit.update_buffer(node, "normal", normal_data)
-                    elif pbd_entity.surface.vis_mode == "visual":
-                        vverts = vverts_env[pbd_entity.vvert_start : pbd_entity.vvert_end]
-                        node = self.static_nodes[(idx, pbd_entity.uid)]
-                        update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32))
-                        self.jit.update_buffer(node, "pos", update_data)
-                        normal_data = self.jit.update_normal(node, update_data)
-                        if normal_data is not None:
-                            self.jit.update_buffer(node, "normal", normal_data)
-            if self.sim.pbd_solver in self.tracked_nodes:
-                self.tracked_nodes[self.sim.pbd_solver].update()
+    def _update_node_verts(self, node, verts):
+        """Move the vertices of a static node, and its normals along."""
+        update_data = self._scene.reorder_vertices(node, verts.astype(np.float32, copy=False))
+        self.jit.update_buffer(node, "pos", update_data)
+        normal_data = self.jit.update_normal(node, update_data)
+        if normal_data is not None:
+            self.jit.update_buffer(node, "normal", normal_data)
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:
@@ -993,13 +931,7 @@ class RasterizerContext:
                 for vgeom in fem_entity.vgeoms:
                     vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
                     for env_i, i_b in enumerate(self.rendered_envs_idx):
-                        node = self.static_nodes[(i_b, vgeom.uid)]
-                        render_verts = vverts[env_i].astype(np.float32, copy=False)
-                        update_data = self._scene.reorder_vertices(node, render_verts)
-                        self.jit.update_buffer(node, "pos", update_data)
-                        normal_data = self.jit.update_normal(node, update_data)
-                        if normal_data is not None:
-                            self.jit.update_buffer(node, "normal", normal_data)
+                        self._update_node_verts(self.static_nodes[(i_b, vgeom.uid)], vverts[env_i])
 
     def on_sensors(self):
         solvers = tuple(solver for solver in (self.sim.rigid_solver, self.sim.kinematic_solver) if solver.is_active)
