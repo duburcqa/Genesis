@@ -1526,10 +1526,8 @@ class RigidEntity(KinematicEntity):
 
     def _add_heterogeneous_variant(self, link, v_link):
         # Add collision geometries
-        coup_links = self.material.coup_links
         for g_desc in v_link.geoms:
-            needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
-            link._add_geom(g_desc, needs_coup=needs_coup)
+            link._add_geom(g_desc)
 
         # Add visual geoms and record vgeom range via parent
         super()._add_heterogeneous_variant(link, v_link)
@@ -1670,10 +1668,8 @@ class RigidEntity(KinematicEntity):
         # Add visual geometries
         for g_desc in l_desc.vgeoms:
             link._add_vgeom(g_desc)
-        coup_links = self.material.coup_links
         for g_desc in l_desc.geoms:
-            needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
-            link._add_geom(g_desc, needs_coup=needs_coup)
+            link._add_geom(g_desc)
 
         return link, joints
 

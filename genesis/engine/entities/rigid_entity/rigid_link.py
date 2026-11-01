@@ -480,7 +480,9 @@ class RigidLink(KinematicLink):
                     LinkInertial(v_l_desc.mass, v_l_desc.inertial_pos, v_l_desc.inertial_quat, v_l_desc.inertia)
                 )
 
-    def _add_geom(self, desc: RigidGeomDescription, needs_coup=False):
+    def _add_geom(self, desc: RigidGeomDescription):
+        material = self.entity.material
+        needs_coup = material.needs_coup and (material.coup_links is None or self.name in material.coup_links)
         geom = RigidGeom(
             link=self,
             idx=self.n_geoms + self._geom_start,

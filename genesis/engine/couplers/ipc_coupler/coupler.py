@@ -107,6 +107,7 @@ class IPCCoupler(RBC, Coupler, Coupling):
     is_differentiable = False
     # IPC computes the dynamics of the FEM entities itself
     is_simulating_fem = True
+    is_using_rigid_coup_type = True
     relocations = {RoleOf(FEMSolver, Dynamics): None}
 
     def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:
@@ -893,10 +894,6 @@ class IPCCoupler(RBC, Coupler, Coupling):
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         gs.raise_exception("A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own.")
-
-    @property
-    def is_using_rigid_coup_type(self) -> bool:
-        return True
 
     @property
     def rigid_links_idx_simulated(self) -> set[int]:

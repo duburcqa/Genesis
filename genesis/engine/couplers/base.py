@@ -12,10 +12,8 @@ class Coupler(System):
     # Whether the coupler computes the dynamics of the FEM entities itself
     is_simulating_fem: bool = False
 
-    @property
-    def is_using_rigid_coup_type(self) -> bool:
-        """Whether the coupler couples every rigid entity the way the `coup_type` of its material sets."""
-        return False
+    # Whether the coupler couples every rigid entity the way the `coup_type` of its material sets
+    is_using_rigid_coup_type: bool = False
 
     @property
     def rigid_links_idx_simulated(self) -> set[int]:

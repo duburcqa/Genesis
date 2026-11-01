@@ -67,14 +67,13 @@ class FEMVerticesProperties(Data, kind=DataKind.CONSTANT, shape=(VERTICES,)):
     """
     Model parameters of the vertices.
 
-    `mass`, `mass_inv`, `mass_over_dt2` and `friction_mu` hold one value per vertex, the mass of a vertex lumping a
-    quarter of the mass of the elements it belongs to. `corner` lists the corners of the elements vertex after vertex,
-    each one encoded as i_e * 4 + i_corner in increasing order, the corners touching vertex i_v being
+    `mass`, `mass_over_dt2` and `friction_mu` hold one value per vertex, the mass of a vertex lumping a quarter of the
+    mass of the elements it belongs to. `corner` lists the corners of the elements vertex after vertex, each one encoded
+    as i_e * 4 + i_corner in increasing order, the corners touching vertex i_v being
     `corner[corner_start[i_v]:corner_start[i_v + 1]]`.
     """
 
     mass: qd.Tensor = field(float)
-    mass_inv: qd.Tensor = field(float)
     mass_over_dt2: qd.Tensor = field(float)
     friction_mu: qd.Tensor = field(float)
     corner_start: qd.Tensor = field(int, shape=(VERTICES + 1,))
@@ -1501,7 +1500,6 @@ def kernel_compute_vertices_mass(fem_info: FEMInfo):
                 mass += 0.25 * fem_info.elements.mass_scaled[i_e] / fem_info.vol_scale[None]
             fem_info.vertices.mass[i_v] = mass
             fem_info.vertices.mass_over_dt2[i_v] = mass * (1.0 / (fem_info.substep_dt[None] ** 2))
-            fem_info.vertices.mass_inv[i_v] = 1.0 / mass
 
 
 @qd.kernel(fastcache=True)
