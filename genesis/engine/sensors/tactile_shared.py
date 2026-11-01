@@ -10,7 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import BVHTreeState
+from genesis.engine.bvh import BVHState, BVHTreeState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
@@ -19,6 +19,8 @@ from genesis.utils.sdf import SDF, SDFInfo
 
 if TYPE_CHECKING:
     from genesis.utils.ring_buffer import TensorRingBuffer
+
+    from .raycaster import BVHContext
 
 
 _GRID_TOL = 1.0e-5  # Tolerance for grid-regularity / orthogonality / normal-uniformity checks.
@@ -644,6 +646,8 @@ class ContactDepthQueryMetadataMixin:
     sensor_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
     # The signed distance fields (SDF) of the rigid geoms, which every query but the raycast one reads (see SDF)
     sdf_info: "SDFInfo | None" = None
+    # The collision BVH sets of the rigid solver the raycast query reads (see RaycastContext.collision_bvh_contexts)
+    collision_bvh_contexts: "list[BVHContext]" = field(default_factory=list)
 
     @property
     def is_raycast(self) -> bool:
@@ -676,7 +680,7 @@ class ContactDepthQuerySensorMixin:
     Sensor-side counterpart to ``ContactDepthQueryMetadataMixin``.
 
     Its ``build()`` resolves the class-wide contact-depth backend (raising if this class's sensors disagree) and
-    activates the shared ``RaycastContext`` BVH in raycast mode. The collider holds the SDF of every geom.
+    activates the shared ``RaycastContext`` BVH in raycast mode, or fetches the SDF of the rigid geoms otherwise.
     Mixing this in (alongside the metadata mixin) means subclasses get the resolution from the super-``build()`` chain
     and need not call ``resolve_contact_depth_query`` themselves. Requires ``_shared_metadata``,
     ``_options.contact_depth_query``, and a ``_shared_context`` ``RaycastContext``.
@@ -690,10 +694,26 @@ class ContactDepthQuerySensorMixin:
     def build(self):
         super().build()
         resolve_contact_depth_query(self._shared_metadata, self._options.contact_depth_query, type(self).__name__)
+        # The kernels serving both queries read the data of the resolved query, and a placeholder of the data it skips
         if self._shared_metadata.is_raycast:
             self._shared_context.activate()  # builds the BVH lazily, only on raycast opt-in
+            self._shared_metadata.collision_bvh_contexts = self._shared_context.collision_bvh_contexts
+            if self._shared_metadata.sdf_info is None:
+                self._shared_metadata.sdf_info = SDFInfo(unused=True)
         else:
             self._shared_metadata.sdf_info = self._manager._sim.get_system(SDF).sdf_info
+            if not self._shared_metadata.collision_bvh_contexts:
+                # The raycaster module registers a sensor, which imports the sensor manager importing this module
+                from .raycaster import BVHContext
+
+                placeholder_bvh_context = BVHContext(
+                    self._shared_metadata.solver,
+                    is_visual=False,
+                    n_leaves=0,
+                    bvh_state=BVHState(unused=True),
+                    env_bvh_idx=torch.empty((0,), dtype=gs.tc_int, device=gs.device),
+                )
+                self._shared_metadata.collision_bvh_contexts = [placeholder_bvh_context]
 
 
 # ============================ ViscoelasticHysteresis ============================

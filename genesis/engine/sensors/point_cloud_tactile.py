@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import BVHState, BVHTreeState
+from genesis.engine.bvh import BVHTreeState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
@@ -30,7 +30,7 @@ from .probe import (
     func_noised_probe_radius,
     get_measured_bufs,
 )
-from .raycaster import BVHContext, RaycastContext
+from .raycaster import RaycastContext
 from .tactile_shared import (
     BVH_LEAF_SIZE,
     BVH_STACK_SIZE,
@@ -1640,8 +1640,6 @@ class ElastomerTaxelSensorMetadata(
     # to gate triangles back to the sensor's elastomer surface. Separate from ``sensor_candidate_geom_mask`` which
     # gates by tracked-object geoms for the probe-depth kernel.
     elastomer_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
-    # The collision BVH the kernels serving both contact-depth queries take in place of the one the SDF query skips
-    bvh_placeholder: BVHContext | None = None
 
     lambda_d: torch.Tensor = make_tensor_field((0,))
     lambda_s: torch.Tensor = make_tensor_field((0,))
@@ -1875,18 +1873,6 @@ class ElastomerTaxelSensor(
                 self._shared_metadata.sensor_elastomer_geom_n,
                 self._shared_metadata.elastomer_geom_idx,
             )
-            # The kernels serving both contact-depth queries take a placeholder of the SDF the raycast query skips
-            if self._shared_metadata.sdf_info is None:
-                self._shared_metadata.sdf_info = SDFInfo(unused=True)
-        elif self._shared_metadata.bvh_placeholder is None:
-            # ...and of the collision BVH the SDF query skips
-            self._shared_metadata.bvh_placeholder = BVHContext(
-                solver,
-                is_visual=False,
-                n_leaves=0,
-                bvh_state=BVHState(unused=True),
-                env_bvh_idx=torch.empty((0,), dtype=gs.tc_int, device=gs.device),
-            )
 
         self._shared_metadata.use_grid_fft = concat_with_tensor(
             self._shared_metadata.use_grid_fft, self._use_grid_fft, expand=(1,)
@@ -1997,11 +1983,7 @@ class ElastomerTaxelSensor(
         # which is set in lockstep with that same depth write; measured is .copy_'d at the end.
         measured = measured_data_timeline.at(0, copy=False)
 
-        # The SDF query reads no collision BVH, so its kernels take the placeholder of the metadata in its place
-        collision_bvh_contexts = (
-            shared_context.collision_bvh_contexts if shared_metadata.is_raycast else [shared_metadata.bvh_placeholder]
-        )
-        entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
+        entry_a, entry_b = shared_metadata.collision_bvh_contexts[0], shared_metadata.collision_bvh_contexts[-1]
         _kernel_elastomer_probe_depth(
             shared_metadata.probe_sensor_idx,
             shared_metadata.links_idx,
