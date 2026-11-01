@@ -266,8 +266,8 @@ class RasterizerContext:
             self.on_camera_frustum()
 
         self.on_rigid()
-        self.on_mpm()
-        self.on_sph()
+        self.on_particles(self.sim.mpm_solver, self.visualize_mpm_boundary, boundary_color=(1.0, 1.0, 0.0, 1.0))
+        self.on_particles(self.sim.sph_solver, self.visualize_sph_boundary, boundary_color=(0.0, 1.0, 1.0, 1.0))
         self.on_pbd()
         self.on_fem()
         self.on_sensors()
@@ -277,8 +277,8 @@ class RasterizerContext:
         self._updates_solvers = (
             (self.update_link_frame, rigid_solvers),
             (self.update_rigid, rigid_solvers),
-            (self.update_mpm, (self.sim.mpm_solver,)),
-            (self.update_sph, (self.sim.sph_solver,)),
+            (partial(self.update_particles, self.sim.mpm_solver), (self.sim.mpm_solver,)),
+            (partial(self.update_particles, self.sim.sph_solver), (self.sim.sph_solver,)),
             (self.update_pbd, (self.sim.pbd_solver,)),
             (self.update_fem, (self.sim.fem_solver,)),
         )
@@ -748,166 +748,100 @@ class RasterizerContext:
                                 arrows.append((env_i, arrow, None))
         return arrows
 
-    def on_mpm(self):
-        if self.sim.mpm_solver.is_active:
-            for mpm_entity in self.sim.mpm_solver.entities:
-                if mpm_entity.surface.vis_mode in ("recon", "visual"):
-                    self.add_dynamic_node(mpm_entity, None)
-                elif mpm_entity.surface.vis_mode == "particle":
-                    for env_i, idx in enumerate(self.rendered_envs_idx):
-                        mesh = mu.create_sphere(
-                            self.sim.mpm_solver.particle_radius * self.particle_size_scale, subdivisions=1
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
-
-                        tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = mpm_entity.init_particles
-                        self.add_static_node(
-                            mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
-                        )
-            if any(mpm_entity.surface.vis_mode in ("recon", "visual") for mpm_entity in self.sim.mpm_solver.entities):
-                self.tracked_nodes[self.sim.mpm_solver] = TrackedNodeList(self, self.draw_mpm)
-
-            # boundary
-            if self.visualize_mpm_boundary:
-                for env_i in range(len(self.rendered_envs_idx)):
-                    self.add_node(
-                        pyrender.Mesh.from_trimesh(
-                            mu.create_box(
-                                bounds=np.array(
-                                    [self.sim.mpm_solver.boundary.lower, self.sim.mpm_solver.boundary.upper],
-                                    dtype=np.float32,
-                                ),
-                                wireframe=True,
-                                color=(1.0, 1.0, 0.0, 1.0),
-                            ),
-                            smooth=True,
-                            envs=env_i,
-                        )
-                    )
-
-    def update_mpm(self):
-        if self.sim.mpm_solver.is_active:
-            if any(mpm_entity.surface.vis_mode == "particle" for mpm_entity in self.sim.mpm_solver.entities):
-                particles_all = qd_to_numpy(self.sim.mpm_solver.mpm_state.particles_render.pos, transpose=True)
-                for mpm_entity in self.sim.mpm_solver.entities:
-                    if mpm_entity.surface.vis_mode == "particle":
-                        for idx in self.rendered_envs_idx:
-                            tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_all[idx, mpm_entity.particle_start : mpm_entity.particle_end]
-
-                            node = self.static_nodes[(idx, mpm_entity.uid)]
-                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
-            if self.sim.mpm_solver in self.tracked_nodes:
-                self.tracked_nodes[self.sim.mpm_solver].update()
-
-    def draw_mpm(self, envs_idx):
-        """Make the meshes of the MPM entities rendered as reconstructed or visual meshes, in environments 'envs_idx'.
-
-        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+    def on_particles(self, solver, visualize_boundary, boundary_color):
         """
-        particles_render = self.sim.mpm_solver.mpm_state.particles_render
-        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
-        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
-        vverts_all = qd_to_numpy(self.sim.mpm_solver.mpm_state.vverts_render.pos, transpose=True)
-        meshes = []
-        for mpm_entity in self.sim.mpm_solver.entities:
-            for env_i in envs_idx:
-                idx = self.rendered_envs_idx[env_i]
-                if mpm_entity.surface.vis_mode == "recon":
-                    mesh = pu.particles_to_mesh(
-                        positions=particles_all[idx, mpm_entity.particle_start : mpm_entity.particle_end][
-                            active_all[idx, mpm_entity.particle_start : mpm_entity.particle_end]
-                        ],
-                        radius=self.sim.mpm_solver.particle_radius,
-                        backend=mpm_entity.surface.recon_backend,
-                    )
-                    mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
-                    meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), mpm_entity.idx))
-                elif mpm_entity.surface.vis_mode == "visual":
-                    mpm_entity._vmesh.trimesh.vertices = vverts_all[idx, mpm_entity.vvert_start : mpm_entity.vvert_end]
-                    mesh = pyrender.Mesh.from_trimesh(
-                        mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth, envs=env_i
-                    )
-                    meshes.append((env_i, mesh, mpm_entity.idx))
-        return meshes
+        Add the nodes of the entities of an MPM or SPH solver, and the wireframe of its boundary if visualized.
 
-    def on_sph(self):
-        if self.sim.sph_solver.is_active:
-            for sph_entity in self.sim.sph_solver.entities:
-                if sph_entity.surface.vis_mode == "recon":
-                    self.add_dynamic_node(sph_entity, None)
-                elif sph_entity.surface.vis_mode == "particle":
-                    for env_i, idx in enumerate(self.rendered_envs_idx):
-                        mesh = mu.create_sphere(
-                            self.sim.sph_solver.particle_radius * self.particle_size_scale, subdivisions=1
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(sph_entity.surface, n_verts=len(mesh.vertices))
-
-                        tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = sph_entity.init_particles
-                        self.add_static_node(
-                            sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
-                        )
-            if any(sph_entity.surface.vis_mode == "recon" for sph_entity in self.sim.sph_solver.entities):
-                self.tracked_nodes[self.sim.sph_solver] = TrackedNodeList(self, self.draw_sph)
-
-            # boundary
-            if self.visualize_sph_boundary:
-                for env_i in range(len(self.rendered_envs_idx)):
-                    self.add_node(
-                        pyrender.Mesh.from_trimesh(
-                            mu.create_box(
-                                bounds=np.array(
-                                    [self.sim.sph_solver.boundary.lower, self.sim.sph_solver.boundary.upper],
-                                    dtype=np.float32,
-                                ),
-                                wireframe=True,
-                                color=(0.0, 1.0, 1.0, 1.0),
-                            ),
-                            smooth=True,
-                            envs=env_i,
-                        )
-                    )
-
-    def update_sph(self):
-        if self.sim.sph_solver.is_active:
-            if any(sph_entity.surface.vis_mode == "particle" for sph_entity in self.sim.sph_solver.entities):
-                particles_all = qd_to_numpy(self.sim.sph_solver.sph_state.particles_render.pos, transpose=True)
-                for sph_entity in self.sim.sph_solver.entities:
-                    if sph_entity.surface.vis_mode == "particle":
-                        for idx in self.rendered_envs_idx:
-                            tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_all[idx, sph_entity.particle_start : sph_entity.particle_end]
-
-                            node = self.static_nodes[(idx, sph_entity.uid)]
-                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
-            if self.sim.sph_solver in self.tracked_nodes:
-                self.tracked_nodes[self.sim.sph_solver].update()
-
-    def draw_sph(self, envs_idx):
-        """Make the meshes of the SPH entities rendered as reconstructed meshes, in the environments 'envs_idx'.
-
-        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+        An entity drawn as particles is one sphere per particle, while one drawn as a reconstructed mesh, or as a visual
+        mesh for a solver skinning it on its particles, is drawn again at every update (see 'draw_particles').
         """
-        particles_render = self.sim.sph_solver.sph_state.particles_render
-        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
-        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
+        if not solver.is_active:
+            return
+
+        vis_modes = ("recon", "visual") if solver.vverts_render is not None else ("recon",)
+        for entity in solver.entities:
+            if entity.surface.vis_mode in vis_modes:
+                self.add_dynamic_node(entity, None)
+            elif entity.surface.vis_mode == "particle":
+                for env_i, idx in enumerate(self.rendered_envs_idx):
+                    mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                    mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+
+                    tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                    tfs[:, :3, 3] = entity.init_particles
+                    self.add_static_node(
+                        entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
+                    )
+        if any([entity.surface.vis_mode in vis_modes for entity in solver.entities]):
+            self.tracked_nodes[solver] = TrackedNodeList(
+                self, partial(self.draw_particles, solver, vis_modes=vis_modes)
+            )
+
+        if visualize_boundary:
+            for env_i in range(len(self.rendered_envs_idx)):
+                self.add_node(
+                    pyrender.Mesh.from_trimesh(
+                        mu.create_box(
+                            bounds=np.array([solver.boundary.lower, solver.boundary.upper], dtype=np.float32),
+                            wireframe=True,
+                            color=boundary_color,
+                        ),
+                        smooth=True,
+                        envs=env_i,
+                    )
+                )
+
+    def update_particles(self, solver):
+        """Move the spheres of the entities of an MPM or SPH solver drawn as particles, and draw the others again."""
+        if not solver.is_active:
+            return
+
+        if any([entity.surface.vis_mode == "particle" for entity in solver.entities]):
+            particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
+            for entity in solver.entities:
+                if entity.surface.vis_mode == "particle":
+                    for idx in self.rendered_envs_idx:
+                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
+
+                        node = self.static_nodes[(idx, entity.uid)]
+                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+        if solver in self.tracked_nodes:
+            self.tracked_nodes[solver].update()
+
+    def draw_particles(self, solver, envs_idx, vis_modes):
+        """
+        Make the meshes of the entities of a particle solver drawn as reconstructed or visual meshes.
+
+        The entities are those of 'solver' drawn in one of the visual modes 'vis_modes', in the environments 'envs_idx'.
+        A reconstructed mesh is the surface around the active particles of its entity, and a visual mesh the mesh of its
+        entity skinned on the particles. Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+        """
+        particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
+        active_all = qd_to_numpy(solver.particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
+        vverts_all = None
+        if "visual" in vis_modes:
+            vverts_all = qd_to_numpy(solver.vverts_render.pos, transpose=True)
         meshes = []
-        for sph_entity in self.sim.sph_solver.entities:
-            if sph_entity.surface.vis_mode != "recon":
+        for entity in solver.entities:
+            if entity.surface.vis_mode not in vis_modes:
                 continue
             for env_i in envs_idx:
                 idx = self.rendered_envs_idx[env_i]
-                mesh = pu.particles_to_mesh(
-                    positions=particles_all[idx, sph_entity.particle_start : sph_entity.particle_end][
-                        active_all[idx, sph_entity.particle_start : sph_entity.particle_end]
-                    ],
-                    radius=self.sim.sph_solver.particle_radius,
-                    backend=sph_entity.surface.recon_backend,
-                )
-                mesh.visual = mu.surface_uvs_to_trimesh_visual(sph_entity.surface, n_verts=len(mesh.vertices))
-                meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), sph_entity.idx))
+                if entity.surface.vis_mode == "recon":
+                    mesh = pu.particles_to_mesh(
+                        positions=particles_all[idx, entity.particle_start : entity.particle_end][
+                            active_all[idx, entity.particle_start : entity.particle_end]
+                        ],
+                        radius=solver.particle_radius,
+                        backend=entity.surface.recon_backend,
+                    )
+                    mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                    mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i)
+                else:
+                    entity._vmesh.trimesh.vertices = vverts_all[idx, entity.vvert_start : entity.vvert_end]
+                    mesh = pyrender.Mesh.from_trimesh(entity.vmesh.trimesh, smooth=entity.surface.smooth, envs=env_i)
+                meshes.append((env_i, mesh, entity.idx))
         return meshes
 
     def on_pbd(self):
@@ -959,7 +893,9 @@ class RasterizerContext:
                             i_b=idx,
                         )
             if any(pbd_entity.surface.vis_mode == "recon" for pbd_entity in self.sim.pbd_solver.entities):
-                self.tracked_nodes[self.sim.pbd_solver] = TrackedNodeList(self, self.draw_pbd)
+                self.tracked_nodes[self.sim.pbd_solver] = TrackedNodeList(
+                    self, partial(self.draw_particles, self.sim.pbd_solver, vis_modes=("recon",))
+                )
 
             # boundary
             if self.visualize_pbd_boundary:
@@ -979,9 +915,9 @@ class RasterizerContext:
 
     def update_pbd(self):
         if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.particles_render.pos, transpose=True)
-            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.particles_render.vel, transpose=True)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.pbd_state.vverts_render.pos, transpose=True)
+            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos, transpose=True)
+            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel, transpose=True)
+            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos, transpose=True)
             for pbd_entity in self.sim.pbd_solver.entities:
                 for idx in self.rendered_envs_idx:
                     particles_env = particles_all[idx]
@@ -998,6 +934,8 @@ class RasterizerContext:
                             self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
                         elif self.render_particle_as == "tet":
+                            # TODO: crashes in 'gu.z_up_to_R', whose numba 'reshape' rejects the non-contiguous slice of
+                            # the 'qd_to_numpy(..., transpose=True)' array passed here (see genesis/utils/geom.py)
                             new_verts = mu.transform_tets_mesh_verts(
                                 pbd_entity._tets_mesh.vertices,
                                 positions=particles_env[pbd_entity.particle_start : pbd_entity.particle_end],
@@ -1019,32 +957,6 @@ class RasterizerContext:
                             self.jit.update_buffer(node, "normal", normal_data)
             if self.sim.pbd_solver in self.tracked_nodes:
                 self.tracked_nodes[self.sim.pbd_solver].update()
-
-    def draw_pbd(self, envs_idx):
-        """Make the meshes of the PBD entities rendered as reconstructed meshes, in the environments 'envs_idx'.
-
-        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
-        """
-        particles_render = self.sim.pbd_solver.pbd_state.particles_render
-        particles_all = qd_to_numpy(particles_render.pos, transpose=True)
-        active_all = qd_to_numpy(particles_render.is_active, transpose=True).astype(dtype=np.bool_, copy=False)
-        meshes = []
-        for pbd_entity in self.sim.pbd_solver.entities:
-            if pbd_entity.surface.vis_mode != "recon":
-                continue
-            for env_i in envs_idx:
-                idx = self.rendered_envs_idx[env_i]
-                positions = particles_all[idx, pbd_entity.particle_start : pbd_entity.particle_end][
-                    active_all[idx, pbd_entity.particle_start : pbd_entity.particle_end]
-                ]
-                mesh = pu.particles_to_mesh(
-                    positions=positions,
-                    radius=self.sim.pbd_solver.particle_radius,
-                    backend=pbd_entity.surface.recon_backend,
-                )
-                mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
-                meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), pbd_entity.idx))
-        return meshes
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:
