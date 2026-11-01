@@ -14,6 +14,7 @@ from scipy.spatial.qhull import QhullError
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.collider.collider import ConvexConvexSDF, NonconvexNonconvexSDF
 from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils.misc import tensor_to_array
 
@@ -772,6 +773,91 @@ def test_box_contact_true_penetration(show_viewer, tol):
         normals_overlap = np.take_along_axis(overlaps, np.abs(normals_local).argmax(axis=-1), axis=-1)
         assert_allclose(penetrations[is_contact_valid], normals_overlap[is_contact_valid], tol=tol)
         assert_allclose(np.where(is_contact_valid, penetrations, np.inf).min(axis=-1), overlaps.min(axis=-1), tol=tol)
+
+
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_sdf_narrowphase(show_viewer):
+    # The narrowphases detecting the convex and the non-convex pairs by the signed distance field of the geoms, requested
+    # in place of the default ones. Every entity is posed resting on a flat surface sunk by a known depth, the convex
+    # pairs on a box primitive or a plane, the non-convex ones on a ring, so that the contacts of one detection follow
+    # analytically, then settles there.
+    DEPTH = 2e-3
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.5, 0.8),
+            camera_lookat=(1.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.05),
+            size=(0.3, 0.3, 0.1),
+            fixed=True,
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=(trimesh.creation.annulus(r_min=0.05, r_max=0.15, height=0.1),),
+            pos=(1.0, 0.0, 0.05),
+            convexify=False,
+            fixed=True,
+        ),
+    )
+    # Each entity with the height of its support surface, the half extent of its own geometry along the vertical and
+    # its number of contacts: one for a sphere, the corners of a cube face, both ends of a cylinder lying down
+    entities_support = []
+    for morph, support_z, half_extent, n_contacts in (
+        (gs.morphs.Sphere(pos=(0.0, -0.08, 0.15), radius=0.05), 0.1, 0.05, 1),
+        (gs.morphs.Box(pos=(0.0, 0.08, 0.13), size=(0.06, 0.06, 0.06)), 0.1, 0.03, 4),
+        (gs.morphs.Sphere(pos=(1.1, 0.0, 0.13), radius=0.03), 0.1, 0.03, 1),
+        (gs.morphs.Box(pos=(0.9, 0.0, 0.12), size=(0.04, 0.04, 0.04)), 0.1, 0.02, 4),
+        (gs.morphs.Cylinder(pos=(2.0, 0.0, 0.03), euler=(90.0, 0.0, 0.0), radius=0.03, height=0.1), 0.0, 0.03, 2),
+    ):
+        entity = scene.add_entity(
+            morph=morph,
+            visualize_contact=True,
+        )
+        entities_support.append((entity, support_z, half_extent, n_contacts))
+    scene.sim.get_system(ConvexConvexSDF, opt_in=True)
+    scene.sim.get_system(NonconvexNonconvexSDF, opt_in=True)
+    scene.build(n_envs=2)
+
+    collider = scene.sim.get_system(Collider)
+    for entity, support_z, half_extent, _ in entities_support:
+        entity.set_pos(entity.get_pos() - torch.tensor((0.0, 0.0, DEPTH), device=gs.device))
+    collider.clear()
+    collider.detection()
+    for entity, support_z, half_extent, n_contacts in entities_support:
+        contacts = entity.get_contacts()
+        is_contact_valid = tensor_to_array(contacts["valid_mask"])
+        assert_equal(is_contact_valid.sum(axis=-1), n_contacts)
+        # The normal points from geom B to geom A, and the position lies midway between the surfaces
+        is_entity_a = np.isin(tensor_to_array(contacts["geom_a"]), [geom.idx for geom in entity.geoms])
+        normals = tensor_to_array(contacts["normal"])
+        assert_allclose(
+            normals[is_contact_valid],
+            np.where(is_entity_a, 1.0, -1.0)[is_contact_valid, None] * (0.0, 0.0, 1.0),
+            atol=1e-3,
+        )
+        assert_allclose(tensor_to_array(contacts["penetration"])[is_contact_valid], DEPTH, atol=1e-4)
+        positions_z = tensor_to_array(contacts["position"])[..., 2]
+        assert_allclose(positions_z[is_contact_valid], support_z - 0.5 * DEPTH, atol=1e-4)
+
+    for _ in range(30):
+        scene.step()
+    for entity, support_z, half_extent, _ in entities_support:
+        assert_allclose(entity.get_dofs_velocity(), 0.0, atol=1e-3)
+        # A contact at rest keeps the small penetration that holds its weight
+        assert_allclose(entity.get_pos()[:, 2], support_z + half_extent - 2.5e-4, atol=2.5e-4)
 
 
 @pytest.mark.slow  # ~150s
