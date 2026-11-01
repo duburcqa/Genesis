@@ -213,24 +213,20 @@ class SPHSolver(ParticleSolver):
         """
         # TODO: warm start
         if solve_density:
-            # Scale the factor of the density solve by the inverse of the squared time step
-            kernel_compute_density_star(1.0 / self._substep_dt**2, self.sph_state, self.sph_info)
             max_iters, error_offset = self._df_max_den_iters, self._density0
             error_bound = self._df_max_error_den * 0.01 * self._density0
         else:
-            kernel_compute_density_time_derivative(self.sph_state, self.sph_info)
             max_iters, error_offset = self._df_max_div_iters, 0.0
             # The SI unit of the divergence is s^-1, hence the bound of the density error divided by the time step
             error_bound = (1 / self._substep_dt) * self._df_max_error_div * 0.01 * self._density0
+        # Scale the factor of the density solve by the inverse of the squared time step
+        kernel_compute_dfsph_target(1.0 / self._substep_dt**2, self.sph_state, self.sph_info, solve_density)
 
         iteration = 0
         avg_density_err = 0.0
         while iteration < max_iters:
             kernel_pressure_solve_iteration(self.sph_state, self.sph_info, solve_density=solve_density)
-            if solve_density:
-                kernel_compute_density_star(dfsph_factor_scale=1.0, sph_state=self.sph_state, sph_info=self.sph_info)
-            else:
-                kernel_compute_density_time_derivative(self.sph_state, self.sph_info)
+            kernel_compute_dfsph_target(1.0, self.sph_state, self.sph_info, solve_density)
             avg_density_err = (
                 kernel_compute_density_error(error_offset, self.sph_state, self.sph_info) / self._n_particles
             )
@@ -593,7 +589,7 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo):
 
 
 @qd.func
-def func_task_compute_density_time_derivative(
+def func_task_compute_density_rate(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     v_i = sph_state.particles_reordered.vel[i_p, i_b]
@@ -609,55 +605,30 @@ def func_task_compute_density_time_derivative(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_density_time_derivative(sph_state: SPHState, sph_info: SPHInfo):
-    """Compute the rate of change of the density of the sorted particles, its positive part alone."""
+def kernel_compute_dfsph_target(
+    dfsph_factor_scale: float, sph_state: SPHState, sph_info: SPHInfo, solve_density: qd.template()
+):
+    """
+    Compute what a solve of divergence-free smoothed particle hydrodynamics (DFSPH) cancels for the sorted particles.
+
+    The divergence-free solve cancels the positive part of the rate of change of the density, and the density solve
+    the predicted relative density at the end of the substep beyond one, its factor multiplied by `dfsph_factor_scale`
+    on the way.
+    """
     for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
             ret = qd.Struct(drho=0.0, num_neighbors=0)
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_density_time_derivative)
-
-            # only correct positive divergence
-            drho = qd.max(ret.drho, 0.0)
-            num_neighbors = ret.num_neighbors
-
-            # Do not perform divergence solve when particle deficiency happens
-            if num_neighbors < 20:
-                drho = 0.0
-
+            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_density_rate)
+            drho = gs.qd_float(0.0)
+            if qd.static(solve_density):
+                drho = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.density0[None]
+                drho = qd.max(drho + sph_info.substep_dt[None] * ret.drho, 1.0)
+                sph_state.particles_reordered.dfsph_factor[i_p, i_b] *= dfsph_factor_scale
+            else:
+                # The divergence solve skips a particle short of neighbors
+                if ret.num_neighbors >= 20:
+                    drho = qd.max(ret.drho, 0.0)
             sph_state.particles_reordered.drho[i_p, i_b] = drho
-
-
-@qd.func
-def func_task_compute_density_star(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
-):
-    v_i = sph_state.particles_reordered.vel[i_p, i_b]
-    v_j = sph_state.particles_reordered.vel[j_p, i_b]
-    x_i = sph_state.particles_reordered.pos[i_p, i_b]
-    x_j = sph_state.particles_reordered.pos[j_p, i_b]
-    ret += sph_info.particle_volume[None] * (v_i - v_j).dot(
-        func_cubic_kernel_derivative(x_i - x_j, sph_info.support_radius[None])
-    )
-
-
-@qd.kernel(fastcache=True)
-def kernel_compute_density_star(dfsph_factor_scale: float, sph_state: SPHState, sph_info: SPHInfo):
-    """
-    Predict the relative density of the sorted particles at the end of the substep, at least one.
-
-    The factor of the solves of divergence-free smoothed particle hydrodynamics (DFSPH) is multiplied by
-    `dfsph_factor_scale` on the way.
-    """
-    for i_p, i_b in qd.ndrange(sph_state.particles_reordered.pos.shape[0], sph_state.particles_reordered.pos.shape[1]):
-        if sph_state.particles_reordered.is_active[i_p, i_b]:
-            delta = gs.qd_float(0.0)
-            func_for_all_neighbors(i_p, i_b, delta, sph_state, sph_info, func_task_compute_density_star)
-            drho = (
-                sph_state.particles_reordered.rho[i_p, i_b] / sph_info.density0[None]
-                + sph_info.substep_dt[None] * delta
-            )
-            sph_state.particles_reordered.drho[i_p, i_b] = qd.max(drho, 1.0)
-            sph_state.particles_reordered.dfsph_factor[i_p, i_b] *= dfsph_factor_scale
 
 
 @qd.kernel(fastcache=True)

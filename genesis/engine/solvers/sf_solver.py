@@ -136,24 +136,19 @@ def kernel_divergence(sf_state: SFState):
     """Compute the divergence of the advected velocity, mirrored at the walls of the grid."""
     n_grid = sf_state.vel.shape[0]
     for I in qd.grouped(qd.ndrange(n_grid, n_grid, n_grid)):
-        # The rows of 'vel_lo' and 'vel_hi' are the velocities of the neighbours below and above the cell on each axis
-        vel_lo = qd.Matrix.zero(gs.qd_float, 3, 3)
-        vel_hi = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for d in qd.static(range(3)):
-            offset = qd.Vector.unit(3, d, gs.qd_int)
-            vel_lo[d, :] = sf_state.vel_advected[qd.math.clamp(I - offset, 0, n_grid - 1)]
-            vel_hi[d, :] = sf_state.vel_advected[qd.math.clamp(I + offset, 0, n_grid - 1)]
         vel_c = sf_state.vel_advected[I]
-        # The velocity across a wall of the grid is mirrored
+        div = gs.qd_float(0.0)
         for d in qd.static(range(3)):
             offset = qd.Vector.unit(3, d, gs.qd_int)
-            if not ((I - offset >= 0).all() and (I - offset < n_grid).all()):
-                vel_lo[d, d] = -vel_c[d]
-            if not ((I + offset >= 0).all() and (I + offset < n_grid).all()):
-                vel_hi[d, d] = -vel_c[d]
-        sf_state.div[I] = 0.5 * (
-            vel_hi[0, 0] - vel_lo[0, 0] + vel_hi[1, 1] - vel_lo[1, 1] + vel_hi[2, 2] - vel_lo[2, 2]
-        )
+            # The velocity across a wall of the grid is mirrored
+            vel_lo = -vel_c[d]
+            vel_hi = -vel_c[d]
+            if I[d] > 0:
+                vel_lo = sf_state.vel_advected[I - offset][d]
+            if I[d] < n_grid - 1:
+                vel_hi = sf_state.vel_advected[I + offset][d]
+            div = div + vel_hi - vel_lo
+        sf_state.div[I] = 0.5 * div
 
 
 @qd.kernel(fastcache=True)
