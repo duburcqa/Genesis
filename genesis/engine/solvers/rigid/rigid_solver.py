@@ -1688,29 +1688,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                     "option 'batch_fixed_verts=True'."
                 )
 
-            # Wake up the entities of the links before moving them, and for a fixed link, which never sleeps, the links
-            # resting on or constrained to it, which would stay asleep where it was otherwise
-            if self._use_hibernation:
-                if not all(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_by_links(
-                        links_idx,
-                        envs_idx,
-                        self.dyn_state,
-                        self.hibernation_state,
-                        self.dyn_info,
-                        self.rigid_info,
-                        self.rigid_config,
-                    )
-                if any(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_held_by_links(
-                        links_idx,
-                        envs_idx,
-                        self.dyn_state,
-                        self.hibernation_state,
-                        self.dyn_info,
-                        self.rigid_info,
-                        self.rigid_config,
-                    )
+            self._wake_links(links_idx, envs_idx)
 
             kernel_set_links_pos(
                 links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
@@ -1827,28 +1805,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             if has_fixed_verts and not (set_all_envs and (torch.diff(quat, dim=0).abs() < gs.EPS).all()):
                 gs.raise_exception("Impossible to set env-specific quat for fixed links with at least one geometry.")
 
-            # Wake up the entities of the links before rotating them (see 'set_base_links_pos')
-            if self._use_hibernation:
-                if not all(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_by_links(
-                        links_idx,
-                        envs_idx,
-                        self.dyn_state,
-                        self.hibernation_state,
-                        self.dyn_info,
-                        self.rigid_info,
-                        self.rigid_config,
-                    )
-                if any(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_held_by_links(
-                        links_idx,
-                        envs_idx,
-                        self.dyn_state,
-                        self.hibernation_state,
-                        self.dyn_info,
-                        self.rigid_info,
-                        self.rigid_config,
-                    )
+            self._wake_links(links_idx, envs_idx)
 
             kernel_set_links_quat(
                 links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
@@ -2301,6 +2258,31 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.clear_errno(envs_idx)
 
         self._update_forward_kinematics(envs_idx)
+
+    def _wake_links(self, links_idx, envs_idx):
+        # Wake up the entities of the (already sanitized) links before a pose is written to them, and for a fixed link,
+        # which never sleeps, the links resting on or constrained to it, which would stay asleep where it was otherwise
+        if self._use_hibernation:
+            if not all([self.links[i_l].is_fixed for i_l in links_idx]):
+                kernel_wake_up_entities_by_links(
+                    links_idx,
+                    envs_idx,
+                    self.dyn_state,
+                    self.hibernation_state,
+                    self.dyn_info,
+                    self.rigid_info,
+                    self.rigid_config,
+                )
+            if any([self.links[i_l].is_fixed for i_l in links_idx]):
+                kernel_wake_up_entities_held_by_links(
+                    links_idx,
+                    envs_idx,
+                    self.dyn_state,
+                    self.hibernation_state,
+                    self.dyn_info,
+                    self.rigid_info,
+                    self.rigid_config,
+                )
 
     def _wake_dofs(self, dofs_idx, envs_idx):
         # Revive any hibernated entity owning these (already sanitized) dofs before a state is written to them;
