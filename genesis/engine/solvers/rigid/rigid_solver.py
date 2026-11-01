@@ -36,7 +36,6 @@ from genesis.utils.misc import (
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
-    qd_zero_grad,
     tensor_to_array,
 )
 
@@ -1424,19 +1423,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         """Record the forward kinematics up to date once integrated, unless MuJoCo compatibility defers them."""
         self._is_forward_pos_updated = not self._enable_mujoco_compatibility
         self._is_forward_vel_updated = not self._enable_mujoco_compatibility
-
-    def reset_grad(self):
-        # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
-        if self._requires_grad:
-            qd_zero_grad(self.dyn_state.links)
-            qd_zero_grad(self.dyn_state.dofs)
-            qd_zero_grad(self.dyn_state.joints)
-            qd_zero_grad(self.rigid_info)
-            qd_zero_grad(self.dyn_state.geoms)
-            qd_zero_grad(self.dyn_state.entities)
-            # One flush for the zeroing batch; see qd_zero_grad in misc.py.
-            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-                torch.mps.synchronize()
 
     # The integration runs at the end of the substep, unless another System relocates it (see 'integration')
     substep_post_coupling = ()

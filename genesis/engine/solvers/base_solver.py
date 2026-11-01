@@ -17,7 +17,7 @@ from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.step import Dynamics, Integration
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import Size
+from genesis.utils.data import Data, Size
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -28,6 +28,7 @@ from genesis.utils.misc import (
     qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
+    qd_zero_grad,
     sanitize_index,
     sanitize_indexed_tensor,
     tensor_to_array,
@@ -525,7 +526,18 @@ class Solver(RBC, Dynamics, Integration):
             torch.mps.synchronize()
 
     def reset_grad(self) -> None:
-        """Zero the adjoint of the state of the solver, from which a backward pass starts."""
+        """Zero the adjoints of the structs the solver holds, from which a backward pass starts.
+
+        Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros.
+        """
+        if not self._requires_grad:
+            return
+        for value in vars(self).values():
+            if isinstance(value, Data):
+                qd_zero_grad(value)
+        # One flush for the zeroing batch (see qd_zero_grad)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

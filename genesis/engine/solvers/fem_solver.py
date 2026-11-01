@@ -19,7 +19,7 @@ from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums, PCGScalars
-from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, qd_zero_grad, tensor_to_array
+from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, tensor_to_array
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -399,17 +399,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_surface_elements = 0
         # Whether the Hessian of the materials whose Hessian does not depend on the deformation is computed already
         self._is_hessian_ready = False
-
-    def reset_grad(self):
-        # Every adjoint the backward pass writes accumulates, so a pass starts from zeros
-        if not self._sim.requires_grad:
-            return
-        qd_zero_grad(self.fem_state.vertices)
-        qd_zero_grad(self.fem_state.actu)
-        qd_zero_grad(self.fem_state.explicit_corners)
-        # One flush for the zeroing batch, see qd_zero_grad in misc.py
-        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-            torch.mps.synchronize()
 
     def build(self):
         super().build()

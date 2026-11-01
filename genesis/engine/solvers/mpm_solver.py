@@ -19,7 +19,7 @@ from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
-from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch, qd_zero_grad
+from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch
 
 from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_scalar
 
@@ -489,16 +489,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self.boundary = CubeBoundary(
             lower=self._lower_bound + self.boundary_padding, upper=self._upper_bound - self.boundary_padding
         )
-
-    def reset_grad(self):
-        # Every adjoint the backward pass writes accumulates, so a pass starts from zeros
-        if not self._sim.requires_grad:
-            return
-        qd_zero_grad(self.mpm_state.particles)
-        qd_zero_grad(self.mpm_state.grid)
-        # One flush for the zeroing batch, see qd_zero_grad in misc.py
-        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-            torch.mps.synchronize()
 
     def build(self):
         super().build()
