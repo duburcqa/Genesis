@@ -217,9 +217,9 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
                 rcm=not config.sparse_solve,
                 island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
                 worklists=not (config.enable_tiled_island_seed and not config.is_single_island),
-                backward=not solver._requires_grad,
+                backward=not solver.requires_grad,
             ),
-            requires_grad=solver._requires_grad,
+            requires_grad=solver.requires_grad,
             # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
             # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
             # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no
@@ -450,7 +450,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         The backward pass of a substep seeds it from the gradient of the acceleration (see
         'solve_rigid_constraints_backward').
         """
-        if not self._solver._requires_grad:
+        if not self._solver.requires_grad:
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 
         # 1. We first need to find a solution to A^T * u = g system.

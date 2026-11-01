@@ -68,7 +68,7 @@ class MPR[LayoutT: Layout](System):
                 # A fraction of the geom pair scale, turned into a length per pair: how close the portal must come to
                 # the surface to count as having reached it, and the magnitude the ray is re-seeded with when the two
                 # geoms' centres coincide.
-                CCD_TOLERANCE=1e-6 if rigid_solver._enable_mujoco_compatibility else 1e-5,
+                CCD_TOLERANCE=1e-6 if rigid_solver.rigid_config.enable_mujoco_compatibility else 1e-5,
                 # Bounds that refinement, which is not otherwise guaranteed to terminate.
                 CCD_ITERATIONS=50,
             )

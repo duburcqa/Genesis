@@ -1539,7 +1539,7 @@ class RigidData(Data):
             dofs_info_envs=solver._B if options.batch_dofs_info else (),
             links_info_envs=solver._B if options.batch_links_info else (),
             joints_info_envs=solver._B if options.batch_joints_info else (),
-            link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
+            link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver.requires_grad else 1,
             entity_dofs=entity_dofs,
         )
         values = dict(EPS=gs.EPS)
@@ -1556,7 +1556,7 @@ class RigidData(Data):
                 child_links=np.count_nonzero(solver._links_parent_idx >= 0),
             )
             values.update(
-                substep_dt=solver._substep_dt,
+                substep_dt=solver.substep_dt,
                 iterations=options.iterations,
                 tolerance=options.tolerance,
                 ls_iterations=options.ls_iterations,
@@ -1564,7 +1564,7 @@ class RigidData(Data):
                 noslip_iterations=options.noslip_iterations,
                 noslip_tolerance=options.noslip_tolerance,
                 impratio=options.impratio,
-                n_equalities=solver._n_equalities,
+                n_equalities=solver.n_equalities,
                 n_candidate_equalities=solver.n_candidate_equalities_,
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )
@@ -1581,8 +1581,8 @@ class RigidData(Data):
                 level_sweep=not (is_dynamic and config.enable_level_sweep),
                 tiled_mass=not (is_dynamic and config.enable_register_tiled_mass),
                 midpoint=not (is_dynamic and config.integrator != gs.integrator.Euler),
-                backward=not solver._requires_grad,
+                backward=not solver.requires_grad,
                 kinematics=entity_dofs == 0,
             ),
-            requires_grad=solver._requires_grad,
+            requires_grad=solver.requires_grad,
         )

@@ -88,7 +88,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         "broadphase",
         "narrowphase",
         "pruning",
-        is_graph=lambda collider: not collider._solver._requires_grad,
+        is_graph=lambda collider: not collider._solver.requires_grad,
         is_launched_apart=True,
     )
 
@@ -100,8 +100,8 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         self._solver = rigid_solver
 
     def build(self) -> None:
-        self._mc_perturbation = 1e-3 if self._solver._enable_mujoco_compatibility else 5e-3
-        self._mc_tolerance = 1e-3 if self._solver._enable_mujoco_compatibility else 1.5e-2
+        self._mc_perturbation = 1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 5e-3
+        self._mc_tolerance = 1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 1.5e-2
         self._box_MAXCONPAIR = 16
         self._diff_pos_tolerance = 1e-2
         self._diff_normal_tolerance = 1e-2
@@ -257,7 +257,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         if (
             self.collider_config.has_non_box_plane_convex_convex
             and gs.backend != gs.cpu
-            and not self._solver._requires_grad
+            and not self._solver.requires_grad
         ):
             return Queued
         return PerEnv
@@ -275,12 +275,12 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     def _init_static_config(self) -> None:
         # Identify the convex collision detection (ccd) algorithm
         if self._solver._options.use_gjk_collision:
-            if self._solver._enable_mujoco_compatibility:
+            if self._solver.rigid_config.enable_mujoco_compatibility:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MJ_GJK
             else:
                 ccd_algorithm = CCD_ALGORITHM_CODE.GJK
         else:
-            if self._solver._enable_mujoco_compatibility:
+            if self._solver.rigid_config.enable_mujoco_compatibility:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MJ_MPR
             else:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MPR
@@ -388,7 +388,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         max_contacts = max_candidate_contacts
         if (
             self.collider_config.has_prunable_contacts
-            and not self._solver._requires_grad
+            and not self._solver.requires_grad
             and self._solver._options.contact_pruning_tolerance is not None
         ):
             geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
@@ -728,7 +728,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             # smoothly curved Minkowski boundary on which EPA never converges, and no contact is ever generated -
             # the bodies silently tunnel. Faceted partners (box, mesh) and the analytical plane branch are unaffected,
             # and sphere-sphere pairs are reconstructed in closed form (func_differentiable_sphere_contact).
-            if self._solver._requires_grad:
+            if self._solver.requires_grad:
                 is_smooth_a = (valid_type_a == gs.GEOM_TYPE.SPHERE) | (valid_type_a == gs.GEOM_TYPE.ELLIPSOID)
                 is_smooth_b = (valid_type_b == gs.GEOM_TYPE.SPHERE) | (valid_type_b == gs.GEOM_TYPE.ELLIPSOID)
                 is_sphere_sphere = (valid_type_a == gs.GEOM_TYPE.SPHERE) & (valid_type_b == gs.GEOM_TYPE.SPHERE)
@@ -1266,7 +1266,7 @@ class Pruning(System):
 
     def __init__(self, collider: Annotated[Collider, Enabled("has_possible_pairs")], rigid_solver: RigidSolver) -> None:
         self._collider = collider
-        self._requires_grad = rigid_solver._requires_grad
+        self._requires_grad = rigid_solver.requires_grad
 
     @property
     def prune(self) -> tuple[Callable, ...]:
