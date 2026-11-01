@@ -1127,7 +1127,7 @@ def _func_elastomer_min_signed_dist_bvh(
             if not track_geom_mask[i_b, i_s, i_g]:
                 continue
 
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
+            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
             v0 = tri[:, 0]
             v1 = tri[:, 1]
             v2 = tri[:, 2]

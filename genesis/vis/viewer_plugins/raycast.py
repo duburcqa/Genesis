@@ -7,11 +7,11 @@ import torch
 from typing_extensions import override
 
 import genesis as gs
-from genesis.engine.bvh import BVHState, BVHStaticConfig
+from genesis.engine.bvh import BVHState, BVHStaticConfig, get_bvh_data
 from genesis.ext.pyrender.camera import OrthographicCamera
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, with_lock
 from genesis.utils.raycast import Ray, RayHit
-from genesis.utils.raycast_qd import RaycastResult
+from genesis.utils.raycast_qd import RaycastResult, kernel_cast_ray, kernel_refresh_bvh
 
 from .base import ViewerPlugin
 
@@ -19,19 +19,18 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.node import Node
-    from genesis.engine.bvh import BVHState, BVHStaticConfig
-    from genesis.utils.raycast_qd import RaycastResult
 
 
 class RaycastTarget(NamedTuple):
     """One bounding volume hierarchy (BVH) the viewer casts against, over one solver's collision or visual mesh."""
 
     solver: "KinematicSolver"
-    bvh_state: "BVHState"
-    bvh_config: "BVHStaticConfig"
-    result: "RaycastResult"
-    # (n_vfaces,) opt-in mask for a visual BVH; None for a collision BVH, which covers every face.
-    vfaces_mask: torch.Tensor | None
+    is_visual: bool
+    bvh_state: BVHState
+    bvh_config: BVHStaticConfig
+    result: RaycastResult
+    # (n_vfaces,) opt-in mask for a visual BVH, empty for a collision BVH, which covers every face.
+    vfaces_mask: torch.Tensor
 
 
 class Raycaster:
@@ -58,28 +57,27 @@ class Raycaster:
     """
 
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
-        # NOTE: delayed imports to avoid pulling in rigid_solver before gs is fully initialized.
-        from genesis.engine.bvh import BVHState, get_bvh_data
-        from genesis.utils.raycast_qd import RaycastResult
-
         self.scene = scene
         self._envs_offset = torch.as_tensor(scene.envs_offset, dtype=gs.tc_float, device=gs.device)
         self.targets: list[RaycastTarget] = []
         self._lock = Lock()
 
         n_envs_max = scene._B
+        # Every env builds its own tree, over every face in order
+        self._trees_env_idx = torch.arange(n_envs_max, dtype=gs.tc_int, device=gs.device)
+        self._faces_idx = torch.empty((0,), dtype=gs.tc_int, device=gs.device)
         # Visual meshes exist on both solvers, while collision geometry is the rigid solver's alone.
         solvers = (scene.sim.rigid_solver, scene.sim.kinematic_solver) if use_visual_geom else (scene.sim.rigid_solver,)
         for solver in solvers:
             if not solver.is_active:
                 continue
-            vfaces_mask = None
+            vfaces_mask = torch.empty((0,), dtype=gs.tc_bool, device=gs.device)
             if use_visual_geom:
                 vfaces_mask = solver.vfaces_raycast_mask
                 if not vfaces_mask.any():
                     continue
                 # The tree spans every vface, masked-out ones staying unhittable, so a leaf payload is the vface
-                # index itself (see kernel_refresh_visual_bvh).
+                # index itself (see kernel_refresh_bvh).
                 n_slots = vfaces_mask.shape[0]
             else:
                 n_slots = solver.dyn_info.faces.geom_idx.shape[0]
@@ -88,7 +86,7 @@ class Raycaster:
             bvh = get_bvh_data(n_envs_max, n_slots)
             result = RaycastResult(sizes=dict(envs=n_envs_max))
             bvh_state = BVHState(sizes=bvh.sizes, unused=bvh.unused)
-            self.targets.append(RaycastTarget(solver, bvh_state, bvh.config, result, vfaces_mask))
+            self.targets.append(RaycastTarget(solver, use_visual_geom, bvh_state, bvh.config, result, vfaces_mask))
 
         if not self.targets:
             what = (
@@ -109,35 +107,28 @@ class Raycaster:
     @with_lock
     def update(self) -> None:
         """Refresh per-env vertex positions, AABBs and rebuild every BVH."""
-        from genesis.utils.raycast_qd import kernel_refresh_collision_bvh, kernel_refresh_visual_bvh
-
         for target in self.targets:
             solver = target.solver
-            if target.vfaces_mask is not None:
+            if target.is_visual:
                 # A visual vertex follows its vgeom pose, except on an entity opting into custom vverts, where it
-                # follows the vverts buffer instead (see get_visual_vvert_pos). Refreshing the poses therefore covers
+                # follows the vverts buffer instead (see get_triangle_vertices). Refreshing the poses therefore covers
                 # every vertex this pass owns, the buffer moving only when the user calls set_vverts.
                 solver.update_forward_pos()
                 solver.update_vgeoms()
-                kernel_refresh_visual_bvh(
-                    target.vfaces_mask,
-                    solver.dyn_state,
-                    target.bvh_state,
-                    solver.dyn_info,
-                    target.bvh_config,
-                    solver.rigid_config,
-                    eps=gs.EPS,
-                )
-            else:
-                kernel_refresh_collision_bvh(
-                    solver.dyn_state,
-                    target.bvh_state,
-                    solver.dyn_info,
-                    target.bvh_config,
-                    solver.rigid_config,
-                    eps=gs.EPS,
-                    update_verts=True,
-                )
+            kernel_refresh_bvh(
+                self._trees_env_idx,
+                self._faces_idx,
+                target.vfaces_mask,
+                solver.dyn_state,
+                target.bvh_state,
+                solver.dyn_info,
+                target.bvh_config,
+                solver.rigid_config,
+                eps=gs.EPS,
+                is_visual=target.is_visual,
+                is_subset=False,
+                update_verts=not target.is_visual,
+            )
 
     @with_lock
     def cast(self, ray_origin, ray_direction, max_range: float = 1000.0, envs_idx=None) -> RayHit | None:
@@ -159,8 +150,6 @@ class Raycaster:
         envs_idx : optional
             Indices of envs to raycast. Defaults to all envs.
         """
-        from genesis.utils.raycast_qd import kernel_cast_ray
-
         ray_origin = torch.as_tensor(ray_origin, dtype=gs.tc_float, device=gs.device)
         ray_direction = torch.as_tensor(ray_direction, dtype=gs.tc_float, device=gs.device)
         rays_origin = ray_origin - self._envs_offset
@@ -168,7 +157,6 @@ class Raycaster:
         closest_hit: RayHit | None = None
         for target in self.targets:
             solver = target.solver
-            is_visual = target.vfaces_mask is not None
             # Each pass caps its traversal at the best distance so far, so any hit it reports is closer by
             # construction and the closest hit across targets needs no further comparison.
             kernel_cast_ray(
@@ -181,7 +169,7 @@ class Raycaster:
                 solver.dyn_info,
                 max_range if closest_hit is None else closest_hit.distance,
                 eps=gs.EPS,
-                is_visual=is_visual,
+                is_visual=target.is_visual,
             )
 
             # A no-hit env holds +inf, so argmin lands on the closest hitting env; geom_idx then rejects the
@@ -197,7 +185,7 @@ class Raycaster:
             position = position + self.scene.envs_offset[winner]
             # The normal escapes into the returned hit, which outlives the lock, while the next cast rewrites its buffer
             normal = qd_to_numpy(target.result.normal, row_mask=winner, keepdim=False, transpose=True, copy=True)
-            geoms = solver.vgeoms if is_visual else solver.geoms
+            geoms = solver.vgeoms if target.is_visual else solver.geoms
             geom = geoms[geom_idx] if 0 <= geom_idx < len(geoms) else None
 
             closest_hit = RayHit(distance, position, normal, geom, winner if self.scene.n_envs > 0 else None)

@@ -593,7 +593,7 @@ def _func_query_contact_depth_penetration_bvh(
             if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
                 continue
 
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
+            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
             v0 = tri[:, 0]
             v1 = tri[:, 1]
             v2 = tri[:, 2]
@@ -670,7 +670,7 @@ def _func_query_contact_depth_bvh(
             if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
                 continue
 
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
+            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
             v0 = tri[:, 0]
             v1 = tri[:, 1]
             v2 = tri[:, 2]

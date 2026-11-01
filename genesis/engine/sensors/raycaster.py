@@ -13,16 +13,7 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.sensors import RaycastPattern, Raycaster as RaycasterOptions
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
-from genesis.utils.raycast_qd import (
-    kernel_cast_rays,
-    kernel_cast_rays_visual,
-    kernel_refresh_collision_bvh,
-    kernel_refresh_collision_subset_bvh,
-    kernel_refresh_grouped_collision_bvh,
-    kernel_refresh_grouped_collision_subset_bvh,
-    kernel_refresh_grouped_visual_bvh,
-    kernel_refresh_visual_bvh,
-)
+from genesis.utils.raycast_qd import kernel_cast_rays, kernel_refresh_bvh
 from genesis.vis.rasterizer_context import RasterizerContext
 
 from .base_sensor import (
@@ -46,15 +37,18 @@ class BVHContext:
     """A solver's raycast BVH and the bookkeeping for rebuilding and casting it."""
 
     solver: "KinematicSolver"
+    # Whether the BVH covers the visual mesh of the solver rather than its collision mesh
+    is_visual: bool
+    # The leaves of each tree: one per face, per face of the subset faces_idx, or per vface
+    n_leaves: int
     # None for a static entry until the first RaycastContext.update sizes them to the detected tree count (one tree
-    # per distinct per-env geometry); allocated per env up front for movable entries.
+    # per distinct per-env geometry); allocated per env up front for movable entries (see RaycastContext._size_trees).
     bvh_state: BVHState | None = None
     bvh_config: BVHStaticConfig | None = None
     # The number of trees of the set, one per environment or one per distinct geometry (see env_bvh_idx)
     n_trees: int = 0
-    # None for a collision BVH (faces_info / verts_info, no per-face mask), else an int8 (n_vfaces,) tensor selecting
-    # which visual faces contribute.
-    raycast_mask: torch.Tensor | None = None
+    # (n_vfaces,) mask selecting which visual faces contribute, empty for a collision BVH
+    raycast_mask: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_bool)
 
     # True when the physics cannot move any of the geometry this BVH covers (every covered collision face sits on a
     # fixed link; for a visual BVH, all links in the solver are fixed), so that geometry only ever changes through an
@@ -84,9 +78,9 @@ class BVHContext:
     bvh_by_n_trees: dict[int, tuple[BVHState, BVHStaticConfig]] = field(default_factory=dict)
     # Global face index at each AABB slot, for a collision BVH over a compacted face subset (see
     # RaycastContext.activate for the static/dynamic face split); update() rewrites the sorted leaf payloads with it
-    # after every build, so traversals read global faces directly. None when the BVH covers every face in order and
+    # after every build, so traversals read global faces directly. Empty when the BVH covers every face in order and
     # for visual entries.
-    faces_idx: torch.Tensor | None = None
+    faces_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
 
 
 class RaycastContext(SharedSensorContext):
@@ -117,7 +111,7 @@ class RaycastContext(SharedSensorContext):
         """The rigid solver's collision BVH entries: one or two trees jointly covering every collision face, with
         global-face leaf payloads (see activate). Empty if no rigid solver is active.
         """
-        return [entry for entry in self.bvh_contexts if entry.raycast_mask is None]
+        return [entry for entry in self.bvh_contexts if not entry.is_visual]
 
     @staticmethod
     def _group_envs_by_parts(B: int, parts: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -171,9 +165,9 @@ class RaycastContext(SharedSensorContext):
         if entry.is_env_uniform:
             return cls._group_envs_by_parts(solver._B, [])
         parts = []
-        if entry.raycast_mask is None:
+        if not entry.is_visual:
             links_mask = free_verts_mask = None
-            if entry.faces_idx is not None:
+            if entry.faces_idx.numel() > 0:
                 subset_geoms_idx = qd_to_torch(solver.dyn_info.faces.geom_idx, entry.faces_idx)
                 links_mask = torch.zeros(solver.n_links, dtype=torch.bool, device=gs.device)
                 links_mask[qd_to_torch(solver.dyn_info.geoms.link_idx, subset_geoms_idx)] = True
@@ -219,14 +213,14 @@ class RaycastContext(SharedSensorContext):
         return cls._group_envs_by_parts(solver._B, parts)
 
     @staticmethod
-    def _sized_grouped_trees(entry: BVHContext, n_trees: int, n_aabbs: int):
-        """Point a grouped static entry at its set of n_trees trees over n_aabbs leaves, allocating and pooling it on
-        first use (see bvh_by_n_trees for why allocations are pooled)."""
+    def _size_trees(entry: BVHContext, n_trees: int):
+        """Point an entry at its set of n_trees trees, allocating and pooling it on first use (see bvh_by_n_trees for
+        why allocations are pooled)."""
         if entry.bvh_state is not None and entry.n_trees == n_trees:
             return
         bvh = entry.bvh_by_n_trees.get(n_trees)
         if bvh is None:
-            bvh_config, bvh_sizes, bvh_unused = get_bvh_data(n_trees, n_aabbs)
+            bvh_config, bvh_sizes, bvh_unused = get_bvh_data(n_trees, entry.n_leaves)
             bvh = entry.bvh_by_n_trees[n_trees] = (BVHState(sizes=bvh_sizes, unused=bvh_unused), bvh_config)
         entry.bvh_state, entry.bvh_config = bvh
         entry.n_trees = n_trees
@@ -287,8 +281,10 @@ class RaycastContext(SharedSensorContext):
                         if subset_faces_idx is None
                         else faces_is_env_uniform[subset_faces_idx].all()
                     )
-                    faces_idx = None
+                    n_leaves = n_faces
+                    faces_idx = torch.empty((0,), dtype=gs.tc_int, device=gs.device)
                     if subset_faces_idx is not None:
+                        n_leaves = subset_faces_idx.shape[0]
                         faces_idx = torch.as_tensor(subset_faces_idx, dtype=gs.tc_int, device=gs.device)
                     # Watch GEOMETRY changes that can reach this entry's faces: filtering the subscription on the
                     # fixed links owning them keeps movable-link mutations (e.g. a per-step robot teleport) from
@@ -307,7 +303,8 @@ class RaycastContext(SharedSensorContext):
                         # high-poly terrain.
                         entry = BVHContext(
                             solver,
-                            raycast_mask=None,
+                            is_visual=False,
+                            n_leaves=n_leaves,
                             maybe_static=True,
                             rebuild_subscriber=rebuild_subscriber,
                             is_env_uniform=is_env_uniform,
@@ -315,16 +312,14 @@ class RaycastContext(SharedSensorContext):
                         )
                     else:
                         # A movable subset rebuilds every step and may diverge per env, so keep one tree per env.
-                        bvh = get_bvh_data(n_envs, n_faces if subset_faces_idx is None else subset_faces_idx.shape[0])
                         entry = BVHContext(
                             solver,
-                            BVHState(sizes=bvh.sizes, unused=bvh.unused),
-                            bvh.config,
-                            n_envs,
-                            raycast_mask=None,
+                            is_visual=False,
+                            n_leaves=n_leaves,
                             env_bvh_idx=env_tree_identity,
                             faces_idx=faces_idx,
                         )
+                        self._size_trees(entry, n_envs)
                     self._bvh_contexts.append(entry)
             mask = solver.vfaces_raycast_mask
             if mask.any():
@@ -334,14 +329,20 @@ class RaycastContext(SharedSensorContext):
                     rebuild_subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
                     solver.subscribe(rebuild_subscriber)
                     entry = BVHContext(
-                        solver, raycast_mask=mask, maybe_static=True, rebuild_subscriber=rebuild_subscriber
+                        solver,
+                        is_visual=True,
+                        n_leaves=mask.shape[0],
+                        raycast_mask=mask,
+                        maybe_static=True,
+                        rebuild_subscriber=rebuild_subscriber,
                     )
                 else:
                     # A movable visual mesh rebuilds every step and may diverge per env: one tree per env.
-                    bvh = get_bvh_data(n_envs, mask.shape[0])
                     env_tree_identity = torch.arange(n_envs, dtype=gs.tc_int, device=gs.device)
-                    bvh_state = BVHState(sizes=bvh.sizes, unused=bvh.unused)
-                    entry = BVHContext(solver, bvh_state, bvh.config, n_envs, mask, env_bvh_idx=env_tree_identity)
+                    entry = BVHContext(
+                        solver, is_visual=True, n_leaves=mask.shape[0], raycast_mask=mask, env_bvh_idx=env_tree_identity
+                    )
+                    self._size_trees(entry, n_envs)
                 self._bvh_contexts.append(entry)
 
         self.update()
@@ -370,97 +371,39 @@ class RaycastContext(SharedSensorContext):
             if entry.maybe_static and not entry.needs_rebuild:
                 continue
             solver = entry.solver
-            if entry.raycast_mask is None:
-                if entry.maybe_static:
-                    # Static collision geometry: refresh every env's verts, group envs by identical geometry, and
-                    # build one tree per distinct geometry from its representative env. A per-env set_pos on a fixed
-                    # link splits groups (up to one tree per env) and an identical reset merges them back, so a
-                    # shared tree is never stale.
-                    if solver is not verts_updated_solver:
-                        kernel_update_all_verts(solver.dyn_state, solver.dyn_info, solver.rigid_config)
-                    env_bvh_idx, batch_repr_env = self._static_entry_groups(entry)
-                    if entry.faces_idx is None:
-                        n_slots = solver.dyn_info.faces.geom_idx.shape[0]
-                    else:
-                        n_slots = entry.faces_idx.shape[0]
-                    self._sized_grouped_trees(entry, batch_repr_env.shape[0], n_slots)
-                    entry.env_bvh_idx = env_bvh_idx
-                    if entry.faces_idx is None:
-                        kernel_refresh_grouped_collision_bvh(
-                            batch_repr_env,
-                            solver.dyn_state,
-                            entry.bvh_state,
-                            solver.dyn_info,
-                            entry.bvh_config,
-                            solver.rigid_config,
-                            eps=gs.EPS,
-                        )
-                    else:
-                        kernel_refresh_grouped_collision_subset_bvh(
-                            batch_repr_env,
-                            entry.faces_idx,
-                            solver.dyn_state,
-                            entry.bvh_state,
-                            solver.dyn_info,
-                            entry.bvh_config,
-                            solver.rigid_config,
-                            eps=gs.EPS,
-                        )
-                elif entry.faces_idx is None:
-                    kernel_refresh_collision_bvh(
-                        solver.dyn_state,
-                        entry.bvh_state,
-                        solver.dyn_info,
-                        entry.bvh_config,
-                        solver.rigid_config,
-                        eps=gs.EPS,
-                        update_verts=solver is not verts_updated_solver,
-                    )
-                else:
-                    kernel_refresh_collision_subset_bvh(
-                        entry.faces_idx,
-                        solver.dyn_state,
-                        entry.bvh_state,
-                        solver.dyn_info,
-                        entry.bvh_config,
-                        solver.rigid_config,
-                        eps=gs.EPS,
-                        update_verts=solver is not verts_updated_solver,
-                    )
-                verts_updated_solver = solver
-            else:
+            if entry.is_visual:
                 # Reads vverts_state.pos as the source of vvert positions. The buffer is seeded by FK at scene.build()
                 # and refreshed for each user-driven entity via set_vverts; entries set via set_vverts survive across
                 # calls until set_vverts(None) re-runs FK over the entity's vgeoms. raycast_mask gates which vfaces
                 # contribute to the BVH; masked-out vfaces keep an inverted AABB and are skipped by ray queries.
                 solver.update_forward_pos()
                 solver.update_vgeoms()
-                if entry.maybe_static:
-                    # Static visual geometry: group envs by identical visual geometry and build one tree per
-                    # distinct geometry from its representative env, mirroring the static collision path above.
-                    env_bvh_idx, batch_repr_env = self._static_entry_groups(entry)
-                    self._sized_grouped_trees(entry, batch_repr_env.shape[0], solver.dyn_info.vfaces.vgeom_idx.shape[0])
-                    entry.env_bvh_idx = env_bvh_idx
-                    kernel_refresh_grouped_visual_bvh(
-                        batch_repr_env,
-                        entry.raycast_mask,
-                        solver.dyn_state,
-                        entry.bvh_state,
-                        solver.dyn_info,
-                        entry.bvh_config,
-                        solver.rigid_config,
-                        eps=gs.EPS,
-                    )
-                else:
-                    kernel_refresh_visual_bvh(
-                        entry.raycast_mask,
-                        solver.dyn_state,
-                        entry.bvh_state,
-                        solver.dyn_info,
-                        entry.bvh_config,
-                        solver.rigid_config,
-                        eps=gs.EPS,
-                    )
+            elif entry.maybe_static and solver is not verts_updated_solver:
+                # The grouping below reads the vertices of every env, so they are refreshed before it
+                kernel_update_all_verts(solver.dyn_state, solver.dyn_info, solver.rigid_config)
+            batch_repr_env = entry.env_bvh_idx
+            if entry.maybe_static:
+                # Static geometry: group envs by identical geometry, and build one tree per distinct geometry from its
+                # representative env. A per-env set_pos on a fixed link splits groups (up to one tree per env) and an
+                # identical reset merges them back, so a shared tree is never stale.
+                entry.env_bvh_idx, batch_repr_env = self._static_entry_groups(entry)
+                self._size_trees(entry, batch_repr_env.shape[0])
+            kernel_refresh_bvh(
+                batch_repr_env,
+                entry.faces_idx,
+                entry.raycast_mask,
+                solver.dyn_state,
+                entry.bvh_state,
+                solver.dyn_info,
+                entry.bvh_config,
+                solver.rigid_config,
+                eps=gs.EPS,
+                is_visual=entry.is_visual,
+                is_subset=entry.faces_idx.numel() > 0,
+                update_verts=not entry.is_visual and not entry.maybe_static and solver is not verts_updated_solver,
+            )
+            if not entry.is_visual:
+                verts_updated_solver = solver
             entry.needs_rebuild = False
 
     def reset(self, envs_idx):
@@ -638,67 +581,44 @@ class RaycasterSensor(
         # chain into one output buffer: the first initializes every slot (is_merge=False), each subsequent one merges
         # in closer hits, and the final one (is_last) settles misses to no_hit_value - see write_ray_hit.
         launches = []
-        for solver in dict.fromkeys(entry.solver for entry in bvh_contexts):
-            collision_entries = [
-                entry for entry in bvh_contexts if entry.solver is solver and entry.raycast_mask is None
-            ]
+        for solver in dict.fromkeys([entry.solver for entry in bvh_contexts]):
+            collision_entries = [entry for entry in bvh_contexts if entry.solver is solver and not entry.is_visual]
             # The static and the movable set of a solver (see activate), cast in one launch (see kernel_cast_rays)
             assert len(collision_entries) <= 2
             if collision_entries:
                 launches.append((solver, collision_entries))
-            for entry in bvh_contexts:
-                if entry.solver is solver and entry.raycast_mask is not None:
-                    launches.append((solver, [entry]))
-        sensor_tables = (
-            links_pos,
-            links_quat,
-            shared_metadata.ray_starts,
-            shared_metadata.ray_dirs,
-            shared_metadata.max_ranges,
-            shared_metadata.no_hit_values,
-            shared_metadata.return_world_frame,
-            shared_metadata.sensor_cache_offsets,
-            shared_metadata.sensor_point_offsets,
-            shared_metadata.sensor_point_counts,
-            shared_metadata.sensor_return_points,
-            raw_data_T,
-        )
+            launches += [(solver, [entry]) for entry in bvh_contexts if entry.solver is solver and entry.is_visual]
         for i, (solver, entries) in enumerate(launches):
             entry_a, entry_b = entries[0], entries[-1]
-            is_merge = i > 0
-            is_last = i == len(launches) - 1
-            # A tree serving several envs wants the env-major thread mapping (see kernel_cast_rays); a per-env tree
-            # set in the launch, the movable one, decides for the ray-major mapping.
-            is_env_major = all(entry.n_trees < solver._B for entry in entries)
-            if entry_a.raycast_mask is None:
-                kernel_cast_rays(
-                    shared_metadata.points_to_sensor_idx,
-                    entry_a.env_bvh_idx,
-                    entry_b.env_bvh_idx,
-                    *sensor_tables,
-                    solver.dyn_state,
-                    entry_a.bvh_state.tree,
-                    entry_b.bvh_state.tree,
-                    solver.dyn_info,
-                    eps=gs.EPS,
-                    is_merge=is_merge,
-                    is_last=is_last,
-                    is_env_major=is_env_major,
-                    is_split=entry_b is not entry_a,
-                )
-            else:
-                kernel_cast_rays_visual(
-                    shared_metadata.points_to_sensor_idx,
-                    entry_a.env_bvh_idx,
-                    *sensor_tables,
-                    solver.dyn_state,
-                    entry_a.bvh_state.tree,
-                    solver.dyn_info,
-                    eps=gs.EPS,
-                    is_merge=is_merge,
-                    is_last=is_last,
-                    is_env_major=is_env_major,
-                )
+            kernel_cast_rays(
+                shared_metadata.points_to_sensor_idx,
+                entry_a.env_bvh_idx,
+                entry_b.env_bvh_idx,
+                links_pos,
+                links_quat,
+                shared_metadata.ray_starts,
+                shared_metadata.ray_dirs,
+                shared_metadata.max_ranges,
+                shared_metadata.no_hit_values,
+                shared_metadata.return_world_frame,
+                shared_metadata.sensor_cache_offsets,
+                shared_metadata.sensor_point_offsets,
+                shared_metadata.sensor_point_counts,
+                shared_metadata.sensor_return_points,
+                raw_data_T,
+                solver.dyn_state,
+                entry_a.bvh_state.tree,
+                entry_b.bvh_state.tree,
+                solver.dyn_info,
+                eps=gs.EPS,
+                is_merge=i > 0,
+                is_last=i == len(launches) - 1,
+                # A tree serving several envs wants the env-major thread mapping (see kernel_cast_rays); a per-env tree
+                # set in the launch, the movable one, decides for the ray-major mapping.
+                is_env_major=all([entry.n_trees < solver._B for entry in entries]),
+                is_visual=entry_a.is_visual,
+                is_split=entry_b is not entry_a,
+            )
 
     def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
         """Make spheres at the start and at the hit point of every ray, for the first rendered environment."""

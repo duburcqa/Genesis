@@ -19,19 +19,14 @@ class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     normal: qd.Tensor = field((float, 3))
 
 
-# FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
-# differ only in the leaf-data fetch (fixed/free verts split vs vverts_state_idx + FK fallback) and in the dataclass
-# shapes of geoms_state vs vgeoms_state. Quadrants does not currently support a qd.func arg that accepts either of
-# two dataclasses with different field sets, so we cannot factor the BVH traversal into a single shared kernel; the
-# kernel-call argument-fusion step strictly matches the annotated dataclass shape and rejects either union typing or
-# qd.template() for dataclass-typed args. Until Quadrants gains generic-dataclass dispatch, the visual variants below
-# stay as parallel copies.
-
-
 @qd.func
-def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
+def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, is_visual: qd.template()):
     """
-    Get the three vertices of a triangle in world space.
+    Get the three vertices of a face of the collision mesh, or of the visual mesh if `is_visual`, in world space.
+
+    A visual vertex of an entity opting into custom vverts (morph.enable_custom_vverts=True) reads its slot of
+    vverts_state.pos, referenced by vverts_state_idx. Any other visual vertex (vverts_state_idx < 0) has no slot, so its
+    position is the rest-pose init_pos transformed by the current pose of its vgeom.
 
     Returns
     -------
@@ -40,12 +35,23 @@ def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: Dyn
     """
     tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i in qd.static(range(3)):
-        i_v = dyn_info.faces.verts_idx[i_f][i]
-        i_fv = dyn_info.verts.verts_state_idx[i_v]
-        if dyn_info.verts.is_fixed[i_v]:
-            tri_vertices[:, i] = dyn_state.fixed_verts.pos[i_fv]
+        if qd.static(is_visual):
+            i_vv = dyn_info.vfaces.vverts_idx[i_f][i]
+            i_state = dyn_info.vverts.vverts_state_idx[i_vv]
+            if i_state >= 0:
+                tri_vertices[:, i] = dyn_state.vverts.pos[i_state, i_b]
+            else:
+                i_vg = dyn_info.vverts.vgeom_idx[i_vv]
+                tri_vertices[:, i] = gu.qd_transform_by_trans_quat(
+                    dyn_info.vverts.init_pos[i_vv], dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b]
+                )
         else:
-            tri_vertices[:, i] = dyn_state.free_verts.pos[i_fv, i_b]
+            i_v = dyn_info.faces.verts_idx[i_f][i]
+            i_fv = dyn_info.verts.verts_state_idx[i_v]
+            if dyn_info.verts.is_fixed[i_v]:
+                tri_vertices[:, i] = dyn_state.fixed_verts.pos[i_fv]
+            else:
+                tri_vertices[:, i] = dyn_state.free_verts.pos[i_fv, i_b]
     return tri_vertices
 
 
@@ -60,9 +66,10 @@ def bvh_ray_cast(
     bvh_tree_state: BVHTreeState,
     dyn_info: DynInfo,
     eps: float,
+    is_visual: qd.template(),
 ):
     """
-    Cast a ray through a BVH and find the closest intersection.
+    Cast a ray through a BVH over the collision mesh, or over the visual mesh if `is_visual`, and find the closest hit.
 
     ``i_t`` selects the tree and ``i_b`` the env whose verts back the leaf triangles: ``i_t == i_b`` for a per-env
     BVH, while a grouped static BVH shared by several envs routes ``i_t`` through ``env_bvh_idx`` (the routed envs
@@ -71,7 +78,7 @@ def bvh_ray_cast(
     Returns
     -------
     hit_face : gs.qd_int
-        index of the hit (global) triangle (-1 if no hit)
+        index of the hit (global) face or vface (-1 if no hit)
     hit_distance : gs.qd_float
         distance to hit point (unchanged max_range if no hit)
     hit_normal : qd.math.vec3
@@ -108,11 +115,11 @@ def bvh_ray_cast(
         if aabb_t >= 0.0 and aabb_t < closest_distance:
             i_left = bvh_tree_state.nodes_left[i_t, node_idx]
             if i_left == -1:  # Leaf node
-                # The leaf payload carries the global face index; see kernel_refresh_collision_bvh.
+                # The leaf payload carries the global face index; see kernel_refresh_bvh.
                 i_f = bvh_tree_state.leaves_idx[i_t, node_idx - (n_triangles - 1)]
 
                 # Get triangle vertices
-                tri_vertices = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
+                tri_vertices = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual)
                 v0, v1, v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
 
                 # Perform ray-triangle intersection
@@ -331,295 +338,69 @@ def triangle_face_normal(v0: qd.types.vector(3), v1: qd.types.vector(3), v2: qd.
     return (v1 - v0).cross(v2 - v0).normalized()
 
 
-@qd.func
-def update_face_aabb(
-    i_t: int,
-    i_a: int,
-    i_f: int,
-    i_b: int,
+@qd.kernel(fastcache=True)
+def kernel_refresh_bvh(
+    batch_repr_env: qd.types.ndarray(ndim=1),
+    faces_idx: qd.types.ndarray(ndim=1),
+    faces_mask: qd.types.ndarray(ndim=1),
     dyn_state: DynState,
     bvh_state: BVHState,
     dyn_info: DynInfo,
+    bvh_config: qd.template(),
     rigid_config: qd.template(),
+    eps: float,
+    is_visual: qd.template(),
+    is_subset: qd.template(),
+    update_verts: qd.template(),
 ):
-    """Fit leaf i_a of tree i_t to face i_f from env i_b's current vertex positions.
-
-    ``i_t == i_b`` for a per-env BVH; a grouped static BVH builds each tree slot from its representative env (see
-    RaycastContext update).
-
-    A face contributes to env i_b only if its geom lies in that env's active geom range (links_info.geom_start /
-    geom_end); otherwise its AABB is left inverted (unhittable) and skipped by ray queries. For a homogeneous solver
-    every geom is always in range, so this never excludes anything. For a heterogeneous solver, where all envs share
-    one vertex buffer but activate different per-env geom ranges, it makes each env cast against only its own variant
-    instead of the union of every variant.
     """
-    leaf_min = qd.math.vec3(qd.math.inf, qd.math.inf, qd.math.inf)
-    leaf_max = -leaf_min
+    Fit the leaf boxes of a BVH set over the collision mesh, or over the visual mesh if `is_visual`, and rebuild it.
 
-    i_g = dyn_info.faces.geom_idx[i_f]
-    i_l = dyn_info.geoms.link_idx[i_g]
-    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    if dyn_info.links.geom_start[I_l] <= i_g and i_g < dyn_info.links.geom_end[I_l]:
-        for i in qd.static(range(3)):
-            i_v = dyn_info.faces.verts_idx[i_f][i]
-            i_fv = dyn_info.verts.verts_state_idx[i_v]
-            pos_v = qd.math.vec3(0.0, 0.0, 0.0)
-            if dyn_info.verts.is_fixed[i_v]:
-                pos_v = dyn_state.fixed_verts.pos[i_fv]
-            else:
-                pos_v = dyn_state.free_verts.pos[i_fv, i_b]
-            leaf_min = qd.min(leaf_min, pos_v)
-            leaf_max = qd.max(leaf_max, pos_v)
-    bvh_state.leaves.aabbs_min[i_t, i_a] = leaf_min
-    bvh_state.leaves.aabbs_max[i_t, i_a] = leaf_max
+    Tree i_t fits the current vertices of env batch_repr_env[i_t]: env i_t for a per-env BVH, the representative env of
+    its group for a grouped static BVH (see RaycastContext.update). The leaves cover every face in order, or the face
+    subset faces_idx if `is_subset`, whose sorted leaf payloads are then rewritten to global faces, so that every
+    traversal reads global faces. The world-space vertices of the collision mesh are refreshed first if `update_verts`.
 
-
-@qd.func
-def get_visual_vvert_pos(i_vv: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
+    A face contributing nothing to its env keeps an inverted AABB (min=+inf, max=-inf), which ray queries treat as a
+    definitive miss: either its geom (vgeom) falls outside the active geom (vgeom) range of the env, or it is a visual
+    face whose faces_mask entry is 0, its entity not opting into raycasting. For a homogeneous solver every geom is
+    always in range. For a heterogeneous solver, where all envs share one vertex buffer but activate different per-env
+    geom ranges, this keeps each env casting against its own variant alone.
     """
-    Return the world-space position of a visual vertex, branching between the custom buffer and FK on the fly.
-
-    Opt-in entities (morph.enable_custom_vverts=True) own a slot in vverts_state.pos referenced by vverts_state_idx.
-    Non-opt-in entities (vverts_state_idx<0) have no slot; their position is recomputed by transforming the rest-pose
-    init_pos with the owning vgeom's current pose.
-    """
-    pos = qd.math.vec3(0.0, 0.0, 0.0)
-    i_state = dyn_info.vverts.vverts_state_idx[i_vv]
-    if i_state >= 0:
-        pos = dyn_state.vverts.pos[i_state, i_b]
-    else:
-        i_vg = dyn_info.vverts.vgeom_idx[i_vv]
-        pos = gu.qd_transform_by_trans_quat(
-            dyn_info.vverts.init_pos[i_vv], dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b]
-        )
-    return pos
-
-
-@qd.func
-def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
-    """Get the three vertices of a triangle from the visual mesh in world space."""
-    tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        i_vv = dyn_info.vfaces.vverts_idx[i_f][i]
-        tri_vertices[:, i] = get_visual_vvert_pos(i_vv, i_b, dyn_state, dyn_info)
-    return tri_vertices
-
-
-@qd.func
-def bvh_ray_cast_visual(
-    i_t,
-    i_b,
-    ray_start,
-    ray_dir,
-    max_range,
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-    eps,
-):
-    """Cast a single ray against the visual-mesh BVH; returns (hit_face, distance, normal).
-
-    See bvh_ray_cast for the tree slot (i_t) / env (i_b) split.
-    """
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-
-    hit_face = -1
-    closest_distance = gs.qd_float(max_range)
-    hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-
-    axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-    if not is_valid_dir:
-        stack_idx = 0
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-        aabb_t = ray_aabb_intersection(
-            ray_start, ray_dir, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx], eps
-        )
-
-        if aabb_t >= 0.0 and aabb_t < closest_distance:
-            i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-            if i_left == -1:
-                i_f = bvh_tree_state.leaves_idx[i_t, node_idx - (n_triangles - 1)]
-
-                tri_vertices = get_visual_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
-                v0, v1, v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
-
-                hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
-
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
-                    closest_distance = hit_distance
-                    hit_face = i_f
-                    hit_normal = triangle_face_normal(v0, v1, v2)
-            else:
-                if stack_idx < STACK_SIZE - 2:
-                    node_stack[stack_idx] = i_left
-                    node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                    stack_idx += 2
-
-    return hit_face, closest_distance, hit_normal
-
-
-@qd.func
-def update_visual_face_aabb(
-    i_t: int,
-    i_f: int,
-    i_b: int,
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    """Fit the AABB of vface i_f in tree slot i_t from env i_b's visual mesh (i_t == i_b for a per-env BVH).
-
-    A vface that does not contribute to env i_b is left with an inverted AABB (min=+inf, max=-inf), which ray queries
-    treat as a definitive miss: either face_mask holds 0, meaning its entity did not opt into raycasting, or its vgeom
-    falls outside env i_b's active vgeom range (links_info.vgeom_start / vgeom_end). For a homogeneous solver every
-    vgeom is always in range. For a heterogeneous solver, where all envs share one visual mesh but activate different
-    per-env vgeom ranges, this keeps each env casting against its own variant alone.
-    """
-    leaf_min = qd.math.vec3(qd.math.inf, qd.math.inf, qd.math.inf)
-    leaf_max = -leaf_min
-    if face_mask[i_f] != 0:
-        i_vg = dyn_info.vfaces.vgeom_idx[i_f]
-        i_l = dyn_info.vgeoms.link_idx[i_vg]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.vgeom_start[I_l] <= i_vg and i_vg < dyn_info.links.vgeom_end[I_l]:
+    if qd.static(update_verts):
+        func_update_all_verts(dyn_state, dyn_info, rigid_config)
+    for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+        i_b = batch_repr_env[i_t]
+        i_f = faces_idx[i_a] if qd.static(is_subset) else i_a
+        is_active = True
+        if qd.static(is_visual):
+            i_vg = dyn_info.vfaces.vgeom_idx[i_f]
+            i_l = dyn_info.vgeoms.link_idx[i_vg]
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            is_active = (
+                faces_mask[i_f] != 0
+                and dyn_info.links.vgeom_start[I_l] <= i_vg
+                and i_vg < dyn_info.links.vgeom_end[I_l]
+            )
+        else:
+            i_g = dyn_info.faces.geom_idx[i_f]
+            i_l = dyn_info.geoms.link_idx[i_g]
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            is_active = dyn_info.links.geom_start[I_l] <= i_g and i_g < dyn_info.links.geom_end[I_l]
+        leaf_min = qd.math.vec3(qd.math.inf, qd.math.inf, qd.math.inf)
+        leaf_max = -leaf_min
+        if is_active:
+            tri_vertices = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual)
             for i in qd.static(range(3)):
-                i_vv = dyn_info.vfaces.vverts_idx[i_f][i]
-                pos_v = get_visual_vvert_pos(i_vv, i_b, dyn_state, dyn_info)
-                leaf_min = qd.min(leaf_min, pos_v)
-                leaf_max = qd.max(leaf_max, pos_v)
-    bvh_state.leaves.aabbs_min[i_t, i_f] = leaf_min
-    bvh_state.leaves.aabbs_max[i_t, i_f] = leaf_max
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_collision_bvh(
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-    update_verts: qd.template(),
-):
-    """Fit the leaf boxes of a per-env collision BVH set covering every face in order and rebuild its trees, after a
-    refresh of the world-space vertices when asked."""
-    if qd.static(update_verts):
-        func_update_all_verts(dyn_state, dyn_info, rigid_config)
-    # The leaves cover every face in order, one tree per env
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_f, i_f, i_t, dyn_state, bvh_state, dyn_info, rigid_config)
+                leaf_min = qd.min(leaf_min, tri_vertices[:, i])
+                leaf_max = qd.max(leaf_max, tri_vertices[:, i])
+        bvh_state.leaves.aabbs_min[i_t, i_a] = leaf_min
+        bvh_state.leaves.aabbs_max[i_t, i_a] = leaf_max
     func_build_bvh(bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_collision_subset_bvh(
-    faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-    update_verts: qd.template(),
-):
-    """Fit the leaf boxes of a per-env collision BVH set over a face subset, rebuild its trees and remap the leaves to
-    global faces, after a refresh of the world-space vertices when asked."""
-    if qd.static(update_verts):
-        func_update_all_verts(dyn_state, dyn_info, rigid_config)
-    for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_a, faces_idx[i_a], i_t, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
-    # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
-    for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
-        bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_collision_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped collision BVH set covering every face in order, from the already refreshed
-    vertices of the representative envs, and rebuild its trees."""
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_f, i_f, batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_collision_subset_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped collision BVH set over a face subset from the already refreshed vertices of the
-    representative envs, rebuild its trees and remap the leaves to global faces."""
-    for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_a, faces_idx[i_a], batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
-    # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
-    for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
-        bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_visual_bvh(
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a per-env visual BVH set, unhittable where the face mask is 0, and rebuild its trees."""
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_visual_face_aabb(i_t, i_f, i_t, face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_visual_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped visual BVH set from its representative envs, unhittable where the face mask is
-    0, and rebuild its trees.
-
-    See RaycastContext.update for the grouping.
-    """
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_visual_face_aabb(i_t, i_f, batch_repr_env[i_t], face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    if qd.static(is_subset):
+        for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+            i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
+            bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
 
 
 @qd.kernel(fastcache=True)
@@ -657,42 +438,17 @@ def kernel_cast_ray(
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         ray_start = qd.math.vec3(rays_start[i_b, 0], rays_start[i_b, 1], rays_start[i_b, 2])
-        # Declared before the compile-time branch, whose body is a nested scope in quadrants.
-        cur_hit_face = -1
-        cur_distance = gs.qd_float(max_range)
-        cur_hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-        if qd.static(is_visual):
-            cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast_visual(
-                i_b,
-                i_b,
-                ray_start,
-                ray_direction_world,
-                max_range,
-                dyn_state,
-                bvh_tree_state,
-                dyn_info,
-                eps,
-            )
-        else:
-            cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
-                i_b,
-                i_b,
-                ray_start,
-                ray_direction_world,
-                max_range,
-                dyn_state,
-                bvh_tree_state,
-                dyn_info,
-                eps,
-            )
-        if cur_hit_face >= 0:
-            result.distance[i_b] = cur_distance
+        hit_face, hit_distance, hit_normal = bvh_ray_cast(
+            i_b, i_b, ray_start, ray_direction_world, max_range, dyn_state, bvh_tree_state, dyn_info, eps, is_visual
+        )
+        if hit_face >= 0:
+            result.distance[i_b] = hit_distance
             if qd.static(is_visual):
-                result.geom_idx[i_b] = dyn_info.vfaces.vgeom_idx[cur_hit_face]
+                result.geom_idx[i_b] = dyn_info.vfaces.vgeom_idx[hit_face]
             else:
-                result.geom_idx[i_b] = dyn_info.faces.geom_idx[cur_hit_face]
-            result.normal[i_b] = cur_hit_normal
-            result.hit_point[i_b] = ray_start + cur_distance * ray_direction_world
+                result.geom_idx[i_b] = dyn_info.faces.geom_idx[hit_face]
+            result.normal[i_b] = hit_normal
+            result.hit_point[i_b] = ray_start + hit_distance * ray_direction_world
 
 
 @qd.func
@@ -831,12 +587,17 @@ def kernel_cast_rays(
     is_merge: qd.template(),
     is_last: qd.template(),
     is_env_major: qd.template(),
+    is_visual: qd.template(),
     is_split: qd.template(),
 ):
-    """Cast every ray of every env against the collision BVH set of a solver, or against its two sets when its faces
-    are split between static and movable links (see RaycastContext.activate), taking the closer hit.
+    """
+    Cast every ray of every env against a BVH set of a solver, or against two of them taking the closer hit.
 
-    The second set casts with the distance of the first hit as its range, so it reports a hit only when closer.
+    The set covers the collision mesh of the solver, or its visual mesh if `is_visual`. `is_split` casts against the
+    two collision sets of a solver whose faces are split between static and movable links (see
+    RaycastContext.activate), the second one with the distance of the first hit as its range, so that it reports a hit
+    only when closer.
+
     See write_ray_hit for `is_merge` / `is_last`, which chain the launches over several BVH sets into one output
     buffer. ``output_hits`` is a 2D array of shape (total_cache_size, n_env) where in the first dimension each
     sensor's data is stored as [sensor_points (n_points * 3), sensor_ranges (n_points)], the point block being present
@@ -871,6 +632,7 @@ def kernel_cast_rays(
             bvh_tree_state_a,
             dyn_info,
             eps,
+            is_visual,
         )
         if qd.static(is_split):
             hit_range = max_ranges[i_s] if hit_face < 0 else hit_distance
@@ -884,87 +646,11 @@ def kernel_cast_rays(
                 bvh_tree_state_b,
                 dyn_info,
                 eps,
+                is_visual,
             )
             if hit_face_b >= 0:
                 hit_face = hit_face_b
                 hit_distance = hit_distance_b
-        write_ray_hit(
-            i_b,
-            i_p,
-            i_s,
-            hit_face,
-            hit_distance,
-            ray_start_world,
-            ray_direction_world,
-            ray_dir_local,
-            is_world_frame,
-            max_ranges,
-            no_hit_values,
-            sensor_cache_offsets,
-            sensor_point_offsets,
-            sensor_point_counts,
-            sensor_return_points,
-            output_hits,
-            eps,
-            is_merge,
-            is_last,
-        )
-
-
-@qd.kernel(fastcache=True)
-def kernel_cast_rays_visual(
-    points_to_sensor_idx: qd.types.ndarray(ndim=1),
-    env_bvh_idx: qd.types.ndarray(ndim=1),
-    links_pos: qd.types.ndarray(ndim=3),
-    links_quat: qd.types.ndarray(ndim=3),
-    ray_starts: qd.types.ndarray(ndim=2),
-    ray_directions: qd.types.ndarray(ndim=2),
-    max_ranges: qd.types.ndarray(ndim=1),
-    no_hit_values: qd.types.ndarray(ndim=1),
-    is_world_frame: qd.types.ndarray(ndim=1),
-    sensor_cache_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_counts: qd.types.ndarray(ndim=1),
-    sensor_return_points: qd.types.ndarray(ndim=1),
-    output_hits: qd.types.ndarray(ndim=2),
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-    eps: float,
-    is_merge: qd.template(),
-    is_last: qd.template(),
-    is_env_major: qd.template(),
-):
-    """Cast every ray of every env against one visual BVH set.
-
-    See kernel_cast_rays for the arguments.
-    """
-    n_points = ray_starts.shape[0]
-    n_envs = output_hits.shape[-1]
-    for i_flat in range(n_points * n_envs):
-        i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
-            i_flat,
-            n_points,
-            n_envs,
-            points_to_sensor_idx,
-            links_pos,
-            links_quat,
-            ray_starts,
-            ray_directions,
-            eps,
-            is_env_major,
-        )
-        hit_face, hit_distance, _hit_normal = bvh_ray_cast_visual(
-            env_bvh_idx[i_b],
-            i_b,
-            ray_start_world,
-            ray_direction_world,
-            max_ranges[i_s],
-            dyn_state,
-            bvh_tree_state,
-            dyn_info,
-            eps,
-        )
         write_ray_hit(
             i_b,
             i_p,
