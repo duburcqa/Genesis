@@ -1278,20 +1278,23 @@ def func_tet_plane_section(
 
 
 @qd.func
-def func_tet_pressure_gradient(
-    pos_v0: qd.types.vector(3),
-    pos_v1: qd.types.vector(3),
-    pos_v2: qd.types.vector(3),
-    pos_v3: qd.types.vector(3),
-    pressure_v0: float,
-    EPS: float,
-):
-    """Return the contribution of the first vertex of a tetrahedron to the gradient of a linear field over it."""
+def func_tet_pressure_gradient(tet_vertices: qd.types.matrix(3, 4), tet_pressures: qd.types.vector(4), EPS: float):
+    """
+    Return the gradient of the linear field over a tetrahedron taking given values at its vertices.
+
+    The vertices are the columns of a matrix. A vertex contributes nothing when the tetrahedron seen from it is flatter
+    than EPS.
+    """
     grad = qd.Vector.zero(gs.qd_float, 3)
-    area_vector = (pos_v2 - pos_v1).cross(pos_v3 - pos_v1)
-    signed_volume = area_vector.dot(pos_v0 - pos_v1)
-    if qd.abs(signed_volume) > EPS:
-        grad = area_vector / signed_volume * pressure_v0
+    for i in qd.static(range(4)):
+        pos_v0 = tet_vertices[:, i]
+        pos_v1 = tet_vertices[:, (i + 1) % 4]
+        pos_v2 = tet_vertices[:, (i + 2) % 4]
+        pos_v3 = tet_vertices[:, (i + 3) % 4]
+        area_vector = (pos_v2 - pos_v1).cross(pos_v3 - pos_v1)
+        signed_volume = area_vector.dot(pos_v0 - pos_v1)
+        if qd.abs(signed_volume) > EPS:
+            grad += area_vector / signed_volume * tet_pressures[i]
     return grad
 
 
@@ -1545,6 +1548,33 @@ def func_fem_contacts_Jt(
 # ------------------------------------------------------------------------------------
 
 
+@qd.func
+def func_fem_tet(f: int, i_e: int, i_b: int, sap_state: SAPState, fem_state: FEMState, fem_info: FEMInfo):
+    """Return the vertices of an element of the FEM entities in a frame, as the columns of a matrix, and their pressure."""
+    el2v = fem_info.elements.el2v[i_e]
+    tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
+    tet_pressures = qd.Vector.zero(gs.qd_float, 4)
+    for i in qd.static(range(4)):
+        i_v = el2v[i]
+        tet_vertices[:, i] = fem_state.vertices.pos[f, i_v, i_b]
+        tet_pressures[i] = sap_state.hydroelastic_fem.pressure[i_v]
+    return tet_vertices, tet_pressures
+
+
+@qd.func
+def func_rigid_tet(i_e: int, i_b: int, sap_state: SAPState):
+    """Return the vertices of an element of the volume meshes of the rigid geoms, as the columns of a matrix, and their
+    pressure."""
+    elem = sap_state.rigid_volume.elems[i_e]
+    tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
+    tet_pressures = qd.Vector.zero(gs.qd_float, 4)
+    for i in qd.static(range(4)):
+        i_v = elem[i]
+        tet_vertices[:, i] = sap_state.rigid_volume.verts[i_v, i_b]
+        tet_pressures[i] = sap_state.rigid_volume.pressure[i_v]
+    return tet_vertices, tet_pressures
+
+
 @qd.kernel(fastcache=True)
 def kernel_compute_fem_pressure_gradient(
     f: int,
@@ -1557,22 +1587,10 @@ def kernel_compute_fem_pressure_gradient(
     for i_e, i_b in qd.ndrange(
         sap_state.hydroelastic_fem.pressure_gradient.shape[0], sap_state.hydroelastic_fem.pressure_gradient.shape[1]
     ):
-        el2v = fem_info.elements.el2v[i_e]
-        grad = qd.Vector.zero(gs.qd_float, 3)
-        for i in qd.static(range(4)):
-            i_v0 = el2v[i]
-            i_v1 = el2v[(i + 1) % 4]
-            i_v2 = el2v[(i + 2) % 4]
-            i_v3 = el2v[(i + 3) % 4]
-            grad += func_tet_pressure_gradient(
-                fem_state.vertices.pos[f, i_v0, i_b],
-                fem_state.vertices.pos[f, i_v1, i_b],
-                fem_state.vertices.pos[f, i_v2, i_b],
-                fem_state.vertices.pos[f, i_v3, i_b],
-                sap_state.hydroelastic_fem.pressure[i_v0],
-                sap_info.EPS[None],
-            )
-        sap_state.hydroelastic_fem.pressure_gradient[i_e, i_b] = grad
+        tet_vertices, tet_pressures = func_fem_tet(f, i_e, i_b, sap_state, fem_state, fem_info)
+        sap_state.hydroelastic_fem.pressure_gradient[i_e, i_b] = func_tet_pressure_gradient(
+            tet_vertices, tet_pressures, sap_info.EPS[None]
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -1580,21 +1598,15 @@ def kernel_compute_rigid_pressure_gradient_rest(sap_state: SAPState, sap_info: S
     """Compute the gradient of the pressure field of the rigid geoms in every element of their volume, at rest."""
     for i_e in range(sap_state.rigid_volume.elems.shape[0]):
         elem = sap_state.rigid_volume.elems[i_e]
-        grad = qd.Vector.zero(gs.qd_float, 3)
+        tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
+        tet_pressures = qd.Vector.zero(gs.qd_float, 4)
         for i in qd.static(range(4)):
-            i_v0 = elem[i]
-            i_v1 = elem[(i + 1) % 4]
-            i_v2 = elem[(i + 2) % 4]
-            i_v3 = elem[(i + 3) % 4]
-            grad += func_tet_pressure_gradient(
-                sap_state.rigid_volume.verts_rest[i_v0],
-                sap_state.rigid_volume.verts_rest[i_v1],
-                sap_state.rigid_volume.verts_rest[i_v2],
-                sap_state.rigid_volume.verts_rest[i_v3],
-                sap_state.rigid_volume.pressure[i_v0],
-                sap_info.EPS[None],
-            )
-        sap_state.rigid_volume.pressure_gradient_rest[i_e] = grad
+            i_v = elem[i]
+            tet_vertices[:, i] = sap_state.rigid_volume.verts_rest[i_v]
+            tet_pressures[i] = sap_state.rigid_volume.pressure[i_v]
+        sap_state.rigid_volume.pressure_gradient_rest[i_e] = func_tet_pressure_gradient(
+            tet_vertices, tet_pressures, sap_info.EPS[None]
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -1695,20 +1707,25 @@ def func_clamp_to_capacity(i_h: int, n_items: int, capacity: int, sap_state: SAP
 
 
 @qd.func
-def func_append_tet_plane_candidate(
+def func_append_tet_floor_candidate(
     i_e: int,
     i_b: int,
-    intersection_code: int,
-    distance: qd.types.vector(4),
+    tet_vertices: qd.types.matrix(3, 4),
     candidates: SAPTetPlaneCandidates,
+    sap_info: SAPInfo,
 ):
-    """Append a tetrahedron crossing a plane to the candidates of a handler, dropped when they are full."""
-    i_c = qd.atomic_add(candidates.n_candidates[0], 1)
-    if i_c < candidates.batch_idx.shape[0]:
-        candidates.batch_idx[i_c] = i_b
-        candidates.elem_idx[i_c] = i_e
-        candidates.intersection_code[i_c] = intersection_code
-        candidates.distance[i_c] = distance
+    """Append a tetrahedron to the candidates of a handler if it crosses the floor, dropped when they are full."""
+    distance = qd.Vector.zero(gs.qd_float, 4)
+    for i in qd.static(range(4)):
+        distance[i] = tet_vertices[2, i] - sap_info.floor_height[None]
+    intersection_code = func_intersection_code(distance)
+    if intersection_code != 0 and intersection_code != 15:
+        i_c = qd.atomic_add(candidates.n_candidates[0], 1)
+        if i_c < candidates.batch_idx.shape[0]:
+            candidates.batch_idx[i_c] = i_b
+            candidates.elem_idx[i_c] = i_e
+            candidates.intersection_code[i_c] = intersection_code
+            candidates.distance[i_c] = distance
 
 
 @qd.func
@@ -1716,20 +1733,51 @@ def func_append_tet_tet_candidate(
     i_e0: int,
     i_e1: int,
     i_b: int,
-    intersection_code0: int,
-    normal: qd.types.vector(3),
-    distance0: qd.types.vector(4),
+    tet_vertices0: qd.types.matrix(3, 4),
+    tet_pressures0: qd.types.vector(4),
+    g0: qd.types.vector(3),
+    threshold0: float,
+    tet_vertices1: qd.types.matrix(3, 4),
+    tet_pressures1: qd.types.vector(4),
+    g1: qd.types.vector(3),
+    threshold1: float,
     candidates: SAPTetTetCandidates,
+    sap_info: SAPInfo,
 ):
-    """Append a pair of tetrahedra crossing their plane of equal pressure to the candidates of a handler."""
-    i_c = qd.atomic_add(candidates.n_candidates[0], 1)
-    if i_c < candidates.batch_idx.shape[0]:
-        candidates.batch_idx[i_c] = i_b
-        candidates.normal[i_c] = normal
-        candidates.elem_idx0[i_c] = i_e0
-        candidates.intersection_code0[i_c] = intersection_code0
-        candidates.distance0[i_c] = distance0
-        candidates.elem_idx1[i_c] = i_e1
+    """
+    Append a pair of tetrahedra to the candidates of a handler if both cross their plane of equal pressure, dropped when
+    they are full.
+
+    The pressure field over each tetrahedron takes the given values at its vertices with the gradient g0, g1. The
+    normal of the plane must point along g0 and against g1, its dot product with g0 being `threshold0` at least and
+    with g1 `-threshold1` at most.
+    """
+    is_valid, normal, x = func_equal_pressure_plane(
+        tet_vertices0[:, 0], tet_vertices1[:, 0], tet_pressures0[0], tet_pressures1[0], g0, g1, sap_info.EPS[None]
+    )
+    if is_valid:
+        if not (normal.dot(g0) < threshold0 or normal.dot(g1) > -threshold1):
+            distance0 = qd.Vector.zero(gs.qd_float, 4)
+            distance1 = qd.Vector.zero(gs.qd_float, 4)
+            for i in qd.static(range(4)):
+                distance0[i] = (tet_vertices0[:, i] - x).dot(normal)
+                distance1[i] = (tet_vertices1[:, i] - x).dot(normal)
+            intersection_code0 = func_intersection_code(distance0)
+            intersection_code1 = func_intersection_code(distance1)
+            if not (
+                intersection_code0 == 0
+                or intersection_code1 == 0
+                or intersection_code0 == 15
+                or intersection_code1 == 15
+            ):
+                i_c = qd.atomic_add(candidates.n_candidates[0], 1)
+                if i_c < candidates.batch_idx.shape[0]:
+                    candidates.batch_idx[i_c] = i_b
+                    candidates.normal[i_c] = normal
+                    candidates.elem_idx0[i_c] = i_e0
+                    candidates.intersection_code0[i_c] = intersection_code0
+                    candidates.distance0[i_c] = distance0
+                    candidates.elem_idx1[i_c] = i_e1
 
 
 @qd.func
@@ -1877,13 +1925,8 @@ def kernel_detect_fem_floor_tet(
     sap_state.candidates.fem_floor_tet.n_candidates[0] = 0
     # TODO: Check the surface elements only instead of all the elements
     for i_e, i_b in qd.ndrange(fem_info.elements.el2v.shape[0], fem_state.vertices.pos.shape[2]):
-        el2v = fem_info.elements.el2v[i_e]
-        distance = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            distance[i] = fem_state.vertices.pos[f, el2v[i], i_b].z - sap_info.floor_height[None]
-        intersection_code = func_intersection_code(distance)
-        if intersection_code != 0 and intersection_code != 15:
-            func_append_tet_plane_candidate(i_e, i_b, intersection_code, distance, sap_state.candidates.fem_floor_tet)
+        tet_vertices, _ = func_fem_tet(f, i_e, i_b, sap_state, fem_state, fem_info)
+        func_append_tet_floor_candidate(i_e, i_b, tet_vertices, sap_state.candidates.fem_floor_tet, sap_info)
 
     n_candidates = func_clamp_to_capacity(
         i_h,
@@ -1894,12 +1937,7 @@ def kernel_detect_fem_floor_tet(
     for i_c in range(n_candidates):
         i_b = sap_state.candidates.fem_floor_tet.batch_idx[i_c]
         i_e = sap_state.candidates.fem_floor_tet.elem_idx[i_c]
-        el2v = fem_info.elements.el2v[i_e]
-        tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
-        tet_pressures = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            tet_vertices[:, i] = fem_state.vertices.pos[f, el2v[i], i_b]
-            tet_pressures[i] = sap_state.hydroelastic_fem.pressure[el2v[i]]
+        tet_vertices, tet_pressures = func_fem_tet(f, i_e, i_b, sap_state, fem_state, fem_info)
         total_area, centroid, barycentric, pressure = func_tet_floor_contact(
             sap_state.candidates.fem_floor_tet.intersection_code[i_c],
             tet_vertices,
@@ -1924,9 +1962,8 @@ def kernel_detect_fem_floor_tet(
             i_h, i_b, qd.u64(i_e), k, phi0, mu, qd.Matrix.identity(gs.qd_float, 3), centroid, sap_state, sap_info
         )
         if i_p >= 0:
-            for i in qd.static(range(4)):
-                sap_state.pairs.fem_slots_vert[i_p][i] = el2v[i]
-                sap_state.pairs.fem_slots_weight[i_p][i] = barycentric[i]
+            sap_state.pairs.fem_slots_vert[i_p][:4] = fem_info.elements.el2v[i_e]
+            sap_state.pairs.fem_slots_weight[i_p][:4] = barycentric
 
 
 @qd.kernel(fastcache=True)
@@ -2002,39 +2039,26 @@ def kernel_detect_fem_self_tet(
         i_b, i_sa, i_sq = sap_state.queries.fem_self_results.triplets[i_r]
         i_e0 = fem_info.surface.elements_idx[i_sa]
         i_e1 = fem_info.surface.elements_idx[i_sq]
-        el2v0 = fem_info.elements.el2v[i_e0]
-        el2v1 = fem_info.elements.el2v[i_e1]
-        i_v0 = el2v0[0]
-        i_v1 = el2v1[0]
+        tet_vertices0, tet_pressures0 = func_fem_tet(f, i_e0, i_b, sap_state, fem_state, fem_info)
+        tet_vertices1, tet_pressures1 = func_fem_tet(f, i_e1, i_b, sap_state, fem_state, fem_info)
         g0 = sap_state.hydroelastic_fem.pressure_gradient[i_e0, i_b]
         g1 = sap_state.hydroelastic_fem.pressure_gradient[i_e1, i_b]
-        is_valid, normal, x = func_equal_pressure_plane(
-            fem_state.vertices.pos[f, i_v0, i_b],
-            fem_state.vertices.pos[f, i_v1, i_b],
-            sap_state.hydroelastic_fem.pressure[i_v0],
-            sap_state.hydroelastic_fem.pressure[i_v1],
-            g0,
-            g1,
-            sap_info.EPS[None],
-        )
-        if not is_valid:
-            continue
         # The normal must point along g0 and against g1, up to an allowance as in Drake
         threshold = qd.static(math.cos(math.pi * 5.0 / 8.0))
-        if normal.dot(g0) < threshold * g0.norm() or normal.dot(g1) > -threshold * g1.norm():
-            continue
-        distance0 = qd.Vector.zero(gs.qd_float, 4)
-        distance1 = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            distance0[i] = (fem_state.vertices.pos[f, el2v0[i], i_b] - x).dot(normal)
-            distance1[i] = (fem_state.vertices.pos[f, el2v1[i], i_b] - x).dot(normal)
-        intersection_code0 = func_intersection_code(distance0)
-        intersection_code1 = func_intersection_code(distance1)
-        # Both tetrahedra cross the plane
-        if intersection_code0 == 0 or intersection_code1 == 0 or intersection_code0 == 15 or intersection_code1 == 15:
-            continue
         func_append_tet_tet_candidate(
-            i_e0, i_e1, i_b, intersection_code0, normal, distance0, sap_state.candidates.fem_self_tet
+            i_e0,
+            i_e1,
+            i_b,
+            tet_vertices0,
+            tet_pressures0,
+            g0,
+            threshold * g0.norm(),
+            tet_vertices1,
+            tet_pressures1,
+            g1,
+            threshold * g1.norm(),
+            sap_state.candidates.fem_self_tet,
+            sap_info,
         )
 
     n_candidates = func_clamp_to_capacity(
@@ -2048,15 +2072,8 @@ def kernel_detect_fem_self_tet(
         i_e0 = sap_state.candidates.fem_self_tet.elem_idx0[i_c]
         i_e1 = sap_state.candidates.fem_self_tet.elem_idx1[i_c]
         normal = sap_state.candidates.fem_self_tet.normal[i_c]
-        el2v0 = fem_info.elements.el2v[i_e0]
-        el2v1 = fem_info.elements.el2v[i_e1]
-        tet_vertices0 = qd.Matrix.zero(gs.qd_float, 3, 4)
-        tet_pressures0 = qd.Vector.zero(gs.qd_float, 4)
-        tet_vertices1 = qd.Matrix.zero(gs.qd_float, 3, 4)
-        for i in qd.static(range(4)):
-            tet_vertices0[:, i] = fem_state.vertices.pos[f, el2v0[i], i_b]
-            tet_pressures0[i] = sap_state.hydroelastic_fem.pressure[el2v0[i]]
-            tet_vertices1[:, i] = fem_state.vertices.pos[f, el2v1[i], i_b]
+        tet_vertices0, tet_pressures0 = func_fem_tet(f, i_e0, i_b, sap_state, fem_state, fem_info)
+        tet_vertices1, _ = func_fem_tet(f, i_e1, i_b, sap_state, fem_state, fem_info)
         is_contact, total_area, centroid, barycentric0, pressure, frame = func_tet_tet_contact(
             sap_state.candidates.fem_self_tet.intersection_code0[i_c],
             tet_vertices0,
@@ -2091,11 +2108,10 @@ def kernel_detect_fem_self_tet(
             sap_info,
         )
         if i_p >= 0:
-            for i in qd.static(range(4)):
-                sap_state.pairs.fem_slots_vert[i_p][i] = el2v0[i]
-                sap_state.pairs.fem_slots_weight[i_p][i] = barycentric0[i]
-                sap_state.pairs.fem_slots_vert[i_p][4 + i] = el2v1[i]
-                sap_state.pairs.fem_slots_weight[i_p][4 + i] = -barycentric1[i]
+            sap_state.pairs.fem_slots_vert[i_p][:4] = fem_info.elements.el2v[i_e0]
+            sap_state.pairs.fem_slots_weight[i_p][:4] = barycentric0
+            sap_state.pairs.fem_slots_vert[i_p][4:] = fem_info.elements.el2v[i_e1]
+            sap_state.pairs.fem_slots_weight[i_p][4:] = -barycentric1
 
 
 @qd.kernel(fastcache=True)
@@ -2155,15 +2171,8 @@ def kernel_detect_rigid_floor_tet(
         i_l = geoms_info.link_idx[i_g]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if not links_info.is_fixed[I_l]:
-            elem = sap_state.rigid_volume.elems[i_e]
-            distance = qd.Vector.zero(gs.qd_float, 4)
-            for i in qd.static(range(4)):
-                distance[i] = sap_state.rigid_volume.verts[elem[i], i_b].z - sap_info.floor_height[None]
-            intersection_code = func_intersection_code(distance)
-            if intersection_code != 0 and intersection_code != 15:
-                func_append_tet_plane_candidate(
-                    i_e, i_b, intersection_code, distance, sap_state.candidates.rigid_floor_tet
-                )
+            tet_vertices, _ = func_rigid_tet(i_e, i_b, sap_state)
+            func_append_tet_floor_candidate(i_e, i_b, tet_vertices, sap_state.candidates.rigid_floor_tet, sap_info)
 
     n_candidates = func_clamp_to_capacity(
         i_h,
@@ -2174,12 +2183,7 @@ def kernel_detect_rigid_floor_tet(
     for i_c in range(n_candidates):
         i_b = sap_state.candidates.rigid_floor_tet.batch_idx[i_c]
         i_e = sap_state.candidates.rigid_floor_tet.elem_idx[i_c]
-        elem = sap_state.rigid_volume.elems[i_e]
-        tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
-        tet_pressures = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            tet_vertices[:, i] = sap_state.rigid_volume.verts[elem[i], i_b]
-            tet_pressures[i] = sap_state.rigid_volume.pressure[elem[i]]
+        tet_vertices, tet_pressures = func_rigid_tet(i_e, i_b, sap_state)
         total_area, centroid, barycentric, pressure = func_tet_floor_contact(
             sap_state.candidates.rigid_floor_tet.intersection_code[i_c],
             tet_vertices,
@@ -2230,38 +2234,22 @@ def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPIn
     )
     for i_r in range(n_results):
         i_b, i_e0, i_e1 = sap_state.queries.rigid_tet_results.triplets[i_r]
-        elem0 = sap_state.rigid_volume.elems[i_e0]
-        elem1 = sap_state.rigid_volume.elems[i_e1]
-        i_v0 = elem0[0]
-        i_v1 = elem1[0]
-        g0 = sap_state.rigid_volume.pressure_gradient[i_e0, i_b]
-        g1 = sap_state.rigid_volume.pressure_gradient[i_e1, i_b]
-        is_valid, normal, x = func_equal_pressure_plane(
-            sap_state.rigid_volume.verts[i_v0, i_b],
-            sap_state.rigid_volume.verts[i_v1, i_b],
-            sap_state.rigid_volume.pressure[i_v0],
-            sap_state.rigid_volume.pressure[i_v1],
-            g0,
-            g1,
-            sap_info.EPS[None],
-        )
-        if not is_valid:
-            continue
-        # The normal must point along g0 and against g1
-        if normal.dot(g0) < sap_info.hydroelastic_eps[None] or normal.dot(g1) > -sap_info.hydroelastic_eps[None]:
-            continue
-        distance0 = qd.Vector.zero(gs.qd_float, 4)
-        distance1 = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            distance0[i] = (sap_state.rigid_volume.verts[elem0[i], i_b] - x).dot(normal)
-            distance1[i] = (sap_state.rigid_volume.verts[elem1[i], i_b] - x).dot(normal)
-        intersection_code0 = func_intersection_code(distance0)
-        intersection_code1 = func_intersection_code(distance1)
-        # Both tetrahedra cross the plane
-        if intersection_code0 == 0 or intersection_code1 == 0 or intersection_code0 == 15 or intersection_code1 == 15:
-            continue
+        tet_vertices0, tet_pressures0 = func_rigid_tet(i_e0, i_b, sap_state)
+        tet_vertices1, tet_pressures1 = func_rigid_tet(i_e1, i_b, sap_state)
         func_append_tet_tet_candidate(
-            i_e0, i_e1, i_b, intersection_code0, normal, distance0, sap_state.candidates.rigid_rigid_tet
+            i_e0,
+            i_e1,
+            i_b,
+            tet_vertices0,
+            tet_pressures0,
+            sap_state.rigid_volume.pressure_gradient[i_e0, i_b],
+            sap_info.hydroelastic_eps[None],
+            tet_vertices1,
+            tet_pressures1,
+            sap_state.rigid_volume.pressure_gradient[i_e1, i_b],
+            sap_info.hydroelastic_eps[None],
+            sap_state.candidates.rigid_rigid_tet,
+            sap_info,
         )
 
     n_candidates = func_clamp_to_capacity(
@@ -2275,15 +2263,8 @@ def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPIn
         i_e0 = sap_state.candidates.rigid_rigid_tet.elem_idx0[i_c]
         i_e1 = sap_state.candidates.rigid_rigid_tet.elem_idx1[i_c]
         normal = sap_state.candidates.rigid_rigid_tet.normal[i_c]
-        elem0 = sap_state.rigid_volume.elems[i_e0]
-        elem1 = sap_state.rigid_volume.elems[i_e1]
-        tet_vertices0 = qd.Matrix.zero(gs.qd_float, 3, 4)
-        tet_pressures0 = qd.Vector.zero(gs.qd_float, 4)
-        tet_vertices1 = qd.Matrix.zero(gs.qd_float, 3, 4)
-        for i in qd.static(range(4)):
-            tet_vertices0[:, i] = sap_state.rigid_volume.verts[elem0[i], i_b]
-            tet_pressures0[i] = sap_state.rigid_volume.pressure[elem0[i]]
-            tet_vertices1[:, i] = sap_state.rigid_volume.verts[elem1[i], i_b]
+        tet_vertices0, tet_pressures0 = func_rigid_tet(i_e0, i_b, sap_state)
+        tet_vertices1, _ = func_rigid_tet(i_e1, i_b, sap_state)
         is_contact, total_area, centroid, barycentric0, pressure, frame = func_tet_tet_contact(
             sap_state.candidates.rigid_rigid_tet.intersection_code0[i_c],
             tet_vertices0,
@@ -2378,10 +2359,10 @@ def kernel_detect_rigid_fem_tri_tet(
         if sap_state.hydroelastic_fem.pressure_gradient[i_e, i_b].dot(normal) < sap_info.EPS[None]:
             continue
 
-        el2v = fem_info.elements.el2v[i_e]
+        tet_vertices, _ = func_fem_tet(f, i_e, i_b, sap_state, fem_state, fem_info)
         distance = qd.Vector.zero(gs.qd_float, 4)
         for i in qd.static(range(4)):
-            distance[i] = (fem_state.vertices.pos[f, el2v[i], i_b] - pos_v0).dot(normal)
+            distance[i] = (tet_vertices[:, i] - pos_v0).dot(normal)
         intersection_code = func_intersection_code(distance)
         if intersection_code == 0 or intersection_code == 15:
             continue
@@ -2404,14 +2385,8 @@ def kernel_detect_rigid_fem_tri_tet(
         i_e = sap_state.candidates.rigid_fem_tri_tet.elem_idx[i_c]
         i_f = sap_state.candidates.rigid_fem_tri_tet.face_idx[i_c]
         normal = sap_state.candidates.rigid_fem_tri_tet.normal[i_c]
-        el2v = fem_info.elements.el2v[i_e]
-
         tri_vertices = func_rigid_face_vertices(i_f, i_b, free_verts_state, fixed_verts_state, verts_info, faces_info)
-        tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)
-        tet_pressures = qd.Vector.zero(gs.qd_float, 4)
-        for i in qd.static(range(4)):
-            tet_vertices[:, i] = fem_state.vertices.pos[f, el2v[i], i_b]
-            tet_pressures[i] = sap_state.hydroelastic_fem.pressure[el2v[i]]
+        tet_vertices, tet_pressures = func_fem_tet(f, i_e, i_b, sap_state, fem_state, fem_info)
 
         # The triangle, clipped by the tetrahedron
         polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 7)
@@ -2447,9 +2422,8 @@ def kernel_detect_rigid_fem_tri_tet(
             sap_info,
         )
         if i_p >= 0:
-            for i in qd.static(range(4)):
-                sap_state.pairs.fem_slots_vert[i_p][i] = el2v[i]
-                sap_state.pairs.fem_slots_weight[i_p][i] = barycentric[i]
+            sap_state.pairs.fem_slots_vert[i_p][:4] = fem_info.elements.el2v[i_e]
+            sap_state.pairs.fem_slots_weight[i_p][:4] = barycentric
             # The link of the triangle moves against the vertices of the tetrahedron
             sap_state.pairs.link_idx[i_p][0] = geoms_info.link_idx[i_g]
             sap_state.pairs.link_sign[i_p][0] = -1.0
