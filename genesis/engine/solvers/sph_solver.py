@@ -3,8 +3,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
-from genesis.engine.boundaries.boundaries import CubeBoundaryBox
+from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
 from genesis.engine.solvers.particle_solver import PARTICLES, Particles, ParticlesParams, ParticlesRender
@@ -199,20 +198,9 @@ class SPHSolver(ParticleSolver):
         self.entities.append(entity)
         return entity
 
-    def add_particles(self, particle_start, active, mat_rho, mat_stiffness, mat_exponent, mat_mu, mat_gamma, pos):
-        """Add the particles of an entity at rest, with the parameters of its material."""
-        kernel_add_particles(
-            particle_start,
-            active,
-            mat_rho,
-            mat_stiffness,
-            mat_exponent,
-            mat_mu,
-            mat_gamma,
-            pos,
-            self.sph_state,
-            self.sph_info,
-        )
+    def add_particles(self, *args):
+        """Add the particles of an entity at rest, with the parameters of its material (see 'kernel_add_particles')."""
+        kernel_add_particles(*args, self.sph_state, self.sph_info)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------- DFSPH ----------------------------------------

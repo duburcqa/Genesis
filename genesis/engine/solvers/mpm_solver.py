@@ -8,8 +8,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
-from genesis.engine.boundaries.boundaries import CubeBoundaryBox
+from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.pipeline import Inline, Stages, System
@@ -540,9 +539,7 @@ class MPMSolver(ParticleSolver, Coupling):
                 particles=self._n_particles, envs=self._B, vverts=self._n_vverts, vvert_supports=self._n_vvert_supports
             ),
             values=dict(
-                boundary=dict(
-                    lower=self.boundary.lower, upper=self.boundary.upper, restitution=self.boundary.restitution
-                ),
+                boundary=self.boundary.values,
                 substep_dt=self.substep_dt,
                 dx=self.dx,
                 inv_dx=self.inv_dx,
@@ -621,16 +618,13 @@ class MPMSolver(ParticleSolver, Coupling):
             material.idx = len(self._materials)
             self._materials.append(material)
 
-    def add_vverts(self, vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local):
-        kernel_add_vverts(
-            vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local, self.mpm_info.vverts
-        )
+    def add_vverts(self, *args):
+        """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""
+        kernel_add_vverts(*args, self.mpm_info.vverts)
 
-    def add_particles(self, f, active, particle_start, n_particles, material_idx, default_Jp, rho, pos):
-        """Add the particles of an entity at rest to the given frame, with the parameters of its material."""
-        kernel_add_particles(
-            f, particle_start, material_idx, n_particles, active, default_Jp, rho, pos, self.mpm_state, self.mpm_info
-        )
+    def add_particles(self, *args):
+        """Add the particles of an entity at rest to a frame (see 'kernel_add_particles')."""
+        kernel_add_particles(*args, self.mpm_state, self.mpm_info)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------

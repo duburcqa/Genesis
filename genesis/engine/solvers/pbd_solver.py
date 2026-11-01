@@ -7,8 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
-from genesis.engine.boundaries.boundaries import CubeBoundaryBox
+from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD

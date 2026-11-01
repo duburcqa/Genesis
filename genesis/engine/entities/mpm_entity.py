@@ -87,10 +87,10 @@ class MPMEntity(ParticleEntity):
     def _add_particles_to_solver(self):
         self._solver.add_particles(
             self._sim.cur_substep_local,
-            self.active,
             self._particle_start,
-            self._n_particles,
             self._material.idx,
+            self._n_particles,
+            self.active,
             self._material._default_Jp,
             self._material.rho,
             self._particles,
