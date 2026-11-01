@@ -1904,13 +1904,19 @@ def func_compute_qacc(
                     i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info, rigid_config
                 )
 
-    # A hibernated tree keeps the acceleration it was put to sleep with
+    # A hibernated tree keeps the acceleration it was put to sleep with. The actuator effort of a dof starts from its
+    # applied and passive efforts, the constraint solve adding the frictionloss one (see func_update_actuator_force in
+    # constraint/solver.py) and the integration the armature-inertia load at the final acceleration (see func_integrate).
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
             dof_start = rigid_info.trees_dof_start[i_t]
             for i_d in range(dof_start, dof_start + rigid_info.trees_n_dofs[i_t]):
+                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
                 dyn_state.dofs.acc[i_d, i_b] = dyn_state.dofs.acc_smooth[i_d, i_b]
+                dyn_state.dofs.qf_actuator[i_d, i_b] = (
+                    dyn_state.dofs.qf_applied[i_d, i_b] + dyn_state.dofs.qf_passive[i_d, i_b]
+                )
 
 
 @qd.func
@@ -2283,9 +2289,12 @@ def func_integrate(
         if qd.static(rigid_config.use_hibernation):
             is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
         if is_awake:
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
             dyn_state.dofs.vel_next[i_d, i_b] = (
                 dyn_state.dofs.vel[i_d, i_b] + dyn_state.dofs.acc[i_d, i_b] * rigid_info.substep_dt[None]
             )
+            # The acceleration is final once made implicit, which ends the actuator effort (see func_compute_qacc)
+            dyn_state.dofs.qf_actuator[i_d, i_b] -= dyn_info.dofs.armature[I_d] * dyn_state.dofs.acc[i_d, i_b]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):

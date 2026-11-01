@@ -1014,6 +1014,9 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     acc_smooth_bw: qd.Tensor = field(float, shape=(2, DOFS, ENVS), labels=BACKWARD, grad=True)
     qf_smooth: qd.Tensor = field(float, grad=True)
     qf_constraint: qd.Tensor = field(float, grad=True)
+    # The effort at the actuator output of each dof over the last step: the applied force minus the armature-inertia
+    # load, plus the frictionloss and passive efforts (see 'RigidSolver.get_dofs_actuator_force')
+    qf_actuator: qd.Tensor = field(float, grad=True)
     # Implicit damping (see func_implicit_damping in forward_dynamics.py): the implicit share h D qacc of the damping
     # force, D being the diagonal the damped mass factor adds, and the correction (M + hD)^-1 h D qacc subtracted from
     # the acceleration

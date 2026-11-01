@@ -449,6 +449,20 @@ def kernel_manual_forward_velocity_bw(
 
 
 @qd.kernel(fastcache=True)
+def kernel_manual_compute_actuator_force_bw(dyn_state: DynState, rigid_config: qd.template()):
+    """Reverse the actuator effort func_compute_qacc in forward_dynamics.py starts from the applied and passive ones."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_d, i_b in qd.ndrange(dyn_state.dofs.qf_actuator.shape[0], dyn_state.dofs.qf_actuator.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+        if is_awake:
+            dyn_state.dofs.qf_applied.grad[i_d, i_b] += dyn_state.dofs.qf_actuator.grad[i_d, i_b]
+            dyn_state.dofs.qf_passive.grad[i_d, i_b] += dyn_state.dofs.qf_actuator.grad[i_d, i_b]
+            dyn_state.dofs.qf_actuator.grad[i_d, i_b] = gs.qd_float(0.0)
+
+
+@qd.kernel(fastcache=True)
 def kernel_manual_compute_qacc_bw(
     dyn_state: DynState,
     rigid_info: RigidInfo,

@@ -101,7 +101,7 @@ from .abd.forward_kinematics import (
     kernel_update_forward_kinematics_after_integration,
     kernel_update_verts_for_geoms,
 )
-from .abd.manual_bw import kernel_manual_compute_qacc_bw
+from .abd.manual_bw import kernel_manual_compute_actuator_force_bw, kernel_manual_compute_qacc_bw
 from .abd.misc import (
     func_apply_coupling_force,
     kernel_apply_links_external_wrench,
@@ -126,6 +126,7 @@ from .constraint.backward import (
     kernel_manual_add_equality_constraints_bw,
     kernel_manual_add_frictionloss_constraints_bw,
     kernel_manual_add_joint_limit_constraints_bw,
+    kernel_manual_update_actuator_force_bw,
 )
 from .constraint.solver import (
     kernel_add_dynamic_constraint,
@@ -1365,10 +1366,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         is reversed.
         """
         if self._disable_constraint:
+            kernel_manual_compute_actuator_force_bw(self.dyn_state, self.rigid_config)
             kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
             return
 
         constraint_state = self.constraint_solver.constraint_state
+        # The actuator effort sums the frictionloss forces of the solve with the applied and passive efforts
+        kernel_manual_update_actuator_force_bw(
+            self.dyn_state, constraint_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
+        kernel_manual_compute_actuator_force_bw(self.dyn_state, self.rigid_config)
         # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise (see
         # "Pure read-write data accessors on the hot path" in CLAUDE.md). gs.use_zerocopy encodes every zero-copy
         # availability condition for these buffers (standalone dense allocations with DLPack-supported dtypes; the
@@ -2832,37 +2839,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         Generalized effort transmitted to each DOF at the actuator output (torque for revolute DOFs, force for
         prismatic DOFs), accounting for the gearbox losses between the motor and the joint.
 
-        Computed over the last step as qf_applied - armature * acc + qf_frictionloss + qf_passive: the control force the
-        step applied (see get_dofs_control_force) minus the armature-inertia load, plus the dissipative frictionloss and
-        passive damping efforts. Contact, Coriolis and gravity loads are captured implicitly through the acceleration of
-        the dofs.
+        The effort over the last step is the control force the step applied (see get_dofs_control_force) minus the
+        armature-inertia load, plus the dissipative frictionloss and passive damping efforts. Contact, Coriolis and
+        gravity loads are captured implicitly through the acceleration of the dofs.
         """
-        dofs_state = self.dyn_state.dofs
-        qf_applied, qf_passive, dofs_acc = self._read_data(
-            (dofs_state.qf_applied, dofs_state.qf_passive, dofs_state.acc), envs_idx, None
-        )
-        info_envs_idx = envs_idx if self._options.batch_dofs_info else None
-        armature, frictionloss = [
-            qd_to_torch(field, info_envs_idx, transpose=True)
-            for field in (self.dyn_info.dofs.armature, self.dyn_info.dofs.frictionloss)
-        ]
-
-        # Frictionloss constraint forces mapped back to DOF space. Frictionloss constraints occupy the contiguous block
-        # [n_constraints_equality, n_constraints_equality + n_constraints_frictionloss) of the constraint list, the DOF
-        # rows first (the rows of screw constraints follow them). A DOF row has an identity Jacobian, so `efc_force` at
-        # that row is exactly the DOF-space frictionloss effort. The assembly loop appends the DOF rows in ascending DOF
-        # order (it iterates links -> joints -> DOFs serially within each env, matching the global DOF numbering), so
-        # the k-th frictionloss row is the k-th DOF with nonzero frictionloss. Its row index is therefore
-        # `n_constraints_equality + rank`, with `rank` the running count of frictionloss-enabled DOFs (-1 for DOFs
-        # without frictionloss, which contribute zero).
-        efc_force = self._read_data(self.constraint_solver.efc_force, envs_idx, None)
-        n_constraints_equality = qd_to_torch(self.constraint_solver.n_constraints_equality, envs_idx)
-        has_frictionloss = frictionloss > gs.EPS
-        rank = torch.cumsum(has_frictionloss, dim=-1) - 1
-        gather_idx = (n_constraints_equality[:, None] + rank).clamp_(min=0)
-        qf_frictionloss = torch.gather(efc_force, 1, gather_idx) * has_frictionloss
-
-        actuator_force = qf_applied - armature * dofs_acc + qf_frictionloss + qf_passive
+        actuator_force = self._read_data(self.dyn_state.dofs.qf_actuator, envs_idx, None, copy=True)
         if dofs_idx is not None:
             actuator_force = actuator_force[indices_to_mask(None, dofs_idx)]
         return actuator_force[0] if self.n_envs == 0 else actuator_force

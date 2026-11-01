@@ -6129,6 +6129,38 @@ def func_resolve_post(
     func_update_contact_force(
         dyn_state, hibernation_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
     )
+    func_update_actuator_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.func
+def func_update_actuator_force(
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Add the frictionloss effort of each awake dof to its actuator effort (see func_compute_qacc in forward_dynamics.py).
+
+    The effort is the force of the frictionloss row of the dof, whose rows follow the equality rows in ascending dof
+    order (see add_frictionloss_constraints). kernel_manual_update_actuator_force_bw in backward.py reverses it.
+    """
+    EPS = rigid_info.EPS[None]
+    n_dofs = dyn_state.dofs.acc.shape[0]
+    _B = dyn_state.dofs.acc.shape[1]
+
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_b in range(_B):
+        i_c = constraint_state.n_constraints_equality[i_b]
+        for i_d in range(n_dofs):
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            if dyn_info.dofs.frictionloss[I_d] > EPS:
+                is_awake = True
+                if qd.static(rigid_config.use_hibernation):
+                    is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+                if is_awake:
+                    dyn_state.dofs.qf_actuator[i_d, i_b] += constraint_state.efc_force[i_c, i_b]
+                i_c = i_c + 1
 
 
 @qd.kernel(fastcache=True)
