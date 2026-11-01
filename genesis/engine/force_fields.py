@@ -450,6 +450,18 @@ class ForceFieldsDispatcher:
     def __init__(self):
         self.fields: tuple[ForceField, ...] = make_static_tuple(())
 
+    @qd.func
+    def add_acc(self, acc: qd.types.vector(3), pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int):
+        """
+        Return an acceleration plus those of the force fields at a point, added one field after the other.
+
+        `pos` and `vel` are the position and the velocity of the point at time `t`, `i` the index of the point among
+        the particles of the solver, -1 for a point of no particle.
+        """
+        for i_ff in qd.static(range(len(self.fields))):
+            acc += self.fields[i_ff].get_acc(pos, vel, t, i)
+        return acc
+
 
 @qd.data_oriented
 class PerlinNoiseField:

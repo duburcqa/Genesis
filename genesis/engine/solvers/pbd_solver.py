@@ -819,11 +819,13 @@ def kernel_apply_external_force(t: float, pbd_state: PBDState, pbd_info: PBDInfo
         if pbd_state.particles.free[i_p, i_b]:
             pbd_state.particles.vel[i_p, i_b] = pbd_state.particles.vel[i_p, i_b] + pbd_info.gravity[i_b] * substep_dt
 
-            acc = qd.Vector.zero(gs.qd_float, 3)
-            for i_ff in qd.static(range(len(force_fields.fields))):
-                acc += force_fields.fields[i_ff].get_acc(
-                    pbd_state.particles.pos[i_p, i_b], pbd_state.particles.vel[i_p, i_b], t, i_p
-                )
+            acc = force_fields.add_acc(
+                qd.Vector.zero(gs.qd_float, 3),
+                pbd_state.particles.pos[i_p, i_b],
+                pbd_state.particles.vel[i_p, i_b],
+                t,
+                i_p,
+            )
             pbd_state.particles.vel[i_p, i_b] = pbd_state.particles.vel[i_p, i_b] + acc * substep_dt
 
             if pbd_info.particles.material_type[i_p] == PBDMaterial.CLOTH:

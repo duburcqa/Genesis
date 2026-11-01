@@ -421,6 +421,8 @@ def kernel_mpm_grid_op(
             vel += substep_dt * mpm_info.gravity[i_b]
             pos = (qd.Vector([i_x, i_y, i_z], dt=gs.qd_int) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
             mass = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b] / mpm_info.particle_volume_scale[None]
+            # TODO: each field acts on the velocity the previous one updated, while SPH and PBD sum them at the same
+            # state. Several velocity-dependent fields tell the schemes apart, and which one to keep is undecided.
             for i_ff in qd.static(range(len(force_fields_dispatcher.fields))):
                 vel += force_fields_dispatcher.fields[i_ff].get_acc(pos, vel, t, i=-1) * substep_dt
             vel = func_mpm_grid_couplings(f, i_b, pos, vel, mass)

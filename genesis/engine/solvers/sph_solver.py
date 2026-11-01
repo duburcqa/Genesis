@@ -540,11 +540,9 @@ def kernel_compute_non_pressure_forces(t: float, sph_state: SPHState, sph_info: 
             acc = sph_info.gravity[i_b]
             func_for_all_neighbors(i_p, i_b, acc, sph_state, sph_info, func_task_compute_non_pressure_forces)
 
-            for i_ff in qd.static(range(len(force_fields.fields))):
-                acc += force_fields.fields[i_ff].get_acc(
-                    sph_state.particles_reordered.pos[i_p, i_b], sph_state.particles_reordered.vel[i_p, i_b], t, i_p
-                )
-            sph_state.particles_reordered.acc[i_p, i_b] = acc
+            sph_state.particles_reordered.acc[i_p, i_b] = force_fields.add_acc(
+                acc, sph_state.particles_reordered.pos[i_p, i_b], sph_state.particles_reordered.vel[i_p, i_b], t, i_p
+            )
 
 
 @qd.func
