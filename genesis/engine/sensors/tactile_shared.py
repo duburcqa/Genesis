@@ -686,10 +686,11 @@ class ContactDepthQuerySensorMixin:
     ``_options.contact_depth_query``, and a ``_shared_context`` ``RaycastContext``.
     """
 
-    @property
-    def is_sdf_queried(self) -> bool:
-        """Whether the sensor queries the signed distance fields (SDF) of the rigid geoms, which the raycast one skips."""
-        return self._options.contact_depth_query != "raycast"
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The signed distance fields (SDF) of the rigid geoms, which the raycast query skips, are requested for the build
+        if self._options.contact_depth_query != "raycast":
+            self._manager._sim.get_system(SDF, opt_in=True)
 
     def build(self):
         super().build()

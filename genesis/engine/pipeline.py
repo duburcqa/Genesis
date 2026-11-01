@@ -922,13 +922,17 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
 
 
 def assemble_systems(
-    systems: Sequence[System], systems_built: Sequence[System], context: Sequence[object] = ()
+    systems: Sequence[System],
+    systems_built: Sequence[System],
+    context: Sequence[object] = (),
+    requested: Sequence[type[System]] = (),
 ) -> list[System]:
     """
     Create and build the Systems a scene calls for, then route their roles and return them.
 
-    `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, and `context`
-    the other objects a dependency may name, such as the options of the scene.
+    `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, `context` the
+    other objects a dependency may name, such as the options of the scene, and `requested` the classes requested from
+    outside the pipeline, decided as if a System depended on them.
 
     A registered System is created once every System it depends on exists, every struct it depends on is built, and
     every condition on them holds, and is absent once one of them never will, the reason being logged. A component
@@ -953,6 +957,7 @@ def assemble_systems(
         if all([dependency is not other for other in systems])
     }
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
+    classes_pending += [cls for cls in requested if cls not in classes_pending]
     dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
     def decide(cls: type[System]) -> "dict[str, Any] | str | None":
