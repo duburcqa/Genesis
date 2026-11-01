@@ -165,6 +165,7 @@ class KinematicSolver(Solver):
     _entity_classes = ((Morph, KinematicEntity),)
 
     # The Data the solver owns, which other Systems may depend on (see 'assemble_systems')
+    rigid_config: RigidSimStaticConfig
     rigid_info: RigidInfo
     dyn_info: DynInfo
     dyn_state: DynState
@@ -427,10 +428,8 @@ class KinematicSolver(Solver):
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
-        yield from iter_data(self, "rigid_config")
+        yield from super().data
         yield from iter_data(self.rigid_data, "errno", DataKind.STATE)
-        for name in ("rigid_info", "dyn_info", "dyn_state"):
-            yield from iter_data(self.rigid_data, name)
         # The flags describe the derived poses and velocities, so they travel with them
         yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
         yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)

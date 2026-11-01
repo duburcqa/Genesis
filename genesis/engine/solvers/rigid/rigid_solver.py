@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -26,7 +25,6 @@ from genesis.grad.bridge import is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
-from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -198,6 +196,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     constraints_backward = Phase("solve", "detection")
     # The integration of a substep, which another System may take over (see 'System.relocations')
     integration = Phase()
+
+    hibernation_state: HibernationState
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -1578,11 +1578,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
         self._update_forward_kinematics(envs_idx)
         self._restart()
-
-    @property
-    def data(self) -> Iterator[DataItem | ConfigItem]:
-        yield from super().data
-        yield from iter_data(self, "hibernation_state")
 
     def _restart(self):
         """Re-arm the once-per-step propeller guard of each drone (see 'set_propellers_rpm')."""
