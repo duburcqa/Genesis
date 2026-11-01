@@ -7,7 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.engine.pipeline as pipeline
-from genesis.engine.pipeline import System, assemble_systems, register_system
+from genesis.engine.pipeline import System, assemble_systems, create_system, register_system
 from genesis.engine.solvers.rigid.data import DynState
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Integration
@@ -111,3 +111,31 @@ def test_template_instances_are_distinct_systems(monkeypatch):
     assert set(systems_by_cls) == {Scratch[PerEnv], Scratch[Queued], Pass[PerEnv], Pass[Queued]}
     assert systems_by_cls[Pass[PerEnv]].scratch is systems_by_cls[Scratch[PerEnv]]
     assert systems_by_cls[Pass[Queued]].scratch is systems_by_cls[Scratch[Queued]]
+
+
+def test_system_superseded_by_subclass(monkeypatch):
+    class Base(System): ...
+
+    class Custom(Base): ...
+
+    class Other(Base): ...
+
+    class User(System):
+        def __init__(self, base: Base) -> None:
+            self.base = base
+
+    monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Base, Custom, User])
+    systems = assemble_systems([], [])
+    assert {type(system) for system in systems} == {Custom, User}
+    (user,) = [system for system in systems if isinstance(system, User)]
+    assert type(user.base) is Custom
+
+    # A request before the assembly creates the dependency it misses, which the assembly then uses
+    custom, user = create_system(User, [])
+    assert type(custom) is Custom and user.base is custom
+    systems = assemble_systems([custom, user], [])
+    assert len(systems) == 2
+
+    monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Base, Custom, Other])
+    with pytest.raises(TypeError, match="all supersede Base"):
+        assemble_systems([], [])

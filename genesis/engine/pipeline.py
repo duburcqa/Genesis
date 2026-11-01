@@ -875,7 +875,12 @@ def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
             raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
         system_classes = [c for c in dependency.classes if issubclass(c, System)]
         if not candidates and system_classes and not dependency.is_optional:
-            created += create_system(system_classes[0], [*values, *created])
+            # A missing System is created from its class, or from the registered subclass superseding it
+            system_cls = system_classes[0]
+            subclasses = [
+                other for other in _SYSTEM_CLASSES if other is not system_cls and issubclass(other, system_cls)
+            ]
+            created += create_system((subclasses or system_classes)[0], [*values, *created])
             candidates = [created[-1]]
         is_holding = all(
             [
@@ -886,7 +891,10 @@ def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
         )
         if not candidates or not is_holding:
             if not dependency.is_optional:
-                raise TypeError(f"{cls.__name__} has no value for '{dependency.name}' before the scene is built.")
+                reason = (
+                    "a condition on it does not hold" if candidates else "it has no value before the scene is built"
+                )
+                raise TypeError(f"{cls.__name__} cannot be created: '{dependency.name}' {reason}.")
             args[dependency.name] = None
             continue
         args[dependency.name] = candidates[0]
@@ -1005,7 +1013,18 @@ def assemble_systems(
         for dependency in system._dependencies
         if all([dependency is not other for other in systems])
     }
-    classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
+    # A registered subclass supersedes its registered base, which the pipeline then never creates on its own, as does a
+    # System of the scene of a subclass. Two registered subclasses of a registered base conflict.
+    for cls in _SYSTEM_CLASSES:
+        subclasses = [other for other in _SYSTEM_CLASSES if other is not cls and issubclass(other, cls)]
+        if len(subclasses) > 1:
+            raise TypeError(f"{[other.__name__ for other in subclasses]} all supersede {cls.__name__}.")
+    classes_pending = [
+        cls
+        for cls in _SYSTEM_CLASSES
+        if all([not isinstance(system, cls) for system in systems])
+        and all([other is cls or not issubclass(other, cls) for other in _SYSTEM_CLASSES])
+    ]
     dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
     def decide(cls: type[System]) -> "dict[str, Any] | str | None":
