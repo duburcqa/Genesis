@@ -141,29 +141,25 @@ def kernel_advect_and_impulse(t: float, sf_state: SFState, sf_info: SFInfo, jets
 def kernel_divergence(sf_state: SFState):
     """Compute the divergence of the advected velocity, mirrored at the walls of the grid."""
     n_grid = sf_state.vel.shape[0]
-    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
-        vl = sf_state.vel_advected[func_compute_location(u, v, w, -1, 0, 0, n_grid)]
-        vr = sf_state.vel_advected[func_compute_location(u, v, w, 1, 0, 0, n_grid)]
-        vb = sf_state.vel_advected[func_compute_location(u, v, w, 0, -1, 0, n_grid)]
-        vt = sf_state.vel_advected[func_compute_location(u, v, w, 0, 1, 0, n_grid)]
-        vp = sf_state.vel_advected[func_compute_location(u, v, w, 0, 0, -1, n_grid)]
-        vq = sf_state.vel_advected[func_compute_location(u, v, w, 0, 0, 1, n_grid)]
-        vc = sf_state.vel_advected[u, v, w]
-
-        if not func_is_free(u, v, w, -1, 0, 0, n_grid):
-            vl.x = -vc.x
-        if not func_is_free(u, v, w, 1, 0, 0, n_grid):
-            vr.x = -vc.x
-        if not func_is_free(u, v, w, 0, -1, 0, n_grid):
-            vb.y = -vc.y
-        if not func_is_free(u, v, w, 0, 1, 0, n_grid):
-            vt.y = -vc.y
-        if not func_is_free(u, v, w, 0, 0, -1, n_grid):
-            vp.z = -vc.z
-        if not func_is_free(u, v, w, 0, 0, 1, n_grid):
-            vq.z = -vc.z
-
-        sf_state.div[u, v, w] = 0.5 * (vr.x - vl.x + vt.y - vb.y + vq.z - vp.z)
+    for I in qd.grouped(qd.ndrange(n_grid, n_grid, n_grid)):
+        # The rows of 'vel_lo' and 'vel_hi' are the velocities of the neighbours below and above the cell along each axis
+        vel_lo = qd.Matrix.zero(gs.qd_float, 3, 3)
+        vel_hi = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for d in qd.static(range(3)):
+            offset = qd.Vector.unit(3, d, gs.qd_int)
+            vel_lo[d, :] = sf_state.vel_advected[qd.math.clamp(I - offset, 0, n_grid - 1)]
+            vel_hi[d, :] = sf_state.vel_advected[qd.math.clamp(I + offset, 0, n_grid - 1)]
+        vel_c = sf_state.vel_advected[I]
+        # The velocity across a wall of the grid is mirrored
+        for d in qd.static(range(3)):
+            offset = qd.Vector.unit(3, d, gs.qd_int)
+            if not ((I - offset >= 0).all() and (I - offset < n_grid).all()):
+                vel_lo[d, d] = -vel_c[d]
+            if not ((I + offset >= 0).all() and (I + offset < n_grid).all()):
+                vel_hi[d, d] = -vel_c[d]
+        sf_state.div[I] = 0.5 * (
+            vel_hi[0, 0] - vel_lo[0, 0] + vel_hi[1, 1] - vel_lo[1, 1] + vel_hi[2, 2] - vel_lo[2, 2]
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -175,14 +171,13 @@ def kernel_pressure_jacobi(i_src: int, sf_state: SFState):
     """
     n_grid = sf_state.vel.shape[0]
     i_dst = 1 - i_src
-    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
-        pl = sf_state.pressure[i_src, func_compute_location(u, v, w, -1, 0, 0, n_grid)]
-        pr = sf_state.pressure[i_src, func_compute_location(u, v, w, 1, 0, 0, n_grid)]
-        pb = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, -1, 0, n_grid)]
-        pt = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 1, 0, n_grid)]
-        pp = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, -1, n_grid)]
-        pq = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, 1, n_grid)]
-        sf_state.pressure[i_dst, u, v, w] = (pl + pr + pb + pt + pp + pq - sf_state.div[u, v, w]) / 6.0
+    for I in qd.grouped(qd.ndrange(n_grid, n_grid, n_grid)):
+        pressure_sum = gs.qd_float(0.0)
+        for d in qd.static(range(3)):
+            offset = qd.Vector.unit(3, d, gs.qd_int)
+            pressure_sum += sf_state.pressure[i_src, qd.math.clamp(I - offset, 0, n_grid - 1)]
+            pressure_sum += sf_state.pressure[i_src, qd.math.clamp(I + offset, 0, n_grid - 1)]
+        sf_state.pressure[i_dst, I] = (pressure_sum - sf_state.div[I]) / 6.0
 
 
 @qd.kernel(fastcache=True)
@@ -194,35 +189,19 @@ def kernel_subtract_gradient(i_src: int, sf_state: SFState):
     warm start of the next substep.
     """
     n_grid = sf_state.vel.shape[0]
-    for u, v, w in qd.ndrange(n_grid, n_grid, n_grid):
-        pl = sf_state.pressure[i_src, func_compute_location(u, v, w, -1, 0, 0, n_grid)]
-        pr = sf_state.pressure[i_src, func_compute_location(u, v, w, 1, 0, 0, n_grid)]
-        pb = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, -1, 0, n_grid)]
-        pt = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 1, 0, n_grid)]
-        pp = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, -1, n_grid)]
-        pq = sf_state.pressure[i_src, func_compute_location(u, v, w, 0, 0, 1, n_grid)]
-
-        sf_state.vel[u, v, w] = sf_state.vel_advected[u, v, w] - 0.5 * qd.Vector(
-            [pr - pl, pt - pb, pq - pp], dt=gs.qd_float
-        )
+    for I in qd.grouped(qd.ndrange(n_grid, n_grid, n_grid)):
+        pressure_diff = qd.Vector.zero(gs.qd_float, 3)
+        for d in qd.static(range(3)):
+            offset = qd.Vector.unit(3, d, gs.qd_int)
+            pressure_diff[d] = (
+                sf_state.pressure[i_src, qd.math.clamp(I + offset, 0, n_grid - 1)]
+                - sf_state.pressure[i_src, qd.math.clamp(I - offset, 0, n_grid - 1)]
+            )
+        sf_state.vel[I] = sf_state.vel_advected[I] - 0.5 * pressure_diff
         # Keep the result in the first buffer as the warm start of the next substep. No read races with this write: the
         # stencil above reads the second buffer whenever it holds the result, and the copy leaves the cell unchanged
         # otherwise.
-        sf_state.pressure[0, u, v, w] = sf_state.pressure[i_src, u, v, w]
-
-
-@qd.func
-def func_compute_location(u: int, v: int, w: int, du: int, dv: int, dw: int, n_grid: int):
-    """Return the cell at the given offset of a cell, clamped to the grid."""
-    I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
-    return qd.math.clamp(I, 0, n_grid - 1)
-
-
-@qd.func
-def func_is_free(u: int, v: int, w: int, du: int, dv: int, dw: int, n_grid: int):
-    """Return whether the cell at the given offset of a cell lies inside the grid."""
-    I = qd.Vector([u + du, v + dv, w + dw], dt=gs.qd_int)
-    return (0 <= I).all() and (I < n_grid).all()
+        sf_state.pressure[0, I] = sf_state.pressure[i_src, I]
 
 
 @qd.func
@@ -241,8 +220,7 @@ def func_trilerp(qf: qd.template(), p: qd.types.vector(3), n_grid: int):
         grid_I = base_I + offset
         w_xyz = 1 - qd.abs(p_I - grid_I)
         w = w_xyz[0] * w_xyz[1] * w_xyz[2]
-        grid_I_ = func_compute_location(grid_I[0], grid_I[1], grid_I[2], 0, 0, 0, n_grid)
-        q += w * qf[grid_I_]
+        q += w * qf[qd.math.clamp(grid_I, 0, n_grid - 1)]
         w_total += w
     q /= w_total
     return q
