@@ -298,42 +298,40 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        if self.is_active:
-            kernel_apply_external_force(self._sim.cur_t, self.pbd_state, self.pbd_info, self.force_fields_dispatcher)
+        kernel_apply_external_force(self._sim.cur_t, self.pbd_state, self.pbd_info, self.force_fields_dispatcher)
 
-            # topology constraints (doesn't require spatial hashing)
-            if self._n_edges > 0:
-                for _ in range(self._max_stretch_solver_iterations):
-                    kernel_solve_stretch(self.pbd_state, self.pbd_info)
+        # topology constraints (doesn't require spatial hashing)
+        if self._n_edges > 0:
+            for _ in range(self._max_stretch_solver_iterations):
+                kernel_solve_stretch(self.pbd_state, self.pbd_info)
 
-            if self._n_inner_edges > 0:
-                for _ in range(self._max_bending_solver_iterations):
-                    kernel_solve_bending(self.pbd_state, self.pbd_info)
+        if self._n_inner_edges > 0:
+            for _ in range(self._max_bending_solver_iterations):
+                kernel_solve_bending(self.pbd_state, self.pbd_info)
 
-            if self._n_elems > 0:
-                for _ in range(self._max_volume_solver_iterations):
-                    kernel_solve_volume(self.pbd_state, self.pbd_info)
+        if self._n_elems > 0:
+            for _ in range(self._max_volume_solver_iterations):
+                kernel_solve_volume(self.pbd_state, self.pbd_info)
 
-            # perform spatial hashing
-            kernel_reorder_particles(self.pbd_state, self.pbd_info)
+        # perform spatial hashing
+        kernel_reorder_particles(self.pbd_state, self.pbd_info)
 
-            # spatial constraints
-            for _ in range(self._max_density_solver_iterations):
-                kernel_solve_density(self.pbd_state, self.pbd_info)
-            for _ in range(self._max_viscosity_solver_iterations):
-                kernel_solve_viscosity(self.pbd_state, self.pbd_info)
+        # spatial constraints
+        for _ in range(self._max_density_solver_iterations):
+            kernel_solve_density(self.pbd_state, self.pbd_info)
+        for _ in range(self._max_viscosity_solver_iterations):
+            kernel_solve_viscosity(self.pbd_state, self.pbd_info)
 
-            kernel_solve_collision(self.pbd_state, self.pbd_info)
+        kernel_solve_collision(self.pbd_state, self.pbd_info)
 
-            # compute effective velocity
-            kernel_compute_velocity(self.pbd_state, self.pbd_info)
+        # compute effective velocity
+        kernel_compute_velocity(self.pbd_state, self.pbd_info)
 
     def substep_post_coupling(self, f):
-        if self.is_active:
-            kernel_copy_from_reordered(self.pbd_state)
+        kernel_copy_from_reordered(self.pbd_state)
 
-            # boundary collision
-            kernel_solve_boundary_collision(self.pbd_state, self.pbd_info)
+        # boundary collision
+        kernel_solve_boundary_collision(self.pbd_state, self.pbd_info)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -395,6 +393,7 @@ class PBDSolver(ParticleSolver):
             gs.raise_exception(
                 "Attaching particles to a link requires the PBD solver to be coupled with the rigid solver."
             )
+        kernel_set_particles_free(particles_idx, envs_idx, self.pbd_state, free=False)
         rigid_pbd.attach_particles(particles_idx, envs_idx, link_idx)
 
     @gs.assert_built

@@ -836,9 +836,6 @@ class IPCCoupler(RBC, Coupler, Coupling):
         """
         assert self._ipc_world is not None
 
-        if not self.is_active:
-            return
-
         # Step 1: Store Genesis rigid states (common)
         self._store_gs_rigid_states()
 
@@ -872,11 +869,6 @@ class IPCCoupler(RBC, Coupler, Coupling):
         gs.logger.debug("Resetting IPC coupler state")
         self._ipc_world.recover(0)
         self._ipc_world.retrieve()
-
-    @property
-    def is_active(self) -> bool:
-        """Check if IPC coupling is active"""
-        return self._ipc_world is not None
 
     @property
     def has_any_rigid_coupling(self) -> bool:

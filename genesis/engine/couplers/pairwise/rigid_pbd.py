@@ -120,7 +120,6 @@ def kernel_attach_pbd_to_rigid_link(
         local_pos = qd_inv_transform_by_trans_quat(
             pbd_state.particles.pos[i_p, i_b], links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
         )
-        pbd_state.particles.free[i_p, i_b] = False
         rigid_pbd_info.link_idx[i_p, i_b] = link_idx
         rigid_pbd_info.local_pos[i_p, i_b] = local_pos
 

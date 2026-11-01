@@ -246,30 +246,28 @@ class SPHSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        if self.is_active:
-            kernel_reorder_particles(self.sph_state, self.sph_info)
-            if self._pressure_solver == "WCSPH":
-                kernel_compute_rho(self.sph_state, self.sph_info)
-                kernel_compute_non_pressure_forces(
-                    self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
-                )
-                kernel_compute_pressure_forces(self.sph_state, self.sph_info)
-                kernel_advect_velocity(self.sph_state, self.sph_info)
-            elif self._pressure_solver == "DFSPH":
-                kernel_compute_rho(self.sph_state, self.sph_info)
-                kernel_compute_dfsph_factor(self.sph_state, self.sph_info)
-                self._dfsph_solve(solve_density=False)
-                kernel_advect_velocity(self.sph_state, self.sph_info)
-                kernel_compute_non_pressure_forces(
-                    self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
-                )
-                kernel_advect_velocity(self.sph_state, self.sph_info)
-                self._dfsph_solve(solve_density=True)
+        kernel_reorder_particles(self.sph_state, self.sph_info)
+        if self._pressure_solver == "WCSPH":
+            kernel_compute_rho(self.sph_state, self.sph_info)
+            kernel_compute_non_pressure_forces(
+                self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
+            )
+            kernel_compute_pressure_forces(self.sph_state, self.sph_info)
+            kernel_advect_velocity(self.sph_state, self.sph_info)
+        elif self._pressure_solver == "DFSPH":
+            kernel_compute_rho(self.sph_state, self.sph_info)
+            kernel_compute_dfsph_factor(self.sph_state, self.sph_info)
+            self._dfsph_solve(solve_density=False)
+            kernel_advect_velocity(self.sph_state, self.sph_info)
+            kernel_compute_non_pressure_forces(
+                self._sim.cur_t, self.sph_state, self.sph_info, self.force_fields_dispatcher
+            )
+            kernel_advect_velocity(self.sph_state, self.sph_info)
+            self._dfsph_solve(solve_density=True)
 
     def substep_post_coupling(self, f):
-        if self.is_active:
-            kernel_advect_position(self.sph_state, self.sph_info)
-            kernel_copy_from_reordered(self.sph_state)
+        kernel_advect_position(self.sph_state, self.sph_info)
+        kernel_copy_from_reordered(self.sph_state)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
