@@ -9,14 +9,13 @@ segment serve small segments and the host backend.
 import math
 import os
 from enum import IntEnum
-from typing import NamedTuple
 
 import quadrants as qd
 from quadrants.algorithms import sort, sort_scratch_slots
 
 import genesis as gs
 import genesis.utils.linalg as lu
-from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, field
+from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, StructSpec, field
 from genesis.utils.misc import get_gpu_core_count
 
 
@@ -85,21 +84,9 @@ RANK_SORT_KEYS_PER_CORE = 0.75
 SORT_MAX_CHUNKS = 64
 
 
-class SegmentSortData(NamedTuple):
-    """A sort of keys per segment: the static config of its kernels, and what its buffer is allocated from.
-
-    A struct holding the buffer (see SegmentSortBuffer) takes its sizes under the name of its member, and its unused
-    arrays among its own.
-    """
-
-    config: SegmentSortStaticConfig
-    sizes: dict[str, int]
-    unused: dict[Label, bool]
-
-
 def get_segment_sort_data(
     n_segments: int, n_keys: int, n_segment_keys_max: int, key_bits: int, has_values: bool
-) -> SegmentSortData:
+) -> StructSpec:
     """Return the static config of a sort of keys per segment, and what its buffer is allocated from.
 
     The sort orders n_keys keys over n_segments segments. A segment holds n_segment_keys_max keys at most, and every
@@ -136,7 +123,7 @@ def get_segment_sort_data(
 
     n_sort_scratch = sort_scratch_slots(n_keys, log256_max_n) if sort_kind == SEGMENT_SORT_KIND.DEVICE_RADIX else 0
     n_sort_chunks = max(1, min(SORT_MAX_CHUNKS, (os.cpu_count() or 1) // n_segments))
-    return SegmentSortData(
+    return StructSpec(
         sort_config,
         dict(sort_segments=n_segments, sort_keys=n_keys, sort_slots=n_sort_scratch, sort_chunks=n_sort_chunks),
         {

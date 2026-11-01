@@ -9,12 +9,11 @@ sorted order the tree is laid out in, the one leaves_idx maps back to i_a.
 """
 
 from enum import IntEnum
-from typing import NamedTuple
 
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, field
+from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, StructSpec, field
 from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
 
 
@@ -129,18 +128,7 @@ class BVHQueryFilter(Data, kind=DataKind.CONSTANT):
 MORTON_BITS = 30
 
 
-class BVHData(NamedTuple):
-    """The static config of a set of linear bounding volume hierarchies (LBVH), and what its state is allocated from.
-
-    A struct holding the state (see BVHState) takes its sizes and its unused arrays under the name of its member.
-    """
-
-    config: BVHStaticConfig
-    sizes: dict
-    unused: dict
-
-
-def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData:
+def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> StructSpec:
     """Return the static config and the allocation of a set of trees, one per batch, of the same number of leaves.
 
     A set switched off holds placeholders alone (see 'unused' in Data), for the tree a kernel argument carries but a
@@ -172,7 +160,7 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
             BLOCK_SWEEP_FIT: fit_kind != BVH_FIT_KIND.BLOCK_SWEEP,
         }
     sizes = dict(bvh_trees=n_trees, bvh_leaves=n_leaves, sort=sort.sizes)
-    return BVHData(bvh_config, sizes, unused)
+    return StructSpec(bvh_config, sizes, unused)
 
 
 @qd.func

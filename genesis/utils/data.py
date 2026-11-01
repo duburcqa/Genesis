@@ -487,6 +487,19 @@ class Data:
                     pending.append(((*path, data_field.name), value))
 
 
+class StructSpec(NamedTuple):
+    """
+    The static config of the kernels of a component, and what the struct holding their arrays is allocated from.
+
+    A struct holding the arrays as one of its members takes the sizes and the unused arrays under the name of that
+    member (see Data).
+    """
+
+    config: StaticConfig
+    sizes: dict[str, Any]
+    unused: dict[Label | FieldRef | None, Any]
+
+
 def _resolve_type(annotation: Any, owner: type) -> Any:
     """Return what an annotation of a class names, a string or a forward reference evaluated where the class lives.
 
