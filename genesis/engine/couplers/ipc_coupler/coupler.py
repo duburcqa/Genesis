@@ -11,9 +11,10 @@ import numpy as np
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.couplers.base import Coupler
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
-from genesis.engine.pipeline import Coupler, Enabled, RoleOf, System, register_system
+from genesis.engine.pipeline import Enabled, RoleOf, System, register_system
 from genesis.engine.solvers.fem_solver import FEMSolver
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling, Dynamics, Step
@@ -105,6 +106,7 @@ class IPCCoupler(RBC, Coupler, Coupling):
     # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
     is_differentiable = False
     # IPC computes the dynamics of the FEM entities itself
+    is_simulating_fem = True
     relocations = {RoleOf(FEMSolver, Dynamics): None}
 
     def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:

@@ -11,12 +11,10 @@ from genesis.engine.boundaries import FloorBoundary, func_impose_floor_boundary
 from genesis.engine.boundaries.boundaries import FloorBoundaryPlane
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
-from genesis.engine.pipeline import RoleOf
 from genesis.engine.solvers.base_solver import FRAMES
 from genesis.engine.solvers.rigid.data import DynState, LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.engine.step import Dynamics
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
@@ -852,7 +850,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
             )
-        if self._sim.coupler is not None and RoleOf(FEMSolver, Dynamics) in self._sim.coupler.relocations:
+        if self._sim.coupler is not None and self._sim.coupler.is_simulating_fem:
             gs.raise_exception(
                 "Vertex constraints are not supported by a coupler computing the dynamics of FEM entities."
             )

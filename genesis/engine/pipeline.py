@@ -301,28 +301,6 @@ class System:
         fill_data(items, {item.name: checkpoint.arrays[item.name] for item in items}, frame_only=self.has_frames)
 
 
-class Coupler(System):
-    """
-    A System solving the interactions of several solvers at once, which the solvers it couples arrange their substep
-    around.
-    """
-
-    @property
-    def is_using_rigid_coup_type(self) -> bool:
-        """Whether the coupler couples every rigid entity the way the `coup_type` of its material sets."""
-        return False
-
-    @property
-    def rigid_links_idx_simulated(self) -> set[int]:
-        """Return the indices of the rigid links the coupler simulates alone, which take part in no rigid contact."""
-        return set()
-
-    @property
-    def rigid_links_idx_contacting(self) -> set[int]:
-        """Return the indices of the rigid links whose contacts with each other the coupler resolves."""
-        return set()
-
-
 def register_system(cls: type[System]) -> type[System]:
     """Declare a System the simulator creates whenever a scene provides every dependency of its constructor."""
     _SYSTEM_CLASSES.append(cls)
@@ -1004,7 +982,9 @@ def assemble_systems(
             for owned in (owner, *_get_owned_attrs(owner).values())
         ]
         args = {}
-        for dependency in dependencies_by_cls.setdefault(cls, _get_dependencies(cls)):
+        if cls not in dependencies_by_cls:
+            dependencies_by_cls[cls] = _get_dependencies(cls)
+        for dependency in dependencies_by_cls[cls]:
             candidates = list({id(value): value for value in values if isinstance(value, dependency.classes)}.values())
             if len(candidates) > 1:
                 raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
@@ -1052,7 +1032,9 @@ def assemble_systems(
             types_built = [type(other) for other in systems if id(other) in built_ids]
             is_used_pending = False
             for cls in classes_pending:
-                dependencies = dependencies_by_cls.setdefault(cls, _get_dependencies(cls))
+                if cls not in dependencies_by_cls:
+                    dependencies_by_cls[cls] = _get_dependencies(cls)
+                dependencies = dependencies_by_cls[cls]
                 if any(
                     [
                         issubclass(c, owned)

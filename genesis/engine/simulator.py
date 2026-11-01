@@ -16,8 +16,9 @@ from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, SAPCoupler, pairwise
+from .couplers.base import Coupler
 from .entities import HybridEntity
-from .pipeline import Coupler, System, assemble_systems
+from .pipeline import System, assemble_systems
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SFSolver, SPHSolver
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno

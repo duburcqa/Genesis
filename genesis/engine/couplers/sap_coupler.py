@@ -23,7 +23,8 @@ from genesis.engine.bvh import (
     func_no_filter,
     get_bvh_data,
 )
-from genesis.engine.pipeline import Coupler, Enabled, Phase, RoleOf, System, register_system
+from genesis.engine.couplers.base import Coupler
+from genesis.engine.pipeline import Enabled, Phase, RoleOf, System, register_system
 from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
     VERTICES,
