@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.utils.data import DataKind
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -372,7 +373,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=use_implicit_solver,
-            enable_vertex_constraints=True,
+            enable_vertex_constraints=use_implicit_solver,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
@@ -418,7 +419,10 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
     assert_equal(box.get_el2v(), box.elems)
 
+    checkpoint = scene.fem_solver.save_checkpoint(frozenset((DataKind.INFO, DataKind.STATE)))
     target_poss = box.get_state().pos[..., VERTICES_IDX, :]
+    box.set_vertex_constraints(VERTICES_IDX)
+    scene.fem_solver.load_checkpoint(checkpoint)
     box.set_vertex_constraints(VERTICES_IDX)
     scene.step()
     assert_allclose(box.get_state().pos[..., VERTICES_IDX, :], target_poss, tol=1e-8)
@@ -486,6 +490,13 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     box.set_vertex_constraints(VERTICES_IDX, link=anchor.base_link, envs_idx=[1])
     scene.step()
     assert_allclose(box.get_state().pos[1, VERTICES_IDX, :], target_poss[1], tol=1e-8)
+    anchor.set_pos(((10.0, 0.0, HEIGHT), (20.0, 0.0, HEIGHT + 0.02)), relative=False)
+    # The target follows the link during the couplings, after the implicit solver enforced the former one
+    for _ in range(2):
+        scene.step()
+    assert_allclose(
+        box.get_state().pos[1, VERTICES_IDX, :], target_poss[1] + target_poss.new_tensor((0.0, 0.0, 0.02)), tol=1e-8
+    )
 
     box.remove_vertex_constraints(envs_idx=[1])
     box.set_position((0.0, 0.0, 0.0))

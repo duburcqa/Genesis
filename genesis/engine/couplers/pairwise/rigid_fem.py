@@ -1,46 +1,128 @@
 """The couplings of the rigid solver with the finite element method (FEM) solver."""
 
-from collections.abc import Callable
 from typing import Annotated
 
 import torch
 
 import quadrants as qd
 
+import genesis as gs
 from genesis.engine.pipeline import Enabled
-from genesis.engine.solvers.fem_solver import FEMSolver
+from genesis.engine.solvers.fem_solver import (
+    VERTICES,
+    FEMSolver,
+    FEMState,
+    FEMVertexConstraintsInfo,
+    func_set_constraint_target,
+)
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
+from genesis.utils.data import ENVS, Data, DataKind, field
+from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
+from genesis.utils.misc import broadcast_tensor
 from genesis.utils.sdf import SDF, SDFInfo
 
 from .fem_surface import FEMSurface, SurfaceCoupling
 from .rigid_contact import func_collide_with_rigid
 
 
+class RigidFEMAttachmentInfo(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
+    """
+    The rigid links the targets of the constrained finite element method (FEM) vertices follow.
+
+    The target of a vertex following the link `link_idx` (-1 for none) keeps the offset `link_offset_pos` of the vertex
+    from the link, rotated by the rotation of the link since `link_init_quat`.
+    """
+
+    link_idx: qd.Tensor = field(int)
+    link_offset_pos: qd.Tensor = field((float, 3))
+    link_init_quat: qd.Tensor = field((float, 4))
+
+
+@qd.kernel(fastcache=True)
+def kernel_attach_fem_vertices(
+    verts_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    link_idx: int,
+    link_pos: qd.types.ndarray(element_dim=1),
+    link_quat: qd.types.ndarray(element_dim=1),
+    fem_state: FEMState,
+    rigid_fem_attachment_info: RigidFEMAttachmentInfo,
+):
+    """Make the targets of some vertices follow a link of the given pose, keeping the offset of each vertex from it."""
+    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
+        i_v = verts_idx[i_b_, i_v_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_values' in base_solver.py
+        if i_v >= 0:
+            rigid_fem_attachment_info.link_idx[i_v, i_b] = link_idx
+            rigid_fem_attachment_info.link_offset_pos[i_v, i_b] = fem_state.vertices.pos[0, i_v, i_b] - link_pos[i_b_]
+            rigid_fem_attachment_info.link_init_quat[i_v, i_b] = link_quat[i_b_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_fem_attachment(
+    vertex_constraints: FEMVertexConstraintsInfo, dyn_state: DynState, rigid_fem_attachment_info: RigidFEMAttachmentInfo
+):
+    """Move the target of the constrained vertices following a rigid link with the link."""
+    for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
+        i_l = rigid_fem_attachment_info.link_idx[i_v, i_b]
+        if vertex_constraints.is_constrained[i_v, i_b] and i_l >= 0:
+            offset_quat = qd_transform_quat_by_quat(
+                rigid_fem_attachment_info.link_init_quat[i_v, i_b], dyn_state.links.quat[i_l, i_b]
+            )
+            target_pos = dyn_state.links.pos[i_l, i_b] + qd_transform_by_quat(
+                rigid_fem_attachment_info.link_offset_pos[i_v, i_b], offset_quat
+            )
+            func_set_constraint_target(i_v, i_b, target_pos, vertex_constraints)
+
+
 class RigidFEMAttachment(Coupling):
     """
-    Move the targets of the finite element method (FEM) vertices following a rigid link with the link.
+    Move the targets of the constrained finite element method (FEM) vertices following a rigid link with the link.
 
-    The FEM solver constrains its vertices to follow a link through it (see 'FEMSolver.set_vertex_constraints').
+    The FEM solver constrains its vertices, which follow a link through this coupling (see
+    'FEMSolver.set_vertex_constraints').
     """
 
-    def __init__(self, rigid_solver: RigidSolver, fem_solver: FEMSolver) -> None:
+    couple = kernel_update_fem_attachment
+
+    rigid_fem_attachment_info: RigidFEMAttachmentInfo
+
+    def __init__(self, rigid_solver: RigidSolver, fem_solver: FEMSolver, options: LegacyCouplerOptions) -> None:
         self._rigid_solver = rigid_solver
         self._fem_solver = fem_solver
 
-    @property
-    def couple(self) -> Callable:
-        return self._fem_solver.update_linked_vertex_constraints
+    def build(self) -> None:
+        self.rigid_fem_attachment_info = RigidFEMAttachmentInfo(
+            sizes=dict(vertices=self._fem_solver.n_vertices, envs=self._fem_solver.sim._B)
+        )
+        self.rigid_fem_attachment_info.link_idx.fill(-1)
 
-    def get_link_pose(self, link_idx: int, envs_idx) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the position and quaternion of a link in some environments, which carry no gradient."""
-        links_envs_idx = envs_idx if self._rigid_solver.n_envs > 0 else None
-        with torch.no_grad():
-            link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-            link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-        return link_pos, link_quat
+    def attach(self, verts_idx, envs_idx, link_idx: int) -> None:
+        """Make the targets of some constrained vertices follow a rigid link from its current pose, -1 for none."""
+        if link_idx < 0:
+            link_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
+            link_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
+        else:
+            links_envs_idx = envs_idx if self._rigid_solver.n_envs > 0 else None
+            # The attachment is a configuration of the constraint, which carries no gradient
+            with torch.no_grad():
+                link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+                link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+            link_pos = broadcast_tensor(link_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
+            link_quat = broadcast_tensor(link_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
+        kernel_attach_fem_vertices(
+            verts_idx,
+            envs_idx,
+            link_idx,
+            link_pos,
+            link_quat,
+            self._fem_solver.fem_state,
+            self.rigid_fem_attachment_info,
+        )
 
 
 @qd.func

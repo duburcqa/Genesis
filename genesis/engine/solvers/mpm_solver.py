@@ -767,58 +767,6 @@ class MPMSolver(ParticleSolver, Coupling):
             kernel_reset_particles_deformation(particles_idx, envs_idx, self.mpm_state, self.mpm_info)
 
     # ------------------------------------------------------------------------------------
-    # -------------------------------- particle constraints ------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @gs.assert_built
-    @mutates(StateChange.MODEL)
-    def set_particle_constraints(self, particles_mask, link_idx, stiffness, *, particles_start=0):
-        """
-        Attach some particles to a rigid link with critically damped springs.
-
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
-
-        Parameters
-        ----------
-        particles_mask : array_like, shape ([n_envs,] n_particles)
-            Boolean mask over consecutive particles of the solver, selecting those to attach.
-        link_idx : int
-            Global index of the rigid link.
-        stiffness : float
-            Stiffness of the springs.
-        particles_start : int, optional
-            Global index of the particle the mask starts at. Defaults to 0.
-        """
-        # Imported here to break the import cycle between the couplings and the solvers they couple
-        from genesis.engine.couplers.pairwise import RigidMPMAttachment
-
-        attachment = self._sim.get_system(RigidMPMAttachment)
-        if attachment is None:
-            gs.raise_exception("Attaching particles to a link requires a scene simulating rigid entities.")
-        attachment.attach(particles_mask, link_idx, stiffness, particles_start=particles_start)
-
-    @gs.assert_built
-    @mutates(StateChange.MODEL)
-    def remove_particle_constraints(self, particles_mask=None, *, particles_start=0):
-        """
-        Detach some particles from the rigid link they are attached to (see 'set_particle_constraints').
-
-        Parameters
-        ----------
-        particles_mask : None | array_like, shape ([n_envs,] n_particles), optional
-            Boolean mask over consecutive particles of the solver, selecting those to detach. If None, all particles
-            from `particles_start` on will be detached. Defaults to None.
-        particles_start : int, optional
-            Global index of the particle the mask starts at. Defaults to 0.
-        """
-        # Imported here, see 'set_particle_constraints'
-        from genesis.engine.couplers.pairwise import RigidMPMAttachment
-
-        attachment = self._sim.get_system(RigidMPMAttachment)
-        if attachment is not None:
-            attachment.detach(particles_mask, particles_start=particles_start)
-
-    # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
 

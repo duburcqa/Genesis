@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 import igl
 
@@ -10,14 +9,12 @@ import genesis.utils.linalg as lu
 from genesis.engine.boundaries import FloorBoundary, FloorBoundaryPlane, func_impose_floor_boundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
-from genesis.engine.solvers.rigid.data import DynState, LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
-from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums, PCGScalars
-from genesis.utils.misc import broadcast_tensor, qd_to_torch, tensor_to_array
+from genesis.utils.misc import qd_to_torch, tensor_to_array
 
 from .base_solver import (
     FRAMES,
@@ -208,17 +205,13 @@ class FEMVertexConstraintsInfo(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS))
     The constraints of the vertices, one per vertex and environment.
 
     A constrained vertex is held at `target_pos`, or pulled toward it by a critically damped spring of the given
-    stiffness when the constraint is soft. A vertex following the link `link_idx` (-1 for none) keeps the offset
-    `link_offset_pos` from it, rotated by the rotation of the link since `link_init_quat`.
+    stiffness when the constraint is soft. A target following a rigid link moves with it (see RigidFEMAttachment).
     """
 
     is_constrained: qd.Tensor = field(bool)
     target_pos: qd.Tensor = field((float, 3))
     is_soft_constraint: qd.Tensor = field(bool)
     stiffness: qd.Tensor = field(float)
-    link_idx: qd.Tensor = field(int)
-    link_offset_pos: qd.Tensor = field((float, 3))
-    link_init_quat: qd.Tensor = field((float, 4))
 
 
 class FEMInfo(Data, kind=DataKind.CONSTANT, shape=()):
@@ -387,8 +380,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # boundary
         self.boundary = FloorBoundary(height=self._floor_height)
 
-        # See 'newton_vertex_constraints'
-        self._newton_vertex_constraints: FEMVertexConstraintsInfo | None = None
         self._material_dispatcher: FEMMaterialDispatcher | None = None
         self._n_surface_elements = 0
         # Whether the Hessian of the materials whose Hessian does not depend on the deformation is computed already
@@ -500,15 +491,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_surface_elements = len(surface_elements_idx)
         self._material_dispatcher = FEMMaterialDispatcher(self._materials)
         self._is_hessian_ready = False
-        # The explicit solver allocates the constraints the first time a vertex is constrained, unless they are enabled
-        # (see 'set_vertex_constraints')
-        constraints_sizes = dict(envs=self._B, vertices=self.n_vertices)
-        if self.is_active and self._enable_vertex_constraints:
-            self.vertex_constraints = FEMVertexConstraintsInfo(sizes=constraints_sizes)
-            self.vertex_constraints.link_idx.fill(-1)
-        self._newton_vertex_constraints = self.vertex_constraints
-        if self._newton_vertex_constraints is None:
-            self._newton_vertex_constraints = FEMVertexConstraintsInfo(sizes=constraints_sizes, unused={None: True})
+        # The implicit solver reads the constraints only when they are enabled (see 'FEMStaticConfig')
+        self.vertex_constraints = FEMVertexConstraintsInfo(
+            sizes=dict(envs=self._B, vertices=self.n_vertices), unused={None: not self.is_active}
+        )
         self._build_gravity(self.fem_info.gravity)
 
         if self.is_active:
@@ -564,13 +550,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        if not self.is_active:
-            return
         if self._use_implicit_solver:
             if self.fem_static_config.has_rotation:
                 kernel_precompute_material_data(f, self.fem_state, self.fem_info, self._material_dispatcher)
             kernel_init_pos_and_inertia(
-                f, self._newton_vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config
+                f, self.vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config
             )
             # Newton iterations, each one a preconditioned conjugate gradient solve followed by a backtracking line
             # search (see https://en.wikipedia.org/wiki/Backtracking_line_search#Algorithm)
@@ -585,14 +569,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 )
                 self._is_hessian_ready = True
                 kernel_accumulate_vertex_force_preconditioner(
-                    f, self._newton_vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config
+                    f, self.vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config
                 )
 
                 kernel_init_pcg_solve(self.fem_state, self.fem_info)
                 for _ in range(self._n_pcg_iterations):
-                    kernel_one_pcg_iter(
-                        self._newton_vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config
-                    )
+                    kernel_one_pcg_iter(self.vertex_constraints, self.fem_state, self.fem_info, self.fem_static_config)
 
                 if self._n_linesearch_iterations <= 0:
                     kernel_skip_linesearch(f, self.fem_state)
@@ -601,7 +583,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     for _ in range(self._n_linesearch_iterations):
                         kernel_one_linesearch_iter(
                             f,
-                            self._newton_vertex_constraints,
+                            self.vertex_constraints,
                             self.fem_state,
                             self.fem_info,
                             self.fem_static_config,
@@ -614,14 +596,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 f, self.fem_state, self.fem_info, self.fem_static_config, self._material_dispatcher
             )
             kernel_update_vertices_vel(f, self.fem_state, self.fem_info, self.fem_static_config)
-            if self.vertex_constraints is not None:
-                kernel_apply_soft_constraints(f, self.vertex_constraints, self.fem_state, self.fem_info)
+            kernel_apply_soft_constraints(f, self.vertex_constraints, self.fem_state, self.fem_info)
 
     def substep_post_coupling(self, f):
-        if not self.is_active:
-            return
         kernel_compute_pos(f, self.fem_state, self.fem_info, self.fem_static_config)
-        if self.vertex_constraints is not None and not self._use_implicit_solver:
+        if not self._use_implicit_solver:
             kernel_apply_hard_constraints(f, self.vertex_constraints, self.fem_state)
 
     def copy_frame(self, source, target):
@@ -819,6 +798,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
+        # Imported here to break the import cycle between the couplings and the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidFEMAttachment
+
+        attachment = self._sim.get_system(RigidFEMAttachment)
+        if link_idx >= 0 and attachment is None:
+            gs.raise_exception(
+                "Constraining vertices to follow a link requires a scene simulating rigid entities and coupled by "
+                "'LegacyCouplerOptions'."
+            )
         if self._use_implicit_solver and not self._enable_vertex_constraints:
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
@@ -827,9 +815,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gs.raise_exception(
                 "Vertex constraints are not supported by a coupler computing the dynamics of FEM entities."
             )
-        if self.vertex_constraints is None:
-            self.vertex_constraints = FEMVertexConstraintsInfo(sizes=dict(vertices=self.n_vertices, envs=self._B))
-            self.vertex_constraints.link_idx.fill(-1)
 
         is_target_current = target_poss is None
         target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
@@ -838,55 +823,25 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if is_target_current:
             kernel_get_values(verts_idx, envs_idx, target_poss, self.fem_state.vertices.pos, has_frames=True)
 
-        if link_idx < 0:
-            link_init_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
-            link_init_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
-        else:
-            # Imported here to break the import cycle between the couplings and the solvers they couple
-            from genesis.engine.couplers.pairwise import RigidFEMAttachment
-
-            attachment = self._sim.get_system(RigidFEMAttachment)
-            if attachment is None:
-                gs.raise_exception("Constraining vertices to follow a link requires a scene simulating rigid entities.")
-            # The attachment is a configuration of the constraint, which carries no gradient
-            link_init_pos, link_init_quat = attachment.get_link_pose(link_idx, envs_idx)
-            link_init_pos = broadcast_tensor(link_init_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
-            link_init_quat = broadcast_tensor(link_init_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
-
-        # See 'kernel_set_values' in base_solver.py
         kernel_set_vertex_constraints(
-            f=0,
-            verts_idx=verts_idx,
-            envs_idx=envs_idx,
-            link_idx=link_idx,
-            stiffness=stiffness,
-            target_poss=target_poss,
-            link_init_pos=link_init_pos,
-            link_init_quat=link_init_quat,
-            vertex_constraints=self.vertex_constraints,
-            fem_state=self.fem_state,
-            is_soft_constraint=is_soft_constraint,
+            verts_idx, envs_idx, stiffness, target_poss, self.vertex_constraints, is_soft_constraint
         )
+        if attachment is not None:
+            attachment.attach(verts_idx, envs_idx, link_idx)
 
     @mutates(StateChange.MODEL)
     def update_constraint_targets(self, target_poss, verts_idx=None, envs_idx=None):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
         if target_poss is None:
             gs.raise_exception("The target positions of the constraints must be specified.")
-        if self.vertex_constraints is None:
-            gs.logger.warning("Ignoring update_constraint_targets; constraints have not been initialized.")
-            return
         target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
             target_poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        kernel_update_constraint_targets(verts_idx, envs_idx, target_poss, self.vertex_constraints)
+        kernel_set_values(verts_idx, envs_idx, target_poss, self.vertex_constraints.target_pos, has_frames=False)
 
     @mutates(StateChange.MODEL)
     def remove_vertex_constraints(self, verts_idx=None, envs_idx=None):
         """Remove the constraints of some vertices (see 'set_vertex_constraints'), of all of them if None."""
-        if self.vertex_constraints is None:
-            gs.logger.warning("Ignoring remove_vertex_constraints; constraints have not been initialized.")
-            return
         if verts_idx is None and envs_idx is None:
             self.vertex_constraints.is_constrained.fill(False)
             return
@@ -894,11 +849,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             None, verts_idx, self.n_vertices, "verts_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
         kernel_remove_specific_constraints(verts_idx, envs_idx, self.vertex_constraints)
-
-    def update_linked_vertex_constraints(self, dyn_state: DynState):
-        """Move the target of the vertices following a rigid link with the link."""
-        if self.vertex_constraints is not None:
-            kernel_update_linked_vertex_constraints(self.vertex_constraints, dyn_state.links)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -946,8 +896,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def newton_vertex_constraints(self):
-        """The vertex constraints the implicit solver reads, a placeholder when they are disabled."""
-        return self._newton_vertex_constraints
+        """The vertex constraints the implicit solver reads."""
+        return self.vertex_constraints
 
 
 # ------------------------------------------------------------------------------------
@@ -1641,20 +1591,6 @@ def kernel_get_elements_el2v(elements_idx: qd.types.ndarray(), el2v: qd.types.nd
             el2v[i_e_, j] = fem_info.elements.el2v[i_e][j]
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_linked_vertex_constraints(vertex_constraints: FEMVertexConstraintsInfo, links_state: LinksState):
-    """Move the target of the vertices following a rigid link with the link."""
-    for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
-        i_l = vertex_constraints.link_idx[i_v, i_b]
-        if vertex_constraints.is_constrained[i_v, i_b] and i_l >= 0:
-            offset_quat = qd_transform_quat_by_quat(
-                vertex_constraints.link_init_quat[i_v, i_b], links_state.quat[i_l, i_b]
-            )
-            vertex_constraints.target_pos[i_v, i_b] = links_state.pos[i_l, i_b] + qd_transform_by_quat(
-                vertex_constraints.link_offset_pos[i_v, i_b], offset_quat
-            )
-
-
 @no_grad
 @qd.kernel(fastcache=True)
 def kernel_apply_hard_constraints(f: int, vertex_constraints: FEMVertexConstraintsInfo, fem_state: FEMState):
@@ -1686,19 +1622,14 @@ def kernel_apply_soft_constraints(
 
 @qd.kernel(fastcache=True)
 def kernel_set_vertex_constraints(
-    f: int,
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
-    link_idx: int,
     stiffness: float,
     target_poss: qd.types.ndarray(),
-    link_init_pos: qd.types.ndarray(),
-    link_init_quat: qd.types.ndarray(),
     vertex_constraints: FEMVertexConstraintsInfo,
-    fem_state: FEMState,
     is_soft_constraint: bool,
 ):
-    """Constrain some vertices to their targets, keeping their offset from a link of the given initial pose."""
+    """Constrain some vertices to their targets."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
@@ -1707,31 +1638,17 @@ def kernel_set_vertex_constraints(
             vertex_constraints.is_constrained[i_v, i_b] = True
             vertex_constraints.is_soft_constraint[i_v, i_b] = is_soft_constraint
             vertex_constraints.stiffness[i_v, i_b] = stiffness
-            vertex_constraints.link_idx[i_v, i_b] = link_idx
-
-            cur_pos = fem_state.vertices.pos[f, i_v, i_b]
             for j in qd.static(range(3)):
                 vertex_constraints.target_pos[i_v, i_b][j] = target_poss[i_b_, i_v_, j]
-                vertex_constraints.link_offset_pos[i_v, i_b][j] = cur_pos[j] - link_init_pos[i_b_, j]
-            for j in qd.static(range(4)):
-                vertex_constraints.link_init_quat[i_v, i_b][j] = link_init_quat[i_b_, j]
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_constraint_targets(
-    verts_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    new_target_poss: qd.types.ndarray(),
-    vertex_constraints: FEMVertexConstraintsInfo,
+@FEMSolver.api
+@qd.func
+def func_set_constraint_target(
+    i_v: int, i_b: int, target_pos: qd.types.vector(3), vertex_constraints: FEMVertexConstraintsInfo
 ):
-    """Set the target position of some constrained vertices."""
-    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_v = verts_idx[i_b_, i_v_]
-        # See 'kernel_set_values' in base_solver.py
-        if i_v >= 0:
-            for j in qd.static(range(3)):
-                vertex_constraints.target_pos[i_v, i_b][j] = new_target_poss[i_b_, i_v_, j]
+    """Set the target position of a constrained vertex."""
+    vertex_constraints.target_pos[i_v, i_b] = target_pos
 
 
 @qd.kernel(fastcache=True)

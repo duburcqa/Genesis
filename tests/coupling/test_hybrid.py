@@ -500,6 +500,10 @@ def test_sap_fem_vs_robot(show_viewer):
     )
     scene.build()
 
+    # Only the legacy coupler carries the vertices constrained to a link along with it
+    with pytest.raises(gs.GenesisException, match="LegacyCouplerOptions"):
+        sphere.set_vertex_constraints([0], link=robot.base_link)
+
     # Run the simulation
     for _ in range(50):
         scene.step()

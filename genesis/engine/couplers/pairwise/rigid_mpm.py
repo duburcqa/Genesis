@@ -2,7 +2,6 @@
 
 from typing import Annotated
 
-import numpy as np
 import torch
 
 import quadrants as qd
@@ -349,88 +348,6 @@ class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
     link_local_pos: qd.Tensor = field((float, 3))
 
 
-class RigidMPMAttachment(Integration):
-    """
-    Pull material point method (MPM) particles toward points of rigid links with critically damped springs.
-
-    The springs are allocated the first time a particle is attached, which most scenes never do (see 'attach').
-    """
-
-    rigid_mpm_attachment_info: RigidMPMAttachmentInfo | None = None
-
-    def __init__(self, rigid_solver: RigidSolver, mpm_solver: MPMSolver) -> None:
-        self._rigid_solver = rigid_solver
-        self._mpm_solver = mpm_solver
-
-    def substep_post_coupling(self, f: int) -> None:
-        """Pull the attached particles of the next frame toward their link."""
-        if self.rigid_mpm_attachment_info is not None:
-            kernel_apply_rigid_mpm_attachment(
-                f,
-                self._mpm_solver.mpm_state,
-                self._rigid_solver.dyn_state,
-                self.rigid_mpm_attachment_info,
-                self._mpm_solver.mpm_info,
-            )
-
-    def attach(self, particles_mask, link_idx, stiffness, *, particles_start=0):
-        """
-        Attach some particles to a rigid link, each pulled toward the point of the frame of the link where it lies now.
-
-        `particles_mask` selects consecutive particles of the MPM solver from the global index `particles_start` on.
-        """
-        mpm_solver = self._mpm_solver
-        n_envs = mpm_solver.sim._B
-        if not isinstance(link_idx, int):
-            gs.raise_exception("link_idx must be an integer.")
-        if self.rigid_mpm_attachment_info is None:
-            # The flat index of a vector array fits in int32
-            if mpm_solver.n_particles * n_envs * 3 > np.iinfo(np.int32).max:
-                gs.raise_exception(
-                    f"Particle constraint shape (n_envs={n_envs}, n_particles={mpm_solver.n_particles}, 3) is too "
-                    "large. Consider reducing n_envs or n_particles."
-                )
-            self.rigid_mpm_attachment_info = RigidMPMAttachmentInfo(
-                sizes=dict(particles=mpm_solver.n_particles, envs=n_envs)
-            )
-            self.rigid_mpm_attachment_info.link_idx.fill(-1)
-        particles_mask = broadcast_tensor(particles_mask, gs.tc_bool, (n_envs, -1), ("envs_idx", "particles_idx"))
-        if particles_start < 0 or particles_start + particles_mask.shape[1] > mpm_solver.n_particles:
-            gs.raise_exception("The particle mask overruns the particles of the solver.")
-        # The attachment is a configuration of the constraint, which carries no gradient
-        with torch.no_grad():
-            link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
-            link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
-        link_pos = broadcast_tensor(link_pos, gs.tc_float, (n_envs, 3)).contiguous()
-        link_quat = broadcast_tensor(link_quat, gs.tc_float, (n_envs, 4)).contiguous()
-        kernel_attach_mpm_particles(
-            particles_start,
-            link_idx,
-            stiffness,
-            particles_mask.contiguous(),
-            link_pos,
-            link_quat,
-            mpm_solver.mpm_state,
-            self.rigid_mpm_attachment_info,
-        )
-
-    def detach(self, particles_mask=None, *, particles_start=0):
-        """Detach some particles from their link, every particle from `particles_start` on by default."""
-        if self.rigid_mpm_attachment_info is None:
-            return
-        n_envs = self._mpm_solver.sim._B
-        n_particles = -1
-        if particles_mask is None:
-            particles_mask = True
-            n_particles = self._mpm_solver.n_particles - particles_start
-        particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (n_envs, n_particles), ("envs_idx", "particles_idx")
-        ).contiguous()
-        if particles_start < 0 or particles_start + particles_mask.shape[1] > self._mpm_solver.n_particles:
-            gs.raise_exception("The particle mask overruns the particles of the solver.")
-        kernel_detach_mpm_particles(particles_start, particles_mask, self.rigid_mpm_attachment_info)
-
-
 @qd.kernel(fastcache=True)
 def kernel_attach_mpm_particles(
     particles_start: int,
@@ -496,3 +413,52 @@ def kernel_apply_rigid_mpm_attachment(
             func_add_particle_vel(
                 f + 1, i_p, i_b, mpm_info.substep_dt[None] * (spring_force + damping_force) / mass, mpm_state
             )
+
+
+class RigidMPMAttachment(Integration):
+    """Pull material point method (MPM) particles toward points of rigid links with critically damped springs."""
+
+    substep_post_coupling = kernel_apply_rigid_mpm_attachment
+
+    rigid_mpm_attachment_info: RigidMPMAttachmentInfo
+
+    def __init__(self, rigid_solver: RigidSolver, mpm_solver: MPMSolver) -> None:
+        self._rigid_solver = rigid_solver
+        self._mpm_solver = mpm_solver
+
+    def build(self) -> None:
+        self.rigid_mpm_attachment_info = RigidMPMAttachmentInfo(
+            sizes=dict(particles=self._mpm_solver.n_particles, envs=self._mpm_solver.sim._B)
+        )
+        self.rigid_mpm_attachment_info.link_idx.fill(-1)
+
+    def attach(self, particles_mask: torch.Tensor, link_idx: int, stiffness: float, particles_start: int) -> None:
+        """
+        Attach some particles to a rigid link, each pulled toward the point of the frame of the link where it lies now.
+
+        `particles_mask` selects consecutive particles of the MPM solver from the global index `particles_start` on, one
+        row per environment.
+        """
+        if not isinstance(link_idx, int):
+            gs.raise_exception("link_idx must be an integer.")
+        n_envs = self._mpm_solver.sim._B
+        # The attachment is a configuration of the constraint, which carries no gradient
+        with torch.no_grad():
+            link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
+            link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
+        link_pos = broadcast_tensor(link_pos, gs.tc_float, (n_envs, 3)).contiguous()
+        link_quat = broadcast_tensor(link_quat, gs.tc_float, (n_envs, 4)).contiguous()
+        kernel_attach_mpm_particles(
+            particles_start,
+            link_idx,
+            stiffness,
+            particles_mask.contiguous(),
+            link_pos,
+            link_quat,
+            self._mpm_solver.mpm_state,
+            self.rigid_mpm_attachment_info,
+        )
+
+    def detach(self, particles_mask: torch.Tensor, particles_start: int) -> None:
+        """Detach some particles from their link (see 'attach')."""
+        kernel_detach_mpm_particles(particles_start, particles_mask.contiguous(), self.rigid_mpm_attachment_info)

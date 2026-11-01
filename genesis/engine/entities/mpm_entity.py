@@ -3,6 +3,7 @@ import functools
 import torch
 
 import genesis as gs
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import broadcast_tensor
 
@@ -279,6 +280,7 @@ class MPMEntity(ParticleEntity):
         return mask
 
     @gs.assert_built
+    @mutates(StateChange.MODEL)
     def set_particle_constraints(self, particles_mask, link_idx, stiffness):
         """
         Attach some particles to a rigid link with critically damped springs.
@@ -294,12 +296,19 @@ class MPMEntity(ParticleEntity):
         stiffness : float
             Spring stiffness for the constraint.
         """
+        # Imported here to break the import cycle between the couplings and the entities of the solvers they couple
+        from genesis.engine.couplers.pairwise import RigidMPMAttachment
+
+        attachment = self._sim.get_system(RigidMPMAttachment)
+        if attachment is None:
+            gs.raise_exception("Attaching particles to a link requires a scene simulating rigid entities.")
         particles_mask = broadcast_tensor(
             particles_mask, gs.tc_bool, (self._sim._B, self._n_particles), ("envs_idx", "particles_idx")
         )
-        self._solver.set_particle_constraints(particles_mask, link_idx, stiffness, particles_start=self._particle_start)
+        attachment.attach(particles_mask, link_idx, stiffness, self._particle_start)
 
     @gs.assert_built
+    @mutates(StateChange.MODEL)
     def remove_particle_constraints(self, particles_mask=None):
         """
         Remove constraints from specified particles, or all if None.
@@ -309,13 +318,18 @@ class MPMEntity(ParticleEntity):
         particles_mask : None | array_like, shape ([n_envs,] n_particles), optional
             Boolean mask indicating which particles to unconstrain. If None, removes all constraints for this entity.
         """
-        particles_mask = broadcast_tensor(
-            True if particles_mask is None else particles_mask,
-            gs.tc_bool,
-            (self._sim._B, self._n_particles),
-            ("envs_idx", "particles_idx"),
-        )
-        self._solver.remove_particle_constraints(particles_mask, particles_start=self._particle_start)
+        # Imported here, see 'set_particle_constraints'
+        from genesis.engine.couplers.pairwise import RigidMPMAttachment
+
+        attachment = self._sim.get_system(RigidMPMAttachment)
+        if attachment is not None:
+            particles_mask = broadcast_tensor(
+                True if particles_mask is None else particles_mask,
+                gs.tc_bool,
+                (self._sim._B, self._n_particles),
+                ("envs_idx", "particles_idx"),
+            )
+            attachment.detach(particles_mask, self._particle_start)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
