@@ -47,10 +47,7 @@ TILED_MASS = "tiled_mass"
 
 
 class RigidInfo(Data, kind=DataKind.CONSTANT):
-    """
-    The model parameters of the rigid solver, with its configuration, its mass matrix and the tables of its
-    kinematic trees and roots.
-    """
+    """The model parameters of the rigid solver: configuration, mass matrix and kinematic tree and root tables."""
 
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
     meaninertia: qd.Tensor = field(float, shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
@@ -207,10 +204,7 @@ class HibernationState(Data, kind=DataKind.SCRATCH):
 
 
 class IslandState(Data, kind=DataKind.SCRATCH):
-    """
-    The partition of the kinematic trees of each environment into islands, with the per-island lists of links, dofs,
-    contacts and constraints and the per-island solver state.
-    """
+    """The islands of the kinematic trees of each environment, with their members and per-island solver state."""
 
     # Partition of the dof-carrying kinematic trees (see trees_root_idx in RigidInfo) into islands, the connected
     # components of the trees under the contact, equality and hibernation couplings, rebuilt every step by island.py.
@@ -373,12 +367,9 @@ class WeightScratch(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
 
 
 class ConstraintState(Data, kind=DataKind.SCRATCH):
-    """
-    The constraint solve of the rigid solver in each environment: its rows, Jacobian, Hessian factor, iterates and
-    backward gradients.
-    """
+    """The constraint solve of each environment: rows, Jacobian, Hessian factor, iterates and gradients."""
 
-    # /!\ The declaration order is the allocation order, which changing may reduce runtime speed by >10% /!\
+    # /!\ The declaration order is the allocation order, which changing slows the solve down /!\
     n_constraints: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     n_constraints_equality: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     n_constraints_frictionloss: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
@@ -511,10 +502,7 @@ PRUNING = "pruning"
 
 
 class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS)):
-    """
-    The contacts the collision detection finds in each environment, with their geoms, links, frame, friction, solver
-    parameters and force.
-    """
+    """The contacts found in each environment: geoms, links, frame, friction, solver parameters and force."""
 
     geom_a: qd.Tensor = field(int)
     geom_b: qd.Tensor = field(int)
@@ -557,10 +545,7 @@ class DiffContactInput(Data, kind=DataKind.SCRATCH):
 
 
 class SortBuffer(Data, kind=DataKind.STATE, shape=(2 * LINKS, ENVS)):
-    """
-    The bounds of the link bounding boxes along the sweep axis of the broadphase, two per link and environment, in
-    sorted order.
-    """
+    """The sorted bounds of the link bounding boxes along the broadphase sweep axis, per environment."""
 
     value: qd.Tensor = field(float)
     i_l: qd.Tensor = field(int)
@@ -576,10 +561,7 @@ class ContactCache(Data, kind=DataKind.STATE, shape=(POSSIBLE_PAIRS, ENVS)):
 
 
 class NarrowphaseWorkQueue(Data, kind=DataKind.SCRATCH, shape=(BROAD_PAIRS * ENVS,)):
-    """
-    The queue of the geom pairs the split narrowphase and the terrain pass process, with the candidate contacts of
-    each pair.
-    """
+    """The queue of geom pairs of the split narrowphase and terrain pass, with their candidate contacts."""
 
     # The pair of every entry (see collision_pair_idx in ColliderInfo), queued for the multicontact pass, then for the
     # terrain pass, which runs after it
@@ -605,10 +587,7 @@ class NarrowphaseWorkQueue(Data, kind=DataKind.SCRATCH, shape=(BROAD_PAIRS * ENV
 
 
 class ColliderState(Data, kind=DataKind.SCRATCH):
-    """
-    The collision detection state of each environment: the broadphase buffers, the contacts and the scratch of their
-    detection and pruning.
-    """
+    """The collision detection state of each environment: broadphase buffers, contacts and their scratch."""
 
     sort_buffer: SortBuffer
     active_buffer: qd.Tensor = field(int, shape=(LINKS, ENVS))
@@ -654,10 +633,7 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
 
 
 class VertsSpatialGrid(Data, kind=DataKind.CONSTANT):
-    """
-    The uniform grid of the collision vertices of each geom in its frame, which bounds a vertex scan to the cells a
-    box overlaps.
-    """
+    """The uniform grid of the collision vertices of each geom in its frame, bounding a vertex scan."""
 
     # Per-geom 8x8x8 grid over collision verts in the local AABB: a permutation of vert indices sorted by grid
     # cell (z fastest), the matching vert positions duplicated in that order for sequential streaming, and per-cell
@@ -732,10 +708,7 @@ class GJKSimplexBuffer(Data, kind=DataKind.SCRATCH, shape=(WORKERS, 4)):
 
 
 class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
-    """
-    The vertex, face and horizon edge counts of the expanding polytope algorithm (EPA) polytope of each worker, and
-    the support point its horizon connects to.
-    """
+    """The vertex, face and horizon counts of the expanding polytope algorithm (EPA) polytope of a worker."""
 
     nverts: qd.Tensor = field(int)
     nfaces: qd.Tensor = field(int)
@@ -745,10 +718,7 @@ class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
 
 
 class EPAPolytopeFace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYTOPE_FACES)):
-    """
-    A face of the expanding polytope algorithm (EPA) polytope: its vertices, adjacent faces, normal and squared
-    distance to the origin.
-    """
+    """A face of the expanding polytope algorithm (EPA) polytope: vertices, neighbors, normal, distance."""
 
     verts_idx: qd.Tensor = field((int, 3))
     adj_idx: qd.Tensor = field((int, 3))
@@ -759,20 +729,14 @@ class EPAPolytopeFace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYTOPE_FACE
 
 
 class EPAPolytopeHorizonData(Data, kind=DataKind.SCRATCH):
-    """
-    An edge of the horizon of the expanding polytope algorithm (EPA) polytope, as a face and the index of one of its
-    edges.
-    """
+    """A horizon edge of the expanding polytope algorithm (EPA) polytope, as a face and an edge."""
 
     face_idx: qd.Tensor = field(int)
     edge_idx: qd.Tensor = field(int)
 
 
 class ContactFace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS)):
-    """
-    The vertices and normals of the contact faces of the two geoms in the multi-contact detection by contact patch,
-    per worker.
-    """
+    """The vertices and normals of the contact faces of the two geoms of a contact patch, per worker."""
 
     vert1: qd.Tensor = field((float, 3))
     vert2: qd.Tensor = field((float, 3))
@@ -792,10 +756,7 @@ class ContactNormal(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS))
 
 
 class ContactHalfspace(Data, kind=DataKind.SCRATCH, shape=(WORKERS, POLYGON_VERTS)):
-    """
-    The halfspaces clipping the contact polygon in the multi-contact detection by contact patch, as a normal and a
-    distance, per worker.
-    """
+    """The halfspaces clipping the polygon of a contact patch, as a normal and a distance, per worker."""
 
     normal: qd.Tensor = field((float, 3))
     dist: qd.Tensor = field(float)
@@ -809,9 +770,7 @@ class Witness(Data, kind=DataKind.SCRATCH, shape=(WORKERS, PAIR_CONTACTS)):
 
 
 class GJKState(Data, kind=DataKind.SCRATCH):
-    """
-    The scratch of a detection by Gilbert-Johnson-Keerthi (GJK) and the expanding polytope algorithm (EPA), one column
-    per worker.
+    """The scratch of a Gilbert-Johnson-Keerthi (GJK) and expanding polytope algorithm (EPA) detection, per worker.
 
     The state of the overlap test alone leaves the arrays labeled EPA unused.
     """
@@ -904,10 +863,7 @@ TERRAIN_COLS = Size("terrain_cols")
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
-    """
-    The model of the collision detection of the rigid solver: the vertex adjacency, the valid pairs, the terrain,
-    the contact caps and the tolerances.
-    """
+    """The model of the collision detection: vertex adjacency, valid pairs, terrain, contact caps, tolerances."""
 
     vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
@@ -1021,10 +977,7 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
 
 
 class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
-    """
-    The model parameters of each link of the rigid solver, per environment where the options batch them: its tree,
-    ranges, pose and inertia.
-    """
+    """The model parameters of each link, per environment where batched: tree, ranges, pose and inertia."""
 
     parent_idx: qd.Tensor = field(int)
     root_idx: qd.Tensor = field(int)
@@ -1052,10 +1005,7 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
 
 
 class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
-    """
-    The state of each link of the rigid solver in each environment: pose, velocities, composite inertias, wrenches
-    and hibernation.
-    """
+    """The state of each link in each environment: pose, velocities, inertias, wrenches and hibernation."""
 
     # A *_bw array keeps what the backward pass reads and the forward pass overwrites
     cinr_inertial: qd.Tensor = field((float, (3, 3)), grad=True)
@@ -1111,10 +1061,7 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
 
 
 class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
-    """
-    The model parameters of each joint of the rigid solver, per environment where the options batch them: its type,
-    ranges, position and solver parameters.
-    """
+    """The model parameters of each joint, per environment where batched: type, ranges, position, solver."""
 
     type: qd.Tensor = field(int)
     sol_params: qd.Tensor = field((float, 7))
@@ -1132,10 +1079,7 @@ class JointsState(Data, kind=DataKind.DERIVED, shape=(JOINTS, ENVS)):
 
 
 class GeomsInfo(Data, kind=DataKind.INFO, shape=(GEOMS,)):
-    """
-    The model parameters of each collision geom of the rigid solver: its pose on its link, shape, mesh ranges and
-    contact properties.
-    """
+    """The model parameters of each collision geom: pose on its link, shape, mesh ranges and contact properties."""
 
     pos: qd.Tensor = field((float, 3))
     center: qd.Tensor = field((float, 3))
@@ -1243,10 +1187,7 @@ class VGeomsState(Data, kind=DataKind.DERIVED, shape=(VGEOMS, ENVS)):
 
 
 class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS)):
-    """
-    The equality constraints of the rigid solver in each environment: their type, the two objects they bind, their
-    data and solver parameters.
-    """
+    """The equality constraints of each environment: type, bound objects, data and solver parameters."""
 
     eq_obj1id: qd.Tensor = field(int)
     eq_obj2id: qd.Tensor = field(int)
