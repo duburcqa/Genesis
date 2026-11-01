@@ -255,14 +255,7 @@ def func_epa_witness(i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: GJKSta
 
 
 @qd.func
-def func_epa_horizon(
-    i_b: int,
-    i_f_nearest: int,
-    i_w: int,
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
-    rounding_eps: float,
-):
+def func_epa_horizon(i_b: int, i_f_nearest: int, i_w: int, gjk_state: GJKState, gjk_info: GJKInfo, rounding_eps: float):
     """
     Compute the horizon, which represents the area of the polytope that is visible from the vertex w, and thus
     should be deleted for the expansion of the polytope.

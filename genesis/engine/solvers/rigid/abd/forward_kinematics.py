@@ -298,14 +298,7 @@ def func_COM_root_sum(
 
 
 @qd.func
-def func_COM_link(
-    i_l,
-    i_b,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_COM_link(i_l, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Compute the quantities of a link that follow from the center of mass of its kinematic root.
 
     Writes, for link i_l of env i_b, the center of mass of its root, its inertia about it and the motion subspace of its
@@ -403,12 +396,7 @@ def func_COM_root(
 
 
 @qd.func
-def func_COM_links(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_COM_links(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Compute the center of mass of every kinematic root and the inertia of each of its links about it.
 
     The computation runs in three sweeps so that only the mass-weighted sum walks the links of a root serially: one
@@ -956,13 +944,7 @@ def kernel_update_verts_for_geoms(
 
 
 @qd.func
-def func_update_verts_for_geom(
-    i_g: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
+def func_update_verts_for_geom(i_g: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     _B = dyn_state.geoms.verts_updated.shape[1]
 
     if not dyn_state.geoms.verts_updated[i_g, i_b]:
@@ -1369,10 +1351,5 @@ def kernel_update_geoms_replay(
 
 
 @qd.kernel(fastcache=True)
-def kernel_COM_links_replay(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def kernel_COM_links_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     func_COM_links(dyn_state, dyn_info, rigid_info, rigid_config)

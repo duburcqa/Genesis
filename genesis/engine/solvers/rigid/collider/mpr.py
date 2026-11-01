@@ -177,13 +177,7 @@ def mpr_portal_dir(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState):
 
 
 @qd.func
-def mpr_portal_encapsules_origin(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    direction: qd.types.vector(3),
-    mpr_state: MPRState,
-):
+def mpr_portal_encapsules_origin(i_ga: int, i_gb: int, i_b: int, direction: qd.types.vector(3), mpr_state: MPRState):
     # Pure sign test: at the boundary both outcomes are equally valid and the result is value-continuous, so any
     # epsilon would only shift the decision without protecting anything.
     dot = mpr_state.simplex_support.v[1, i_b].dot(direction)
@@ -315,14 +309,7 @@ def func_geom_support(
 
 
 @qd.func
-def mpr_find_pos(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    mpr_state: MPRState,
-    mpr_info: MPRInfo,
-    rigid_config: qd.template(),
-):
+def mpr_find_pos(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState, mpr_info: MPRInfo, rigid_config: qd.template()):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 
     # Only look into the direction of the portal for consistency with penetration depth computation

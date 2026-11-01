@@ -1713,12 +1713,7 @@ def _func_add_joint_limit_row(
 
 
 @qd.func
-def func_screw_frame(
-    i_b: int,
-    i_e: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-):
+def func_screw_frame(i_b: int, i_e: int, dyn_state: DynState, dyn_info: DynInfo):
     """Locate a screw constraint in the world frame and measure its travel.
 
     The screw constraint is the equality i_e of env i_b. Its data follows the layout of kernel_add_dynamic_constraint,
@@ -4391,12 +4386,7 @@ def _func_cone_zone(rows_jaref, con_mu: float, rows_friction, latch: float, rigi
 
 
 @qd.func
-def _func_cone_head_load(
-    i_c: int,
-    i_b: int,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
-):
+def _func_cone_head_load(i_c: int, i_b: int, constraint_state: ConstraintState, rigid_config: qd.template()):
     """Load the shared per-contact scalars of the elliptic cone whose head (normal) row is i_c.
 
     Returns (rows_efc_D, rows_friction, con_mu, rows_jaref, latch): the per-row impedances, the per-row friction
@@ -4633,12 +4623,7 @@ def _func_cone_block_chol(
 
 
 @qd.func
-def func_cone_middle_cost(
-    i_c: int,
-    i_b: int,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
-):
+def func_cone_middle_cost(i_c: int, i_b: int, constraint_state: ConstraintState, rigid_config: qd.template()):
     """Middle-zone cost of the elliptic contact whose head row is i_c; 0 outside.
 
     Shared by every linesearch/cost path so the coupled term is computed identically across arms, and taken from
@@ -4886,12 +4871,7 @@ def func_relatch_cone(
 
 
 @qd.func
-def func_cone_update_rows(
-    i_c: int,
-    i_b: int,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
-):
+def func_cone_update_rows(i_c: int, i_b: int, constraint_state: ConstraintState, rigid_config: qd.template()):
     """Recompute active and efc_force for the rows of the elliptic cone whose head (normal) row is i_c, and return
     the coupled middle-zone cost contribution (0 outside the middle zone).
 

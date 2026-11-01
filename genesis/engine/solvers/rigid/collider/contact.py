@@ -171,11 +171,7 @@ def rotmatx(i0: int, i1: int, i2: int, matin: qd.types.matrix(3, 3), f0: int, f1
 
 
 @qd.func
-def func_collider_reset_env(
-    i_b: int,
-    collider_state: ColliderState,
-    collider_config: qd.template(),
-):
+def func_collider_reset_env(i_b: int, collider_state: ColliderState, collider_config: qd.template()):
     """Drop what the collision detection of env i_b carries over from the previous steps.
 
     The cache of contact normals and penetrations warm-starts the next detection, which runs as the first one.

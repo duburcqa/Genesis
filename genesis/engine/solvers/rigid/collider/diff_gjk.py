@@ -855,13 +855,7 @@ def func_differentiable_contact(
 
 
 @qd.func
-def func_plane_contact_frame(
-    i_b: int,
-    i_ga: int,
-    i_gb: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-):
+def func_plane_contact_frame(i_b: int, i_ga: int, i_gb: int, dyn_state: DynState, dyn_info: DynInfo):
     """World contact normal and convex-side radius of a plane [i_ga] vs convex [i_gb] pair: normal =
     -normalize(R(quat_plane) @ plane_local_dir), radius = data[0] for SPHERE / CAPSULE and 0 otherwise.
 

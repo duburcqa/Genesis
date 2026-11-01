@@ -245,12 +245,7 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_inf
 
 
 @qd.func
-def _func_support_mesh(
-    i_g: int,
-    d_mesh: qd.types.vector(3),
-    dyn_info: DynInfo,
-    support_field_info: SupportFieldInfo,
-):
+def _func_support_mesh(i_g: int, d_mesh: qd.types.vector(3), dyn_info: DynInfo, support_field_info: SupportFieldInfo):
     """Support vertex of a mesh-frame direction, the best of the candidates listed by the cell it falls in."""
     i_v_start = dyn_info.geoms.vert_start[i_g]
     i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)

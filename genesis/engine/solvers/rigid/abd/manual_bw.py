@@ -267,14 +267,7 @@ def kernel_manual_forward_kinematics_bw(
 
 
 @qd.func
-def func_cd_contraction_bw(
-    i_b: int,
-    i_l: int,
-    i_slot: int,
-    dof_lo: int,
-    dof_hi: int,
-    dyn_state: DynState,
-):
+def func_cd_contraction_bw(i_b: int, i_l: int, i_slot: int, dof_lo: int, dof_hi: int, dyn_state: DynState):
     """Reverse of the forward-velocity contraction atomic_add(cd_*_bw[i_l, i_slot], cdof_*[i_d] * vel[i_d]) over
     dofs [dof_lo, dof_hi): accumulates cd_*_bw[i_slot].grad into cdof_{ang,vel}.grad and vel.grad."""
     g_cd_vel = dyn_state.links.cd_vel_bw.grad[i_l, i_slot, i_b]
@@ -463,11 +456,7 @@ def kernel_manual_compute_actuator_force_bw(dyn_state: DynState, rigid_config: q
 
 
 @qd.kernel(fastcache=True)
-def kernel_manual_compute_qacc_bw(
-    dyn_state: DynState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Manual backward for func_compute_qacc via the implicit function theorem (IFT).
 
     Forward chain (func_compute_qacc):

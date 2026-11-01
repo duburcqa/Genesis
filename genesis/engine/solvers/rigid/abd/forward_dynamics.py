@@ -41,11 +41,7 @@ from .misc import (
 
 
 @qd.kernel(fastcache=True)
-def update_qacc_from_qvel_delta(
-    dyn_state: DynState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def update_qacc_from_qvel_delta(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
@@ -62,11 +58,7 @@ def update_qacc_from_qvel_delta(
 
 
 @qd.kernel(fastcache=True)
-def update_qvel(
-    dyn_state: DynState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def update_qvel(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     _B = dyn_state.dofs.vel.shape[1]
     n_dofs = dyn_state.dofs.vel.shape[0]
 
@@ -210,13 +202,7 @@ def func_collide_in_rigid_geom(
 
 
 @qd.func
-def func_crb_initialize(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_crb_initialize(i_l: int, i_b: int, dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
@@ -1885,12 +1871,7 @@ def func_bias_force(
 
 
 @qd.func
-def func_compute_qacc(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_compute_qacc(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
     # for what a block is), the blocks of the sleeping dofs left as they are. The fused mass factor solves it already
     # where enable_fused_smooth_acc_solve holds (see rigid/data.py).
@@ -2497,12 +2478,7 @@ def kernel_forward_dynamics_without_qacc(
 
 
 @qd.func
-def func_implicit_damping(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_implicit_damping(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Make the damping of the integration implicit, from the acceleration the constraint solver left in dofs.acc.
 
     The damped acceleration solves (M + hD) a' = M a, applied as the correction a' = a - (M + hD)^-1 (hD a) on the
