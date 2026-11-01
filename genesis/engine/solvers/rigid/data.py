@@ -381,7 +381,6 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
 
     # /!\ The declaration order is the allocation order, which changing may reduce runtime speed by >10% /!\
     n_constraints: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
-    qd_n_equalities: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     n_constraints_equality: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     n_constraints_frictionloss: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     # Elliptic-cone contact rows, rows_per_contact per contact, zero for the pyramidal cone. They occupy
@@ -1346,6 +1345,8 @@ class DynState(Data):
     fixed_verts: VertsState = field(shape=(FIXED_VERTS,), labels=DYNAMICS)
     vverts: VVertsState
     vgeoms: VGeomsState
+    # The equalities of each env: the static ones, then those added at runtime (see 'RigidSolver.add_weld_constraint')
+    n_equalities: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE, labels=DYNAMICS)
 
 
 class RigidSimStaticConfig(StaticConfig):

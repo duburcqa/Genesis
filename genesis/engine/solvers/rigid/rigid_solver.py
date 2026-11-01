@@ -42,6 +42,7 @@ from genesis.utils.misc import (
 
 from .abd.accessor import (
     ConstraintType,
+    kernel_clear_dynamic_constraints,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -126,7 +127,13 @@ from .constraint.backward import (
     kernel_manual_add_frictionloss_constraints_bw,
     kernel_manual_add_joint_limit_constraints_bw,
 )
-from .constraint.solver import kernel_add_equality_constraints, kernel_add_inequality_constraints, kernel_resolve_post
+from .constraint.solver import (
+    kernel_add_dynamic_constraint,
+    kernel_add_equality_constraints,
+    kernel_add_inequality_constraints,
+    kernel_delete_dynamic_constraint,
+    kernel_resolve_post,
+)
 from ..kinematic_solver import (
     KinematicSolver,
     _balanced_variant_mapping,
@@ -357,6 +364,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         # its slot of links_island_idx holds -1 for the life of the scene. The hibernated-island daisy chain must start
         # empty (-1 = no successor); it persists across steps, written when an island hibernates and cleared on wakeup.
         self.hibernation_state.links_island_idx.fill(-1)
+        self.dyn_state.n_equalities.fill(self.n_equalities)
         if self._use_hibernation:
             self.hibernation_state.hibernated_next_link.fill(-1)
             # A single-island scene keeps one island holding the links of its one tree, which the sleep and wake paths
@@ -1763,6 +1771,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.clear_errno(envs_idx)
 
         if not partial:
+            # A full state carries the static equalities alone, the constraints added at runtime being dropped
+            if gs.use_zerocopy:
+                n_equalities = qd_to_torch(self.dyn_state.n_equalities, copy=False)
+                assign_indexed_tensor(n_equalities, indices_to_mask(envs_idx), self.n_equalities)
+                if gs.backend == gs.metal:
+                    torch.mps.synchronize()
+            else:
+                kernel_clear_dynamic_constraints(
+                    self._scene._sanitize_envs_idx(envs_idx), self.dyn_state, self.rigid_info, self.rigid_config
+                )
             self._update_forward_kinematics(envs_idx)
         else:
             self._is_forward_pos_updated = False
@@ -1913,7 +1931,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         self.dyn_state,
                         self.hibernation_state,
                         self.collider.collider_state,
-                        self.constraint_solver.constraint_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -2060,7 +2077,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         self.dyn_state,
                         self.hibernation_state,
                         self.collider.collider_state,
-                        self.constraint_solver.constraint_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -3187,7 +3203,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     @mutates(StateChange.MODEL)
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
         # The only type-specific entry is the torque scale of the rotation rows.
-        self.constraint_solver.add_dynamic_constraint(
+        self._add_dynamic_constraint(
             gs.EQUALITY_TYPE.WELD,
             link1_idx,
             link2_idx,
@@ -3199,7 +3215,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     @mutates(StateChange.MODEL)
     def delete_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        self.constraint_solver.delete_dynamic_constraint(gs.EQUALITY_TYPE.WELD, link1_idx, link2_idx, envs_idx)
+        self._delete_dynamic_constraint(gs.EQUALITY_TYPE.WELD, link1_idx, link2_idx, envs_idx)
 
     @mutates(StateChange.MODEL)
     def add_screw_constraint(
@@ -3274,7 +3290,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             pitch_cos, pitch_sin = 1.0 / pitch_norm, pitch / (2.0 * np.pi) / pitch_norm
 
         anchor_link_idx = link2_idx if pos is None else link1_idx
-        self.constraint_solver.add_dynamic_constraint(
+        self._add_dynamic_constraint(
             gs.EQUALITY_TYPE.SCREW,
             link1_idx,
             link2_idx,
@@ -3286,13 +3302,65 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     @mutates(StateChange.MODEL)
     def delete_screw_constraint(self, link1_idx: int, link2_idx: int, envs_idx=None):
-        self.constraint_solver.delete_dynamic_constraint(gs.EQUALITY_TYPE.SCREW, link1_idx, link2_idx, envs_idx)
+        self._delete_dynamic_constraint(gs.EQUALITY_TYPE.SCREW, link1_idx, link2_idx, envs_idx)
 
-    def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
-        return self.constraint_solver.get_weld_constraints(as_tensor, to_torch)
+    def _add_dynamic_constraint(
+        self, eq_type, link1_idx, link2_idx, anchor_link_idx, anchor_pos, eq_data_tail, envs_idx=None
+    ):
+        """Register a dynamic constraint between two links in the selected envs (see kernel_add_dynamic_constraint)."""
+        # An env selected twice would pass the checks below twice against the same count, then be written twice.
+        envs_idx = torch.unique(self._scene._sanitize_envs_idx(envs_idx))
+        link1_idx, link2_idx = int(link1_idx), int(link2_idx)
+        if link1_idx < 0 or link2_idx < 0 or link1_idx == link2_idx:
+            gs.raise_exception("Dynamic constraints require two distinct links, the world is not a valid link.")
 
-    def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):
-        return self.constraint_solver.get_equality_constraints(as_tensor, to_torch)
+        n_equalities = qd_to_torch(self.dyn_state.n_equalities)
+        eq_types = qd_to_torch(self.dyn_info.equalities.eq_type, transpose=True)
+        links_a = qd_to_torch(self.dyn_info.equalities.eq_obj1id, transpose=True)
+        links_b = qd_to_torch(self.dyn_info.equalities.eq_obj2id, transpose=True)
+        is_equality = torch.arange(eq_types.shape[-1], device=gs.device) < n_equalities[:, None]
+        is_pair = ((links_a == link1_idx) & (links_b == link2_idx)) | ((links_a == link2_idx) & (links_b == link1_idx))
+        if (is_equality & is_pair & (eq_types == eq_type))[envs_idx].any():
+            gs.raise_exception(
+                f"Links {link1_idx} and {link2_idx} are already coupled by a {eq_type.name.lower()} constraint."
+            )
+        # Checked before any env is written, so a constraint is either added to every selected env or to none.
+        if (n_equalities[envs_idx] >= self.n_equalities + self._options.max_dynamic_constraints).any():
+            gs.raise_exception(
+                f"No room left for another dynamic constraint. Please increase the value of RigidSolver's option "
+                f"'max_dynamic_constraints' ({self._options.max_dynamic_constraints})."
+            )
+
+        # The type-specific data is padded to its 8 entries (see kernel_add_dynamic_constraint).
+        eq_data_tail_padded = np.zeros(8, dtype=gs.np_float)
+        eq_data_tail_padded[: len(eq_data_tail)] = eq_data_tail
+        kernel_add_dynamic_constraint(
+            link1_idx,
+            link2_idx,
+            int(anchor_link_idx),
+            envs_idx,
+            int(eq_type),
+            anchor_pos,
+            eq_data_tail_padded,
+            self.dyn_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+        )
+
+    def _delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
+        """Remove the dynamic constraint of a type between two links in the selected envs."""
+        kernel_delete_dynamic_constraint(
+            int(link1_idx),
+            int(link2_idx),
+            torch.unique(self._scene._sanitize_envs_idx(envs_idx)),
+            int(eq_type),
+            self.dyn_state,
+            self.hibernation_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+        )
 
     def clear_external_force(self):
         # The recording of a step needs the kernel, which the backward pass of the step reverses

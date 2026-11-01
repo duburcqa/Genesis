@@ -815,7 +815,7 @@ def kernel_manual_add_equality_constraints_bw(
         # Equality is the first constraint group; row counter starts at 0.
         n_con_counter = gs.qd_int(0)
 
-        for i_e in range(constraint_state.qd_n_equalities[i_b]):
+        for i_e in range(dyn_state.n_equalities[i_b]):
             if dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.JOINT:
                 n_con = n_con_counter
                 n_con_counter = n_con_counter + 1

@@ -215,14 +215,9 @@ class ConstraintSolver(System):
             if config.enable_register_tiled_mass
             else None,
         )
-        self.constraint_state.qd_n_equalities.from_numpy(
-            np.full((self._solver._B,), self._solver.n_equalities, dtype=gs.np_int)
-        )
-
         self._eq_const_info_cache = {}
 
         cs = self.constraint_state
-        self.qd_n_equalities = cs.qd_n_equalities
         self.jac = cs.jac
         self.diag = cs.diag
         self.aref = cs.aref
@@ -286,27 +281,22 @@ class ConstraintSolver(System):
             n_constraints_equality = qd_to_torch(self.constraint_state.n_constraints_equality, copy=False)
             n_constraints_frictionloss = qd_to_torch(self.constraint_state.n_constraints_frictionloss, copy=False)
             n_constraints_cone = qd_to_torch(self.constraint_state.n_constraints_cone, copy=False)
-            qd_n_equalities = qd_to_torch(self.constraint_state.qd_n_equalities, copy=False)
-            n_eq = self._solver._n_equalities
             if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
                 n_constraints.masked_fill_(envs_idx, 0)
                 n_constraints_equality.masked_fill_(envs_idx, 0)
                 n_constraints_frictionloss.masked_fill_(envs_idx, 0)
                 n_constraints_cone.masked_fill_(envs_idx, 0)
-                qd_n_equalities.masked_fill_(envs_idx, n_eq)
             elif isinstance(envs_idx, torch.Tensor):
                 n_constraints.scatter_(0, envs_idx, 0)
                 n_constraints_equality.scatter_(0, envs_idx, 0)
                 n_constraints_frictionloss.scatter_(0, envs_idx, 0)
                 n_constraints_cone.scatter_(0, envs_idx, 0)
-                qd_n_equalities.scatter_(0, envs_idx, n_eq)
             else:
                 env_mask = indices_to_mask(envs_idx)
                 assign_indexed_tensor(n_constraints, env_mask, 0)
                 assign_indexed_tensor(n_constraints_equality, env_mask, 0)
                 assign_indexed_tensor(n_constraints_frictionloss, env_mask, 0)
                 assign_indexed_tensor(n_constraints_cone, env_mask, 0)
-                assign_indexed_tensor(qd_n_equalities, env_mask, n_eq)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             return
@@ -387,7 +377,7 @@ class ConstraintSolver(System):
         if eq_const_info is not None:
             return eq_const_info.copy()
 
-        n_eqs = tuple(self.constraint_state.qd_n_equalities.to_numpy())
+        n_eqs = tuple(qd_to_numpy(self._solver.dyn_state.n_equalities))
         n_envs = len(n_eqs)
         n_eqs_max = max(n_eqs)
 
@@ -405,7 +395,13 @@ class ConstraintSolver(System):
 
         if n_eqs_max > 0:
             kernel_get_equality_constraints(
-                iout, fout, self.constraint_state, self._solver.dyn_info, self._solver.rigid_config, as_tensor
+                iout,
+                fout,
+                self._solver.dyn_state,
+                self.constraint_state,
+                self._solver.dyn_info,
+                self._solver.rigid_config,
+                as_tensor,
             )
 
         if as_tensor:
@@ -465,66 +461,6 @@ class ConstraintSolver(System):
 
         return weld_const_info
 
-    def add_dynamic_constraint(
-        self, eq_type, link1_idx, link2_idx, anchor_link_idx, anchor_pos, eq_data_tail, envs_idx=None
-    ):
-        """Register a dynamic constraint between two links in the selected envs (see kernel_add_dynamic_constraint)."""
-        # An env selected twice would pass the checks below twice against the same count, then be written twice.
-        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
-        link1_idx, link2_idx = int(link1_idx), int(link2_idx)
-        if link1_idx < 0 or link2_idx < 0 or link1_idx == link2_idx:
-            gs.raise_exception("Dynamic constraints require two distinct links, the world is not a valid link.")
-
-        eq_const_info = self.get_equality_constraints(as_tensor=True, to_torch=True)
-        link_a, link_b = eq_const_info["obj_a"], eq_const_info["obj_b"]
-        is_pair = ((link_a == link1_idx) & (link_b == link2_idx)) | ((link_a == link2_idx) & (link_b == link1_idx))
-        if (is_pair & (eq_const_info["type"] == eq_type))[envs_idx].any():
-            gs.raise_exception(
-                f"Links {link1_idx} and {link2_idx} are already coupled by a {eq_type.name.lower()} constraint."
-            )
-        # Checked before any env is written, so a constraint is either added to every selected env or to none.
-        n_equalities = (eq_const_info["type"] >= 0).sum(dim=-1)
-        if (n_equalities[envs_idx] >= self._solver.n_equalities + self._solver._options.max_dynamic_constraints).any():
-            gs.raise_exception(
-                f"No room left for another dynamic constraint. Please increase the value of RigidSolver's option "
-                f"'max_dynamic_constraints' ({self._solver._options.max_dynamic_constraints})."
-            )
-
-        # The type-specific data is padded to its 8 entries (see kernel_add_dynamic_constraint).
-        eq_data_tail_padded = np.zeros(8, dtype=gs.np_float)
-        eq_data_tail_padded[: len(eq_data_tail)] = eq_data_tail
-        self._eq_const_info_cache.clear()
-        kernel_add_dynamic_constraint(
-            link1_idx,
-            link2_idx,
-            int(anchor_link_idx),
-            envs_idx,
-            int(eq_type),
-            anchor_pos,
-            eq_data_tail_padded,
-            self._solver.dyn_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-        )
-
-    def delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
-        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
-        self._eq_const_info_cache.clear()
-        kernel_delete_dynamic_constraint(
-            int(link1_idx),
-            int(link2_idx),
-            envs_idx,
-            int(eq_type),
-            self._solver.dyn_state,
-            self._solver.hibernation_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-        )
-
     def backward(self):
         """Adjoint solve of the constraint force computation.
 
@@ -551,19 +487,20 @@ class ConstraintSolver(System):
 def kernel_get_equality_constraints(
     iout: qd.types.ndarray(),
     fout: qd.types.ndarray(),
+    dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_config: qd.template(),
     is_padded: qd.template(),
 ):
-    _B = constraint_state.qd_n_equalities.shape[0]
+    _B = dyn_state.n_equalities.shape[0]
     n_eqs_max = gs.qd_int(0)
 
     # this is a reduction operation (global max), we have to serialize it
     # TODO: a good unittest and a better implementation from Quadrants for this kind of reduction
     qd.loop_config(serialize=True)
     for i_b in range(_B):
-        n_eqs = constraint_state.qd_n_equalities[i_b]
+        n_eqs = dyn_state.n_equalities[i_b]
         if n_eqs > n_eqs_max:
             n_eqs_max = n_eqs
 
@@ -575,9 +512,9 @@ def kernel_get_equality_constraints(
             i_e_start = i_b * n_eqs_max
         else:
             for j_b in range(i_b):
-                i_e_start = i_e_start + constraint_state.qd_n_equalities[j_b]
+                i_e_start = i_e_start + dyn_state.n_equalities[j_b]
 
-        for i_e_ in range(constraint_state.qd_n_equalities[i_b]):
+        for i_e_ in range(dyn_state.n_equalities[i_b]):
             i_e = i_e_start + i_e_
 
             iout[i_e, 0] = dyn_info.equalities.eq_type[i_e_, i_b]
@@ -626,7 +563,6 @@ def func_clear_constraint_counts_at_env(i_b: int, constraint_state: ConstraintSt
     constraint_state.n_constraints_equality[i_b] = 0
     constraint_state.n_constraints_frictionloss[i_b] = 0
     constraint_state.n_constraints_cone[i_b] = 0
-    constraint_state.qd_n_equalities[i_b] = rigid_info.n_equalities[None]
 
 
 @qd.kernel(fastcache=True)
@@ -1540,7 +1476,7 @@ def func_add_equality_constraints(
         constraint_state.n_constraints[i_b] = 0
         constraint_state.n_constraints_equality[i_b] = 0
 
-        for i_e in range(constraint_state.qd_n_equalities[i_b]):
+        for i_e in range(dyn_state.n_equalities[i_b]):
             if dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.JOINT:
                 func_equality_joint(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
             else:
@@ -1969,7 +1905,7 @@ def func_add_dynamic_constraint_rows_batch(
     )
     EPS = rigid_info.EPS[None]
     i_e_start = rigid_info.n_equalities[None]
-    i_e_end = constraint_state.qd_n_equalities[i_b]
+    i_e_end = dyn_state.n_equalities[i_b]
     n_chunks = (i_e_end - i_e_start + BLOCK_DIM - 1) // BLOCK_DIM
 
     # The number of reserved friction rows sets where they start
@@ -2221,7 +2157,7 @@ def add_frictionloss_constraints(
                         constraint_state.jac_n_dofs[i_con, i_b] = 1
 
         # The dry friction rows of the screw constraints close the block, written by func_add_dynamic_constraint_rows_batch.
-        for i_e in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
+        for i_e in range(rigid_info.n_equalities[None], dyn_state.n_equalities[i_b]):
             if dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.SCREW:
                 if dyn_info.equalities.eq_data[i_e, i_b][17] > EPS:
                     qd.atomic_add(constraint_state.n_constraints[i_b], 1)
@@ -2241,7 +2177,6 @@ def kernel_add_dynamic_constraint(
     anchor_pos: qd.types.ndarray(),
     eq_data_tail: qd.types.ndarray(),
     dyn_state: DynState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -2253,12 +2188,12 @@ def kernel_add_dynamic_constraint(
     [3:6]   the anchor, in the frame of link1
     [6:10]  the orientation of link2 relative to link1
     [10:18] the type-specific entries of eq_data_tail (see func_equality_links and func_screw_frame)
-    Every selected env has an equality slot left (see ConstraintSolver.add_dynamic_constraint).
+    Every selected env has an equality slot left (see RigidSolver._add_dynamic_constraint).
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        i_e = constraint_state.qd_n_equalities[i_b]
+        i_e = dyn_state.n_equalities[i_b]
         anchor = gu.qd_transform_by_trans_quat(
             gs.qd_vec3([anchor_pos[0], anchor_pos[1], anchor_pos[2]]),
             dyn_state.links.pos[anchor_link_idx, i_b],
@@ -2289,7 +2224,7 @@ def kernel_add_dynamic_constraint(
             [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
         )
 
-        constraint_state.qd_n_equalities[i_b] = constraint_state.qd_n_equalities[i_b] + 1
+        dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] + 1
 
 
 @qd.kernel(fastcache=True)
@@ -2300,7 +2235,6 @@ def kernel_delete_dynamic_constraint(
     eq_type: int,
     dyn_state: DynState,
     hibernation_state: HibernationState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -2308,7 +2242,7 @@ def kernel_delete_dynamic_constraint(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        for i_e in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
+        for i_e in range(rigid_info.n_equalities[None], dyn_state.n_equalities[i_b]):
             link_a = dyn_info.equalities.eq_obj1id[i_e, i_b]
             link_b = dyn_info.equalities.eq_obj2id[i_e, i_b]
             if dyn_info.equalities.eq_type[i_e, i_b] == eq_type and (
@@ -2326,16 +2260,16 @@ def kernel_delete_dynamic_constraint(
                             func_wakeup_island(
                                 i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
                             )
-                if i_e < constraint_state.qd_n_equalities[i_b] - 1:
+                if i_e < dyn_state.n_equalities[i_b] - 1:
                     # Swap-remove must move the whole constraint record, not just its type,
                     # otherwise the surviving slot keeps the deleted constraint's links/data.
-                    i_last = constraint_state.qd_n_equalities[i_b] - 1
+                    i_last = dyn_state.n_equalities[i_b] - 1
                     dyn_info.equalities.eq_type[i_e, i_b] = dyn_info.equalities.eq_type[i_last, i_b]
                     dyn_info.equalities.eq_obj1id[i_e, i_b] = dyn_info.equalities.eq_obj1id[i_last, i_b]
                     dyn_info.equalities.eq_obj2id[i_e, i_b] = dyn_info.equalities.eq_obj2id[i_last, i_b]
                     dyn_info.equalities.eq_data[i_e, i_b] = dyn_info.equalities.eq_data[i_last, i_b]
                     dyn_info.equalities.sol_params[i_e, i_b] = dyn_info.equalities.sol_params[i_last, i_b]
-                constraint_state.qd_n_equalities[i_b] = constraint_state.qd_n_equalities[i_b] - 1
+                dyn_state.n_equalities[i_b] = dyn_state.n_equalities[i_b] - 1
 
 
 # =====================================================================================================================

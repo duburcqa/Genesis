@@ -4,6 +4,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -190,7 +191,7 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
 
     # drop
     scene.sim.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
-    weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor=True, to_torch=True)
+    weld_const_info = scene.sim.get_system(ConstraintSolver).get_weld_constraints(as_tensor=True, to_torch=True)
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
@@ -417,7 +418,8 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     rigid.add_screw_constraint(
         post_helix.base_link.idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, envs_idx=[1, 1]
     )
-    n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
+    eq_const_info = scene.sim.get_system(ConstraintSolver).get_equality_constraints()
+    n_screws = (eq_const_info["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
     assert_equal(n_screws, (6, 7))
     with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
         rigid.add_weld_constraint(post_helix.base_link.idx, nut_helix.base_link.idx, envs_idx=[1])
@@ -449,12 +451,12 @@ def test_dynamic_weld_scene_reset():
     n_eq_base = solver.rigid_info.n_equalities[None]
 
     solver.add_weld_constraint(box1.base_link_idx, box2.base_link_idx)
-    assert solver.constraint_solver.constraint_state.qd_n_equalities[0] == n_eq_base + 1
-    assert solver.constraint_solver.constraint_state.qd_n_equalities[1] == n_eq_base + 1
+    assert solver.dyn_state.n_equalities[0] == n_eq_base + 1
+    assert solver.dyn_state.n_equalities[1] == n_eq_base + 1
 
     scene.reset(state=scene.get_state(), envs_idx=[0])
-    assert solver.constraint_solver.constraint_state.qd_n_equalities[0] == n_eq_base
-    assert solver.constraint_solver.constraint_state.qd_n_equalities[1] == n_eq_base + 1
+    assert solver.dyn_state.n_equalities[0] == n_eq_base
+    assert solver.dyn_state.n_equalities[1] == n_eq_base + 1
 
 
 @pytest.mark.required
@@ -537,7 +539,7 @@ def test_get_constraints_api(show_viewer, tol):
         scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
 
     for as_tensor, to_torch in ((True, True), (True, False), (False, True), (False, False)):
-        weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor, to_torch)
+        weld_const_info = scene.sim.get_system(ConstraintSolver).get_weld_constraints(as_tensor, to_torch)
         link_a_, link_b_ = weld_const_info["link_a"], weld_const_info["link_b"]
         if as_tensor:
             assert_allclose((link_a_[0], link_b_[0]), ((-1,), (-1,)), tol=0)

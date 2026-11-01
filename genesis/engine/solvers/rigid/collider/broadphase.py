@@ -30,7 +30,6 @@ def func_check_links_collision_valid(
     i_lb: int,
     i_b: int,
     dyn_state: DynState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -42,7 +41,7 @@ def func_check_links_collision_valid(
     """
     is_valid = True
 
-    for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
+    for i_eq in range(rigid_info.n_equalities[None], dyn_state.n_equalities[i_b]):
         eq_type = dyn_info.equalities.eq_type[i_eq, i_b]
         if eq_type == gs.EQUALITY_TYPE.WELD or eq_type == gs.EQUALITY_TYPE.SCREW:
             i_leqa = dyn_info.equalities.eq_obj1id[i_eq, i_b]
@@ -129,7 +128,6 @@ def func_add_broad_link_pair(
     i_b: int,
     dyn_state: DynState,
     collider_state: ColliderState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
@@ -143,9 +141,7 @@ def func_add_broad_link_pair(
             or (collider_state.links_aabb_min[i_la, i_b] >= collider_state.links_aabb_max[i_lb, i_b]).any()
         )
         if is_link_aabbs_overlapping:
-            if func_check_links_collision_valid(
-                i_la, i_lb, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config
-            ):
+            if func_check_links_collision_valid(i_la, i_lb, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                 # The list holds every valid link pair, so it cannot overflow
                 i_lp_ = qd.atomic_add(collider_state.n_broad_link_pairs[i_b], 1)
                 collider_state.broad_link_pairs[i_lp_, i_b] = i_lp
@@ -155,7 +151,6 @@ def func_add_broad_link_pair(
 def _func_broad_phase_links_sap(
     dyn_state: DynState,
     collider_state: ColliderState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
@@ -216,7 +211,6 @@ def _func_broad_phase_links_sap(
                         i_b,
                         dyn_state,
                         collider_state,
-                        constraint_state,
                         dyn_info,
                         rigid_info,
                         collider_info,
@@ -240,7 +234,6 @@ def _func_broad_phase_links_sap(
 def _func_broad_phase_links_all_vs_all(
     dyn_state: DynState,
     collider_state: ColliderState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
@@ -262,7 +255,6 @@ def _func_broad_phase_links_all_vs_all(
             i_b,
             dyn_state,
             collider_state,
-            constraint_state,
             dyn_info,
             rigid_info,
             collider_info,
@@ -327,7 +319,6 @@ def func_broad_phase(
     geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
@@ -347,13 +338,9 @@ def func_broad_phase(
         collider_config,
     )
     if qd.static(rigid_config.broadphase_traversal == gs.broadphase_traversal.ALL_VS_ALL):
-        _func_broad_phase_links_all_vs_all(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, collider_info, rigid_config
-        )
+        _func_broad_phase_links_all_vs_all(dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config)
     else:
-        _func_broad_phase_links_sap(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, collider_info, rigid_config
-        )
+        _func_broad_phase_links_sap(dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config)
     func_broad_phase_geoms(
         geoms_init_AABB, dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, errno
     )

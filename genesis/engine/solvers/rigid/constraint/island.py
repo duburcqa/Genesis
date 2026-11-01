@@ -296,7 +296,7 @@ def func_build_islands(
     # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in rigid/data.py)
     n_first_contact = collider_state.n_contacts_hibernated[i_b]
     n_contacts = collider_state.n_contacts[i_b] - n_first_contact
-    n_equalities = constraint_state.qd_n_equalities[i_b]
+    n_equalities = dyn_state.n_equalities[i_b]
     n_edges = n_contacts + n_equalities
     # An env with no sleeper (see n_awake_dofs in rigid/data.py) has no chain edge to union, no island flag to derive
     # and no sleeper to wake
@@ -523,7 +523,7 @@ def func_build_islands_coop(
     # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in rigid/data.py)
     n_first_contact = collider_state.n_contacts_hibernated[i_b]
     n_contacts = collider_state.n_contacts[i_b] - n_first_contact
-    n_equalities = constraint_state.qd_n_equalities[i_b]
+    n_equalities = dyn_state.n_equalities[i_b]
     n_edges = n_contacts + n_equalities
     # Every lane reads the env's sleeper gate, see func_build_islands
     has_sleepers = False

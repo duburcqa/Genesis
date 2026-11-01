@@ -171,6 +171,16 @@ def kernel_set_links_pos(
 
 
 @qd.kernel(fastcache=True)
+def kernel_clear_dynamic_constraints(
+    envs_idx: qd.types.ndarray(), dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()
+):
+    """Drop the constraints added at runtime in the given envs, which keep their static equalities alone."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_b_ in range(envs_idx.shape[0]):
+        dyn_state.n_equalities[envs_idx[i_b_]] = rigid_info.n_equalities[None]
+
+
+@qd.kernel(fastcache=True)
 def kernel_wake_up_entities_by_links(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -207,7 +217,6 @@ def kernel_wake_up_entities_held_by_links(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     collider_state: ColliderState,
-    constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -223,7 +232,7 @@ def kernel_wake_up_entities_held_by_links(
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         n_contacts_hibernated = collider_state.n_contacts_hibernated[i_b]
-        for i_e in range(n_contacts_hibernated + constraint_state.qd_n_equalities[i_b]):
+        for i_e in range(n_contacts_hibernated + dyn_state.n_equalities[i_b]):
             i_la = -1
             i_lb = -1
             if i_e < n_contacts_hibernated:
