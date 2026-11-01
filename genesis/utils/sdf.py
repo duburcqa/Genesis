@@ -441,8 +441,7 @@ def sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info: RigidInfo, sdf_info: SDFI
     delta = pos_sdf - center
     cs = sdf_info.geoms_info.sdf_cell_size[geom_idx]
     scaled = qd.Vector([delta[0] * cs[0], delta[1] * cs[1], delta[2] * cs[2]], dt=gs.qd_float)
-    proxy_sdf_grad = gu.qd_normalize(scaled, rigid_info.EPS[None])
-    return proxy_sdf_grad
+    return gu.qd_normalize(scaled, rigid_info.EPS[None])
 
 
 @qd.func
@@ -606,10 +605,9 @@ def sdf_func_grad_world_local(
     else:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
+        # No rotation between the mesh and the SDF frames, so the gradient in the SDF frame holds in the mesh frame
         grad_sdf = sdf_func_grad(geom_idx, pos_sdf, geoms_info, rigid_info, sdf_info, collider_config)
-
-        grad_mesh = grad_sdf  # no rotation between mesh and sdf frame
-        grad_world = gu.qd_transform_by_quat(grad_mesh, geom_quat)
+        grad_world = gu.qd_transform_by_quat(grad_sdf, geom_quat)
 
     return grad_world
 
