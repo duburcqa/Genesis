@@ -244,8 +244,8 @@ class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(SAP_PAIRS,)):
     its box query overflowed. The handlers applying impulses to rigid dofs come first, so that their pairs alone take a
     Jacobian `Jt` (see SAPContactsLayout). A pair applies its impulse to up to SAP_N_FEM_SLOTS FEM vertices
     `fem_slots_vert` (-1 for an unused slot), with the weights `fem_slots_weight`, and to the chains of the links
-    `link_idx` (-1 for none), with the signs `link_sign`. A pair with a contact frame (`normal`, `tangent0`, `tangent1`)
-    solves in that frame, the others in the world frame.
+    `link_idx` (-1 for none), with the signs `link_sign`, at `contact_pos`. A pair solves in its contact frame `frame`,
+    whose columns are its two tangents and its normal, the world frame for the floor contacts.
 
     The pairs are appended concurrently during the detection, in an order that changes from run to run. The key of a
     pair identifies it uniquely among the pairs of its handler and environment, and `sort` orders the pairs by
@@ -264,10 +264,7 @@ class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(SAP_PAIRS,)):
     handler_idx: qd.Tensor = field(int)
     batch_idx: qd.Tensor = field(int)
     key: qd.Tensor = field(qd.u64)
-    has_frame: qd.Tensor = field(bool)
-    normal: qd.Tensor = field((float, 3))
-    tangent0: qd.Tensor = field((float, 3))
-    tangent1: qd.Tensor = field((float, 3))
+    frame: qd.Tensor = field((float, (3, 3)))
     contact_pos: qd.Tensor = field((float, 3))
     fem_slots_vert: qd.Tensor = field((int, SAP_N_FEM_SLOTS))
     fem_slots_weight: qd.Tensor = field((float, SAP_N_FEM_SLOTS))
@@ -1372,13 +1369,15 @@ def func_append_pair(
     k: float,
     phi0: float,
     mu: float,
+    frame: qd.types.matrix(3, 3),
+    contact_pos: qd.types.vector(3),
     sap_state: SAPState,
     sap_info: SAPInfo,
 ):
     """
     Append a pair to the segment of a handler, and return its index, -1 when the segment is full.
 
-    The pair applies its impulse to no FEM vertex and no link, and solves in the world frame until the caller sets them.
+    The pair applies its impulse to no FEM vertex and no link until the caller sets them.
     """
     i_p = -1
     i_p_ = qd.atomic_add(sap_state.pairs.handlers_n_pairs[i_h], 1)
@@ -1387,7 +1386,8 @@ def func_append_pair(
         sap_state.pairs.handler_idx[i_p] = i_h
         sap_state.pairs.batch_idx[i_p] = i_b
         sap_state.pairs.key[i_p] = key
-        sap_state.pairs.has_frame[i_p] = False
+        sap_state.pairs.frame[i_p] = frame
+        sap_state.pairs.contact_pos[i_p] = contact_pos
         fem_slots_vert = sap_state.pairs.fem_slots_vert[i_p]
         sap_state.pairs.fem_slots_vert[i_p] = qd.Vector.zero(gs.qd_int, fem_slots_vert.n) - 1
         sap_state.pairs.fem_slots_weight[i_p] = qd.Vector.zero(gs.qd_float, fem_slots_vert.n)
@@ -1426,15 +1426,7 @@ def func_contact_velocity(
         if sap_state.pairs.link_idx[i_p][0] >= 0:
             for i_d in range(x_rigid.shape[0]):
                 Jx = Jx + sap_state.pairs.Jt[i_p, i_d] * x_rigid[i_d, i_b]
-    if sap_state.pairs.has_frame[i_p]:
-        Jx = qd.Vector(
-            [
-                Jx.dot(sap_state.pairs.tangent0[i_p]),
-                Jx.dot(sap_state.pairs.tangent1[i_p]),
-                Jx.dot(sap_state.pairs.normal[i_p]),
-            ]
-        )
-    return Jx
+    return sap_state.pairs.frame[i_p].transpose() @ Jx
 
 
 @qd.func
@@ -1775,8 +1767,8 @@ def func_tet_tet_contact(
 ):
     """
     Return whether two tetrahedra contact on their plane of equal pressure, over the section of the first one clipped by
-    the second, and the area, the centroid, the barycentric coordinates in the first one, the pressure and the
-    tangents of the contact.
+    the second, and the area, the centroid, the barycentric coordinates in the first one, the pressure and the frame
+    of the contact (see SAPContactPairs).
 
     `distance0` and `intersection_code0` give the section of the first tetrahedron by the plane. The tetrahedra contact
     when the clipped section holds 3 vertices and an area of `hydroelastic_eps` at least.
@@ -1790,8 +1782,7 @@ def func_tet_tet_contact(
     total_area = gs.qd_float(0.0)
     centroid = qd.Vector.zero(gs.qd_float, 3)
     barycentric0 = qd.Vector.zero(gs.qd_float, 4)
-    tangent0 = qd.Vector.zero(gs.qd_float, 3)
-    tangent1 = qd.Vector.zero(gs.qd_float, 3)
+    frame = qd.Matrix.zero(gs.qd_float, 3, 3)
     is_contact = polygon_n_vertices >= 3
     if is_contact:
         total_area, total_area_weighted_centroid = func_polygon_area_centroid(polygon_vertices, polygon_n_vertices, 0.0)
@@ -1801,8 +1792,8 @@ def func_tet_tet_contact(
             barycentric0 = func_tet_barycentric(centroid, tet_vertices0)
             tangent0 = polygon_vertices[:, 0] - centroid
             tangent0 /= tangent0.norm()
-            tangent1 = normal.cross(tangent0)
-    return is_contact, total_area, centroid, barycentric0, barycentric0.dot(tet_pressures0), tangent0, tangent1
+            frame = qd.Matrix.cols([tangent0, normal.cross(tangent0), normal])
+    return is_contact, total_area, centroid, barycentric0, barycentric0.dot(tet_pressures0), frame
 
 
 @qd.func
@@ -1928,7 +1919,10 @@ def kernel_detect_fem_floor_tet(
         phi0 = -pressure / g
         if k < sap_info.hydroelastic_eps[None] or phi0 > sap_info.hydroelastic_eps[None]:
             continue
-        i_p = func_append_pair(i_h, i_b, qd.u64(i_e), k, phi0, fem_info.elements.friction_mu[i_e], sap_state, sap_info)
+        mu = fem_info.elements.friction_mu[i_e]
+        i_p = func_append_pair(
+            i_h, i_b, qd.u64(i_e), k, phi0, mu, qd.Matrix.identity(gs.qd_float, 3), centroid, sap_state, sap_info
+        )
         if i_p >= 0:
             for i in qd.static(range(4)):
                 sap_state.pairs.fem_slots_vert[i_p][i] = el2v[i]
@@ -1951,7 +1945,8 @@ def kernel_detect_fem_floor_vert(
     """
     for i_sv, i_b in qd.ndrange(fem_info.surface.vertices_idx.shape[0], fem_state.vertices.pos.shape[2]):
         i_v = fem_info.surface.vertices_idx[i_sv]
-        distance = fem_state.vertices.pos[f, i_v, i_b].z - sap_info.floor_height[None]
+        pos_v = fem_state.vertices.pos[f, i_v, i_b]
+        distance = pos_v.z - sap_info.floor_height[None]
         if distance <= 0.0:
             i_p = func_append_pair(
                 i_h,
@@ -1960,6 +1955,8 @@ def kernel_detect_fem_floor_vert(
                 sap_info.point_contact_stiffness[None] * fem_info.surface.vertices_mass[i_sv],
                 distance,
                 fem_info.vertices.friction_mu[i_v],
+                qd.Matrix.identity(gs.qd_float, 3),
+                pos_v,
                 sap_state,
                 sap_info,
             )
@@ -2060,7 +2057,7 @@ def kernel_detect_fem_self_tet(
             tet_vertices0[:, i] = fem_state.vertices.pos[f, el2v0[i], i_b]
             tet_pressures0[i] = sap_state.hydroelastic_fem.pressure[el2v0[i]]
             tet_vertices1[:, i] = fem_state.vertices.pos[f, el2v1[i], i_b]
-        is_contact, total_area, centroid, barycentric0, pressure, tangent0, tangent1 = func_tet_tet_contact(
+        is_contact, total_area, centroid, barycentric0, pressure, frame = func_tet_tet_contact(
             sap_state.candidates.fem_self_tet.intersection_code0[i_c],
             tet_vertices0,
             tet_pressures0,
@@ -2088,14 +2085,12 @@ def kernel_detect_fem_self_tet(
             total_area * sap_info.hydroelastic_stiffness[None],
             phi0,
             qd.sqrt(fem_info.elements.friction_mu[i_e0] * fem_info.elements.friction_mu[i_e1]),
+            frame,
+            centroid,
             sap_state,
             sap_info,
         )
         if i_p >= 0:
-            sap_state.pairs.has_frame[i_p] = True
-            sap_state.pairs.normal[i_p] = normal
-            sap_state.pairs.tangent0[i_p] = tangent0
-            sap_state.pairs.tangent1[i_p] = tangent1
             for i in qd.static(range(4)):
                 sap_state.pairs.fem_slots_vert[i_p][i] = el2v0[i]
                 sap_state.pairs.fem_slots_weight[i_p][i] = barycentric0[i]
@@ -2127,13 +2122,14 @@ def kernel_detect_rigid_floor_vert(
                     sap_info.rigid_floor_vert_stiffness[None],
                     distance,
                     geoms_info.coup_friction[i_g],
+                    qd.Matrix.identity(gs.qd_float, 3),
+                    pos_v,
                     sap_state,
                     sap_info,
                 )
                 if i_p >= 0:
                     sap_state.pairs.link_idx[i_p][0] = geoms_info.link_idx[i_g]
                     sap_state.pairs.link_sign[i_p][0] = 1.0
-                    sap_state.pairs.contact_pos[i_p] = pos_v
 
 
 @qd.kernel(fastcache=True)
@@ -2198,11 +2194,13 @@ def kernel_detect_rigid_floor_tet(
         if k < sap_info.hydroelastic_eps[None] or phi0 > sap_info.hydroelastic_eps[None]:
             continue
         i_g = sap_state.rigid_volume.elems_geom_idx[i_e]
-        i_p = func_append_pair(i_h, i_b, qd.u64(i_e), k, phi0, geoms_info.coup_friction[i_g], sap_state, sap_info)
+        mu = geoms_info.coup_friction[i_g]
+        i_p = func_append_pair(
+            i_h, i_b, qd.u64(i_e), k, phi0, mu, qd.Matrix.identity(gs.qd_float, 3), centroid, sap_state, sap_info
+        )
         if i_p >= 0:
             sap_state.pairs.link_idx[i_p][0] = geoms_info.link_idx[i_g]
             sap_state.pairs.link_sign[i_p][0] = 1.0
-            sap_state.pairs.contact_pos[i_p] = centroid
 
 
 @qd.kernel(fastcache=True)
@@ -2286,7 +2284,7 @@ def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPIn
             tet_vertices0[:, i] = sap_state.rigid_volume.verts[elem0[i], i_b]
             tet_pressures0[i] = sap_state.rigid_volume.pressure[elem0[i]]
             tet_vertices1[:, i] = sap_state.rigid_volume.verts[elem1[i], i_b]
-        is_contact, total_area, centroid, barycentric0, pressure, tangent0, tangent1 = func_tet_tet_contact(
+        is_contact, total_area, centroid, barycentric0, pressure, frame = func_tet_tet_contact(
             sap_state.candidates.rigid_rigid_tet.intersection_code0[i_c],
             tet_vertices0,
             tet_pressures0,
@@ -2315,15 +2313,12 @@ def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPIn
             total_area * g,
             phi0,
             qd.sqrt(geoms_info.friction[i_g0] * geoms_info.friction[i_g1]),
+            frame,
+            centroid,
             sap_state,
             sap_info,
         )
         if i_p >= 0:
-            sap_state.pairs.has_frame[i_p] = True
-            sap_state.pairs.normal[i_p] = normal
-            sap_state.pairs.tangent0[i_p] = tangent0
-            sap_state.pairs.tangent1[i_p] = tangent1
-            sap_state.pairs.contact_pos[i_p] = centroid
             sap_state.pairs.link_idx[i_p] = qd.Vector(
                 [geoms_info.link_idx[i_g0], geoms_info.link_idx[i_g1]], dt=gs.qd_int
             )
@@ -2430,7 +2425,6 @@ def kernel_detect_rigid_fem_tri_tet(
         centroid = total_area_weighted_centroid / total_area
         barycentric = func_tet_barycentric(centroid, tet_vertices)
         tangent0 = (polygon_vertices[:, 0] - centroid).normalized()
-        tangent1 = normal.cross(tangent0)
         rigid_g = sap_info.hydroelastic_stiffness[None]
         fem_g = sap_state.hydroelastic_fem.pressure_gradient[i_e, i_b].dot(normal)
         pressure = barycentric.dot(tet_pressures)
@@ -2447,15 +2441,12 @@ def kernel_detect_rigid_fem_tri_tet(
             total_area * g,
             -pressure / g,
             qd.sqrt(fem_info.elements.friction_mu[i_e] * geoms_info.coup_friction[i_g]),
+            qd.Matrix.cols([tangent0, normal.cross(tangent0), normal]),
+            centroid,
             sap_state,
             sap_info,
         )
         if i_p >= 0:
-            sap_state.pairs.has_frame[i_p] = True
-            sap_state.pairs.normal[i_p] = normal
-            sap_state.pairs.tangent0[i_p] = tangent0
-            sap_state.pairs.tangent1[i_p] = tangent1
-            sap_state.pairs.contact_pos[i_p] = centroid
             for i in qd.static(range(4)):
                 sap_state.pairs.fem_slots_vert[i_p][i] = el2v[i]
                 sap_state.pairs.fem_slots_weight[i_p][i] = barycentric[i]
@@ -2731,11 +2722,8 @@ def kernel_compute_regularization(
                 i_v = fem_slots_vert[i_slot]
                 if i_v >= 0:
                     W += fem_slots_weight[i_slot] ** 2 * dt2_inv * fem_state.newton.prec[i_v, i_b]
-        if sap_state.pairs.has_frame[i_p]:
-            world = qd.Matrix.cols(
-                [sap_state.pairs.tangent0[i_p], sap_state.pairs.tangent1[i_p], sap_state.pairs.normal[i_p]]
-            )
-            W = world.transpose() @ W @ world
+        frame = sap_state.pairs.frame[i_p]
+        W = frame.transpose() @ W @ frame
 
         w_rms = W.norm() / 3.0
         beta_factor = sap_info.beta[None] ** 2 / (4.0 * qd.math.pi**2)
@@ -3145,16 +3133,9 @@ def kernel_compute_constraint_contact_gradient_hessian_diag_prec(
         i_p = sap_state.pairs.sort.values[i_s]
         vc = func_contact_velocity(i_p, sap_state.fem.v, sap_state.rigid.v, sap_state, static_config)
         func_contact_gamma(i_p, vc, sap_state, sap_info, compute_hessian=True)
-        gamma = sap_state.pairs.gamma[i_p]
-        G = sap_state.pairs.G[i_p]
-        if sap_state.pairs.has_frame[i_p]:
-            world = qd.Matrix.cols(
-                [sap_state.pairs.tangent0[i_p], sap_state.pairs.tangent1[i_p], sap_state.pairs.normal[i_p]]
-            )
-            gamma = world @ gamma
-            G = world @ G @ world.transpose()
-        sap_state.pairs.vec[i_p] = gamma
-        sap_state.pairs.mat[i_p] = G
+        frame = sap_state.pairs.frame[i_p]
+        sap_state.pairs.vec[i_p] = frame @ sap_state.pairs.gamma[i_p]
+        sap_state.pairs.mat[i_p] = frame @ sap_state.pairs.G[i_p] @ frame.transpose()
     if qd.static(static_config.has_rigid_contacts):
         func_sum_rigid_Jt_vec(sap_state, sap_info)
     if qd.static(static_config.has_fem):
@@ -3287,13 +3268,7 @@ def kernel_one_pcg_iter(
     for i_s in range(sap_state.pairs.sort.n_keys[()]):
         i_p = sap_state.pairs.sort.values[i_s]
         x = func_contact_velocity(i_p, sap_state.fem.p, sap_state.rigid.p, sap_state, static_config)
-        G_x = sap_state.pairs.G[i_p] @ x
-        if sap_state.pairs.has_frame[i_p]:
-            world = qd.Matrix.cols(
-                [sap_state.pairs.tangent0[i_p], sap_state.pairs.tangent1[i_p], sap_state.pairs.normal[i_p]]
-            )
-            G_x = world @ G_x
-        sap_state.pairs.vec[i_p] = G_x
+        sap_state.pairs.vec[i_p] = sap_state.pairs.frame[i_p] @ (sap_state.pairs.G[i_p] @ x)
     if qd.static(static_config.has_rigid_contacts):
         func_sum_rigid_Jt_vec(sap_state, sap_info)
     if qd.static(static_config.has_fem):
