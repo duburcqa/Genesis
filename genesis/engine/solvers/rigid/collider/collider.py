@@ -149,7 +149,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         rigid_solver = self._solver
         collider_info = self.collider_info
         rigid_solver.register_errors(
-            rigid_solver.errno,
             {
                 RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
@@ -1117,7 +1116,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             self._solver.rigid_info,
             self.collider_info,
             self._solver.rigid_config,
-            self._solver._errno,
+            self._solver.errno,
         )
 
 

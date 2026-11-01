@@ -223,7 +223,6 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         self.reset()
 
         solver.register_errors(
-            solver.errno,
             {
                 RigidErrorCode.INVALID_FORCE_NAN: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."

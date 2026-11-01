@@ -294,9 +294,9 @@ class Simulator(RBC):
         self._has_errno_flags = False
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
             self._errno_views = [
-                (solver._errno_latched.numpy(), qd_to_numpy(solver._errno, copy=False))
+                (solver._errno_latched.numpy(), qd_to_numpy(solver.errno, copy=False))
                 for solver in self._active_solvers
-                if solver._errno is not None
+                if solver.errno is not None
             ]
 
         self._step_timer.add_phases("physics", "sensors")

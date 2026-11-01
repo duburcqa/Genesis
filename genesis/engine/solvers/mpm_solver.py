@@ -549,8 +549,8 @@ class MPMSolver(ParticleSolver, Coupling):
         self._build_gravity(self.mpm_info.gravity)
 
         if self.is_active:
+            self.errno = self.mpm_state.errno
             self.register_errors(
-                self.mpm_state.errno,
                 {
                     MPMErrorCode.INVALID_PARTICLE_NAN: (
                         "NaN detected in MPM states. Try reducing the time step size or adjusting simulation "
@@ -652,7 +652,7 @@ class MPMSolver(ParticleSolver, Coupling):
 
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim._cur_substep_global + 1) % self._substeps == 0:
-            kernel_flag_non_finite_pos(f + 1, self.mpm_state, self._errno)
+            kernel_flag_non_finite_pos(f + 1, self.mpm_state, self.errno)
 
     def copy_frame(self, source, target):
         kernel_copy_frame(source, target, self.mpm_state)

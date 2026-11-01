@@ -218,9 +218,10 @@ class Solver(RBC, Dynamics, Integration):
         self._articulated_links_idx: np.ndarray | None = None
         self._links_parent_idx: np.ndarray | None = None
 
-        # The error flags the kernels of the solver write, the message raised for each, and the flags accumulated from
-        # them and from the backward pass since the last reset of each env (see 'register_errors')
-        self._errno: "qd.Tensor | None" = None
+        # The error flags the kernels of the solver write, an array of its data a solver flagging errors sets as it
+        # creates it, the message raised for each, and the flags accumulated from them and from the backward pass since
+        # the last reset of each env (see 'register_errors')
+        self.errno: "qd.Tensor | None" = None
         self._error_messages: dict[int, str] = {}
         self._errno_latched: torch.Tensor | None = None
         # The page-locked host copy of '_errno_latched' a non-blocking check reads, and the event recorded once it
@@ -242,12 +243,12 @@ class Solver(RBC, Dynamics, Integration):
             )
         self._subscribers.add(subscriber)
 
-    def register_errors(self, errno: qd.Tensor, messages: dict[int, str]) -> None:
+    def register_errors(self, messages: dict[int, str]) -> None:
         """
         Declare error flags the kernels write per env in the errno of the solver, one bit per error, and their messages.
 
-        `errno` is an array of the solver, which the base solver references, and the Systems working on the solver
-        declare their own flags in it, which they raise through 'func_flag_error'. 'check_errno' raises the message of
+        The Systems working on the solver declare their own flags in its errno, which they raise through
+        'func_flag_error'. 'check_errno' raises the message of
         the first flagged error, in the order of their bits, which follows the order of the stages flagging them, the
         flags of the backward pass last (see 'StepOperation.backward'). It reads `_errno_latched`, the union of every
         flag `errno` held since the last reset of each env, which no restore of the state rewinds (see 'update_errno'),
@@ -255,7 +256,6 @@ class Solver(RBC, Dynamics, Integration):
         """
         # Each error owns its bit, those of the backward pass included
         assert not messages.keys() & self._error_messages.keys(), f"{type(self).__name__} reuses a reserved error bit."
-        self._errno = errno
         self._error_messages = dict(
             sorted({**self._error_messages, **messages}.items(), key=lambda item: (item[0] in SolverErrorCode, item[0]))
         )
@@ -268,13 +268,13 @@ class Solver(RBC, Dynamics, Integration):
         A backward pass restores `errno` with the state before reversing each step, so it calls this once before its
         first restore and after reversing each step.
         """
-        if self._errno is None:
+        if self.errno is None:
             return
         # On CPU, numpy views of both share their memory, which spares a torch operation
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
-            merge_errno(self._errno_latched.numpy(), qd_to_numpy(self._errno, copy=False))
+            merge_errno(self._errno_latched.numpy(), qd_to_numpy(self.errno, copy=False))
         else:
-            self._errno_latched |= qd_to_torch(self._errno)
+            self._errno_latched |= qd_to_torch(self.errno)
 
     def get_error_envs_mask(self) -> torch.Tensor:
         """Return whether each env flagged an error since its last reset (see 'register_errors')."""
@@ -292,16 +292,16 @@ class Solver(RBC, Dynamics, Integration):
     def clear_errno(self, envs_idx=None) -> None:
         """Clear the errors the solver flagged for the given envs, all of them if None (see 'register_errors')."""
         envs_mask = indices_to_mask(envs_idx)
-        if self._errno is not None:
+        if self.errno is not None:
             if gs.use_zerocopy:
-                errno = qd_to_torch(self._errno, copy=False)
+                errno = qd_to_torch(self.errno, copy=False)
                 errno[envs_mask] = 0
                 if gs.backend == gs.metal:
                     torch.mps.synchronize()
             else:
-                errno = qd_to_torch(self._errno, copy=True)
+                errno = qd_to_torch(self.errno, copy=True)
                 errno[envs_mask] = 0
-                qd_from_torch(self._errno, errno)
+                qd_from_torch(self.errno, errno)
         self._errno_latched[envs_mask] = 0
 
     def check_errno(self, blocking: bool = True, *, context: str | None = None) -> None:

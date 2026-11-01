@@ -369,7 +369,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                     link_slice.from_numpy(link_slice_np)
 
         self.register_errors(
-            self.errno,
             {
                 RigidErrorCode.INVALID_ACC_NAN: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
