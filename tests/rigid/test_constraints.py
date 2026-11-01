@@ -190,12 +190,16 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
 
     # drop
-    scene.sim.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
-    weld_const_info = scene.sim.get_system(ConstraintSolver).get_weld_constraints(as_tensor=True, to_torch=True)
+    constraint_solver = scene.sim.get_system(ConstraintSolver)
+    weld_const_info = constraint_solver.get_weld_constraints(as_tensor=True, to_torch=True)
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
     no_weld = (-1, -1)
+    assert_equal(links_ab, [[cube_weld, box_weld], [cube_weld, box_weld], [cube_weld, box_weld], [box_weld, no_weld]])
+    scene.sim.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
+    weld_const_info = constraint_solver.get_weld_constraints(as_tensor=True, to_torch=True)
+    links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     assert_equal(links_ab, [[box_weld, no_weld], [box_weld, no_weld], [cube_weld, box_weld], [box_weld, no_weld]])
     for _ in range(110):
         scene.step()
@@ -415,12 +419,14 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     assert_allclose(nut_stopped.get_pos()[..., 2] - NUT_Z, LIMIT_LOWER, tol=5e-4)
 
     # An environment selected twice gets the screw once.
+    constraint_solver = scene.sim.get_system(ConstraintSolver)
+    eq_const_info = constraint_solver.get_equality_constraints()
+    assert_equal((eq_const_info["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1), (6, 6))
     rigid.add_screw_constraint(
         post_helix.base_link.idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, envs_idx=[1, 1]
     )
-    eq_const_info = scene.sim.get_system(ConstraintSolver).get_equality_constraints()
-    n_screws = (eq_const_info["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
-    assert_equal(n_screws, (6, 7))
+    eq_const_info = constraint_solver.get_equality_constraints()
+    assert_equal((eq_const_info["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1), (6, 7))
     with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
         rigid.add_weld_constraint(post_helix.base_link.idx, nut_helix.base_link.idx, envs_idx=[1])
 

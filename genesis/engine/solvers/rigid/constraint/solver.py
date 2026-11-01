@@ -218,7 +218,6 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             if config.enable_register_tiled_mass
             else None,
         )
-        self._eq_const_info_cache = {}
         self.reset()
 
         solver.register_errors(
@@ -229,8 +228,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             },
         )
         # The warm start and the rows of the constraints were found at the previous pose, so a change of the geometry
-        # moving a link drops them, which the readout of the equality constraints shows until the next solve. See
-        # 'Collider.build' for the filter and the order of the restore.
+        # moving a link drops them. See 'Collider.build' for the filter and the order of the restore.
         solver.subscribe(
             Subscriber(
                 frozenset((StateChange.GEOMETRY,)),
@@ -303,8 +301,6 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
 
     def reset(self, envs_idx=None) -> None:
         """Drop the warm start and the rows of the constraints of the environments 'envs_idx' (None for all of them)."""
-        self._eq_const_info_cache.clear()
-
         if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             is_warmstart = qd_to_torch(self.constraint_state.is_warmstart, copy=False)
@@ -333,8 +329,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         fn(envs_idx, self.constraint_state, self._solver.rigid_config)
 
     def solve(self):
-        """Solve the constraint forces, which invalidates the readback of the equality constraints."""
-        self._eq_const_info_cache.clear()
+        """Solve the constraint forces."""
         func_solve_body(
             self._solver.dyn_state,
             self._solver.hibernation_state,
@@ -346,11 +341,6 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
         )
 
     def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):
-        # Early return if already pre-computed
-        eq_const_info = self._eq_const_info_cache.get((as_tensor, to_torch))
-        if eq_const_info is not None:
-            return eq_const_info.copy()
-
         n_eqs = tuple(qd_to_numpy(self._solver.dyn_state.n_equalities))
         n_envs = len(n_eqs)
         n_eqs_max = max(n_eqs)
@@ -382,7 +372,6 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             iout = iout.reshape((n_envs, n_eqs_max, 3))
             eq_type, obj_a, obj_b = (iout[..., i] for i in range(3))
             efc_force = fout.reshape((n_envs, n_eqs_max, 6))
-            values = (eq_type, obj_a, obj_b, fout)
         else:
             if to_torch:
                 iout_chunks = torch.split(iout, n_eqs)
@@ -393,12 +382,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             eq_type, obj_a, obj_b = tuple(zip(*([data[..., i] for i in range(3)] for data in iout_chunks)))
 
         values = (eq_type, obj_a, obj_b, efc_force)
-        eq_const_info = dict(zip(("type", "obj_a", "obj_b", "force"), values))
-
-        # Cache equality constraint information before returning
-        self._eq_const_info_cache[(as_tensor, to_torch)] = eq_const_info
-
-        return eq_const_info.copy()
+        return dict(zip(("type", "obj_a", "obj_b", "force"), values))
 
     def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         eq_const_info = self.get_equality_constraints(as_tensor, to_torch)
