@@ -638,13 +638,15 @@ class Simulator(RBC):
         Return the System of the scene of the given class, None when the scene has none.
 
         Before the scene is built, `opt_in` requests the System of that class from outside the pipeline, creating it at
-        once from the solvers, the coupler and their options (see 'create_system'). The System is built with the scene,
-        and every System depending on its class uses it.
+        once from the solvers, the coupler, their options and the Systems requested before, with the Systems it depends
+        on that are missing (see 'create_system'). The Systems are built with the scene, and every System depending on
+        their class uses them.
         """
         if opt_in and not self._scene.is_built:
             if not any([isinstance(system, cls) for system in self._requested_systems]):
                 options = [self._coupler_options, *[solver._options for solver in self._solvers]]
-                self._requested_systems.append(create_system(cls, [*self._solvers, self._coupler, *options]))
+                values = [*self._solvers, self._coupler, *options, *self._requested_systems]
+                self._requested_systems += create_system(cls, values)
         matches = [system for system in (*self._systems, *self._requested_systems) if isinstance(system, cls)]
         return matches[0] if matches else None
 

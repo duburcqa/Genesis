@@ -855,29 +855,42 @@ def _create(cls: type[System], args: dict[str, Any]) -> System:
     return system
 
 
-def create_system(cls: type[System], values: Sequence[object]) -> System:
+def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
     """
-    Create a System before the Systems of a scene are assembled, from the values its dependencies take at that time.
+    Create a System requested before the Systems of a scene are assembled, and the Systems it depends on that are
+    missing, returning them in creation order, the System last.
 
-    Every dependency takes the one value of its classes among `values`, whose conditions are read at once, and an
-    optional dependency no value fits takes None. A dependency left to the assembly, a System it creates or a condition
-    on a System read once built, refuses the creation. The System is then given to 'assemble_systems', which builds it
-    once the Systems it depends on are built, any other System depending on its class using it.
+    Every dependency takes the one value of its classes among `values` and the Systems created before it, a missing
+    System being created the same way, and an optional dependency no value fits takes None. A condition on an option is
+    honored, the request refused when it does not hold, while a condition on a System, which decides when the pipeline
+    offers the System on its own, is bypassed. The Systems are then given to 'assemble_systems', which builds them once
+    their dependencies are built, any other System depending on their class using them.
     """
+    created: list[System] = []
     args = {}
     for dependency in _get_dependencies(cls):
-        candidates = list({id(value): value for value in values if isinstance(value, dependency.classes)}.values())
+        candidates = [value for value in [*values, *created] if isinstance(value, dependency.classes)]
+        candidates = list({id(value): value for value in candidates}.values())
         if len(candidates) > 1:
             raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
-        if candidates and dependency.conditions and isinstance(candidates[0], System):
-            raise TypeError(f"{cls.__name__} reads its condition on '{dependency.name}' once the scene is built.")
-        if not candidates or not all([condition.holds(candidates[0]) for condition in dependency.conditions]):
+        system_classes = [c for c in dependency.classes if issubclass(c, System)]
+        if not candidates and system_classes and not dependency.is_optional:
+            created += create_system(system_classes[0], [*values, *created])
+            candidates = [created[-1]]
+        is_holding = all(
+            [
+                isinstance(value, System) or condition.holds(value)
+                for value in candidates
+                for condition in dependency.conditions
+            ]
+        )
+        if not candidates or not is_holding:
             if not dependency.is_optional:
                 raise TypeError(f"{cls.__name__} has no value for '{dependency.name}' before the scene is built.")
             args[dependency.name] = None
             continue
         args[dependency.name] = candidates[0]
-    return _create(cls, args)
+    return [*created, _create(cls, args)]
 
 
 def _is_component(cls: type) -> bool:
