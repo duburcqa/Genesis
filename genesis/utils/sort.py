@@ -193,6 +193,12 @@ def func_sort_segments(sort_buffer: SegmentSortBuffer, sort_config: qd.template(
         n_sort_chunks = sort_buffer.sort_hist.shape[1]
         for i_pass in qd.static(range(qd.static(sort_config.end_bit) // 8)):
             shift = 8 * i_pass
+            # The passes ping-pong between the arrays and their scratch copies
+            keys_src, keys_dst, values_src, values_dst = qd.static(
+                (sort_buffer.keys, sort_buffer.keys_scratch, sort_buffer.values, sort_buffer.values_scratch)
+                if i_pass % 2 == 0
+                else (sort_buffer.keys_scratch, sort_buffer.keys, sort_buffer.values_scratch, sort_buffer.values)
+            )
             for i_seg, i_chunk in qd.ndrange(n_segments, n_sort_chunks):
                 for i_digit in range(256):
                     sort_buffer.sort_hist[i_seg, i_chunk, i_digit] = 0
@@ -200,11 +206,7 @@ def func_sort_segments(sort_buffer: SegmentSortBuffer, sort_config: qd.template(
                 n_segment_keys = sort_buffer.segments_start[i_seg + 1] - i_k_start
                 i_k_start, i_k_end = lu.func_chunk_range(i_k_start, i_chunk, n_segment_keys, n_sort_chunks)
                 for i_k in range(i_k_start, i_k_end):
-                    key = qd.u64(0)
-                    if qd.static(i_pass % 2 == 0):
-                        key = sort_buffer.keys[i_k]
-                    else:
-                        key = sort_buffer.keys_scratch[i_k]
+                    key = keys_src[i_k]
                     digit = qd.i32((key >> shift) & qd.u64(0xFF))
                     sort_buffer.sort_hist[i_seg, i_chunk, digit] += 1
             for i_seg in range(n_segments):
@@ -220,19 +222,10 @@ def func_sort_segments(sort_buffer: SegmentSortBuffer, sort_config: qd.template(
                 n_segment_keys = sort_buffer.segments_start[i_seg + 1] - i_k_start
                 i_k_start, i_k_end = lu.func_chunk_range(i_k_start, i_chunk, n_segment_keys, n_sort_chunks)
                 for i_k in range(i_k_start, i_k_end):
-                    key = qd.u64(0)
-                    if qd.static(i_pass % 2 == 0):
-                        key = sort_buffer.keys[i_k]
-                    else:
-                        key = sort_buffer.keys_scratch[i_k]
+                    key = keys_src[i_k]
                     digit = qd.i32((key >> shift) & qd.u64(0xFF))
                     i_dst = sort_buffer.sort_hist[i_seg, i_chunk, digit]
                     sort_buffer.sort_hist[i_seg, i_chunk, digit] = i_dst + 1
-                    if qd.static(i_pass % 2 == 0):
-                        sort_buffer.keys_scratch[i_dst] = key
-                        if qd.static(sort_config.has_values):
-                            sort_buffer.values_scratch[i_dst] = sort_buffer.values[i_k]
-                    else:
-                        sort_buffer.keys[i_dst] = key
-                        if qd.static(sort_config.has_values):
-                            sort_buffer.values[i_dst] = sort_buffer.values_scratch[i_k]
+                    keys_dst[i_dst] = key
+                    if qd.static(sort_config.has_values):
+                        values_dst[i_dst] = values_src[i_k]

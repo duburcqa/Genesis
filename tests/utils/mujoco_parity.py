@@ -541,15 +541,16 @@ def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev
     a friction pyramid whichever tangent the engines label first, and the limit rows. The reference acceleration and
     the row velocity separate rows sharing a jacobian, such as the two sides of a bilateral constraint.
     """
-    gs_n_constraints = gs_sim.get_system(ConstraintSolver).constraint_state.n_constraints.to_numpy()[0]
+    constraint_state = gs_sim.get_system(ConstraintSolver).constraint_state
+    gs_n_constraints = constraint_state.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
-    gs_jac = gs_sim.get_system(ConstraintSolver).constraint_state.jac.to_numpy()[:gs_n_constraints, :, 0]
+    gs_jac = constraint_state.jac.to_numpy()[:gs_n_constraints, :, 0]
     mj_jac = mj_sim.data.efc_J.reshape([mj_n_constraints, -1])
     gs_jac_dofs, mj_jac_dofs = gs_jac[:, gs_dofs_idx], mj_jac[:, mj_dofs_idx]
-    gs_efc_D = gs_sim.get_system(ConstraintSolver).constraint_state.efc_D.to_numpy()[:gs_n_constraints, 0]
+    gs_efc_D = constraint_state.efc_D.to_numpy()[:gs_n_constraints, 0]
     mj_efc_D = mj_sim.data.efc_D
-    gs_efc_aref = gs_sim.get_system(ConstraintSolver).constraint_state.aref.to_numpy()[:gs_n_constraints, 0]
+    gs_efc_aref = constraint_state.aref.to_numpy()[:gs_n_constraints, 0]
     mj_efc_aref = mj_sim.data.efc_aref
 
     cost = np.abs(gs_jac_dofs[:, None] - mj_jac_dofs[None]).max(axis=-1) / tol
@@ -618,7 +619,8 @@ def check_mujoco_data_consistency(
     mj_qfrc_actuator = mj_sim.data.qfrc_actuator
     assert_allclose(gs_qfrc_actuator, mj_qfrc_actuator[mj_dofs_idx], tol=tol)
 
-    gs_n_contacts = gs_sim.get_system(Collider).collider_state.n_contacts.to_numpy()[0]
+    collider_state = gs_sim.get_system(Collider).collider_state
+    gs_n_contacts = collider_state.n_contacts.to_numpy()[0]
     mj_n_contacts = mj_sim.data.ncon
     assert gs_n_contacts == mj_n_contacts, f"contact count differs: gs={gs_n_contacts} mj={mj_n_contacts}"
     gs_constraint_solver = gs_sim.get_system(ConstraintSolver)
@@ -631,7 +633,7 @@ def check_mujoco_data_consistency(
     efc_atol, qvel_atol = _compute_efc_tolerances(mj_sim, tol)
 
     if gs_n_constraints and not ignore_constraints:
-        gs_contact_pos = gs_sim.get_system(Collider).collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
+        gs_contact_pos = collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
         mj_contact_pos = mj_sim.data.contact.pos
         # Sort based on the axis with the largest variation
         max_var_axis = 0
@@ -646,12 +648,10 @@ def check_mujoco_data_consistency(
         gs_sidx = np.argsort(gs_contact_pos[:, max_var_axis])
         mj_sidx = np.argsort(mj_contact_pos[:, max_var_axis])
         assert_allclose(gs_contact_pos[gs_sidx], mj_contact_pos[mj_sidx], tol=tol)
-        gs_contact_normal = gs_sim.get_system(Collider).collider_state.contact_data.normal.to_numpy()[:gs_n_contacts, 0]
+        gs_contact_normal = collider_state.contact_data.normal.to_numpy()[:gs_n_contacts, 0]
         mj_contact_normal = -mj_sim.data.contact.frame[:, :3]
         assert_allclose(gs_contact_normal[gs_sidx], mj_contact_normal[mj_sidx], tol=tol)
-        gs_penetration = gs_sim.get_system(Collider).collider_state.contact_data.penetration.to_numpy()[
-            :gs_n_contacts, 0
-        ]
+        gs_penetration = collider_state.contact_data.penetration.to_numpy()[:gs_n_contacts, 0]
         mj_penetration = -mj_sim.data.contact.dist
         assert_allclose(gs_penetration[gs_sidx], mj_penetration[mj_sidx], tol=tol)
 
@@ -903,9 +903,7 @@ def simulate_and_check_mujoco_consistency(
             # Keep Mujoco and Genesis simulation in sync to avoid drift over time
             mj_sim.data.qpos[mj_qs_idx] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
             mj_sim.data.qvel[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
-            mj_sim.data.qacc_warmstart[mj_dofs_idx] = gs_sim.get_system(
-                ConstraintSolver
-            ).constraint_state.qacc_ws.to_numpy()[:, 0]
+            mj_sim.data.qacc_warmstart[mj_dofs_idx] = constraint_solver.constraint_state.qacc_ws.to_numpy()[:, 0]
             mj_sim.data.qacc_smooth[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.acc_smooth.to_numpy()[:, 0]
 
             # Backup current velocity

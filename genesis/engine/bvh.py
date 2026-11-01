@@ -187,6 +187,19 @@ def _func_delta(i_t: int, i_leaf: int, j_leaf: int, bvh_state: BVHState) -> int:
 
 
 @qd.func
+def _func_fit_node(i_t: int, i_n: int, bvh_state: BVHState):
+    """Fit the box of an internal node over its children."""
+    i_left = bvh_state.tree.nodes_left[i_t, i_n]
+    i_right = bvh_state.tree.nodes_right[i_t, i_n]
+    bvh_state.tree.nodes_min[i_t, i_n] = qd.min(
+        bvh_state.tree.nodes_min[i_t, i_left], bvh_state.tree.nodes_min[i_t, i_right]
+    )
+    bvh_state.tree.nodes_max[i_t, i_n] = qd.max(
+        bvh_state.tree.nodes_max[i_t, i_left], bvh_state.tree.nodes_max[i_t, i_right]
+    )
+
+
+@qd.func
 def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: qd.template()):
     """Walk from a sorted leaf to the root, fitting each node whose two children are fitted.
 
@@ -208,14 +221,7 @@ def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: 
             qd.simt.grid.mem_fence()
         if n_arrived == 0:
             break
-        i_left = bvh_state.tree.nodes_left[i_t, i_parent]
-        i_right = bvh_state.tree.nodes_right[i_t, i_parent]
-        bvh_state.tree.nodes_min[i_t, i_parent] = qd.min(
-            bvh_state.tree.nodes_min[i_t, i_left], bvh_state.tree.nodes_min[i_t, i_right]
-        )
-        bvh_state.tree.nodes_max[i_t, i_parent] = qd.max(
-            bvh_state.tree.nodes_max[i_t, i_left], bvh_state.tree.nodes_max[i_t, i_right]
-        )
+        _func_fit_node(i_t, i_parent, bvh_state)
         i_n = i_parent
 
 
@@ -269,14 +275,7 @@ def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: 
             is_active = i_slot < n_frontier
             i_n = bvh_state.fit_frontier[i_t, i_cur, qd.min(i_slot, n_frontier - 1)]
             if is_active:
-                i_left = bvh_state.tree.nodes_left[i_t, i_n]
-                i_right = bvh_state.tree.nodes_right[i_t, i_n]
-                bvh_state.tree.nodes_min[i_t, i_n] = qd.min(
-                    bvh_state.tree.nodes_min[i_t, i_left], bvh_state.tree.nodes_min[i_t, i_right]
-                )
-                bvh_state.tree.nodes_max[i_t, i_n] = qd.max(
-                    bvh_state.tree.nodes_max[i_t, i_left], bvh_state.tree.nodes_max[i_t, i_right]
-                )
+                _func_fit_node(i_t, i_n, bvh_state)
             _func_push_fit_parent(i_t, i_n, 1 - i_cur, is_active, sh_frontier_count, bvh_state)
         qd.simt.grid.mem_fence()
         qd.simt.block.sync()
