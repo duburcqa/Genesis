@@ -87,13 +87,7 @@ def func_point_in_geom_aabb(i_g: int, i_b: int, point: qd.types.vector(3), expan
 
 @qd.func
 def func_is_geom_boxes_overlap(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    geoms_init_AABB: qd.Tensor,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
+    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo
 ):
     """Check whether the world-aligned boxes of two geoms overlap, and for two convex geoms their oriented boxes too.
 
@@ -116,10 +110,10 @@ def func_is_geom_boxes_overlap(
         and dyn_info.geoms.type[i_gb] != GEOM_TYPE.TERRAIN
     ):
         EPS = rigid_info.EPS[None]
-        half_a = 0.5 * (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0])
-        half_b = 0.5 * (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0])
-        center_a = 0.5 * (geoms_init_AABB[i_ga, 7] + geoms_init_AABB[i_ga, 0])
-        center_b = 0.5 * (geoms_init_AABB[i_gb, 7] + geoms_init_AABB[i_gb, 0])
+        half_a = 0.5 * (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0])
+        half_b = 0.5 * (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0])
+        center_a = 0.5 * (rigid_info.geoms_init_AABB[i_ga, 7] + rigid_info.geoms_init_AABB[i_ga, 0])
+        center_b = 0.5 * (rigid_info.geoms_init_AABB[i_gb, 7] + rigid_info.geoms_init_AABB[i_gb, 0])
 
         # The axes of box b and the offset of its center, in the frame of box a
         quat_a = dyn_state.geoms.quat[i_ga, i_b]

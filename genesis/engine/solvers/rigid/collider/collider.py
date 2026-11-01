@@ -434,7 +434,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # The box of every link in its own frame, bounding the boxes of its geoms, whose pose in the link is fixed
         if self._solver.n_geoms > 0:
             geoms_corners = gu.transform_by_trans_quat(
-                qd_to_numpy(self._solver.geoms_init_AABB)[: self._solver.n_geoms],
+                qd_to_numpy(self._solver.rigid_info.geoms_init_AABB)[: self._solver.n_geoms],
                 np.array([geom.init_pos for geom in self._solver.geoms])[:, None],
                 np.array([geom.init_quat for geom in self._solver.geoms])[:, None].repeat(8, axis=1),
             )

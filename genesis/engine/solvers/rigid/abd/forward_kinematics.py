@@ -952,9 +952,7 @@ def kernel_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config
 
 
 @qd.func
-def func_update_geom_aabbs(
-    geoms_init_AABB: qd.Tensor, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
-):
+def func_update_geom_aabbs(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Fit the world-frame axis-aligned bounding box (AABB) of every geom in every environment.
 
     A geom of a heterogeneous variant that the environment does not carry gets an empty box, which overlaps nothing and
@@ -976,7 +974,7 @@ def func_update_geom_aabbs(
             g_pos = dyn_state.geoms.pos[i_g, i_b]
             g_quat = dyn_state.geoms.quat[i_g, i_b]
             for i_corner in qd.static(range(8)):
-                corner_pos = gu.qd_transform_by_trans_quat(geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
+                corner_pos = gu.qd_transform_by_trans_quat(rigid_info.geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
                 lower = qd.min(lower, corner_pos)
                 upper = qd.max(upper, corner_pos)
 

@@ -30,7 +30,6 @@ def func_gjk_contact(
     gb_quat: qd.types.vector(4),
     pos_tol: float,
     normal_tol: float,
-    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     collider_state: ColliderState,
     gjk_state: GJKState,
@@ -221,7 +220,7 @@ def func_gjk_contact(
                         default_penetration = penetration
 
                         axis_0, axis_1 = func_contact_orthogonals(
-                            i_ga, i_gb, i_b, normal / penetration, geoms_init_AABB, dyn_state, dyn_info, rigid_info
+                            i_ga, i_gb, i_b, normal / penetration, dyn_state, dyn_info, rigid_info
                         )
 
                         found_default_epa = True
@@ -683,7 +682,6 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: qd.Tensor,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -698,9 +696,9 @@ def func_contact_orthogonals(
     # by the volume of their respective bounding box.
     i_g = i_gb
     if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-        size_ga = geoms_init_AABB[i_ga, 7]
+        size_ga = rigid_info.geoms_init_AABB[i_ga, 7]
         volume_ga = size_ga[0] * size_ga[1] * size_ga[2]
-        size_gb = geoms_init_AABB[i_gb, 7]
+        size_gb = rigid_info.geoms_init_AABB[i_gb, 7]
         volume_gb = size_gb[0] * size_gb[1] * size_gb[2]
         i_g = i_ga if volume_ga < volume_gb else i_gb
 
