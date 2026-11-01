@@ -124,7 +124,17 @@ class Base(Material["MPMEntity"]):
         `F_new` is the deformation gradient once the plasticity applies, `actu` the actuation of the particle and `m_dir`
         the direction of its muscle fibers, the other arguments being those of 'update_F_S_Jp'.
         """
-        stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
+        return func_corotated_stress(F_new, U, V, J, self.mu, self.lam)
+
+
+@qd.func
+def func_corotated_stress(
+    F: qd.types.matrix(3, 3), U: qd.types.matrix(3, 3), V: qd.types.matrix(3, 3), J: float, mu: float, lam: float
+):
+    """
+    Return the stress of the corotated elastic model of a deformation gradient, of the given Lame parameters.
+
+    `U` and `V` are the rotations of the singular value decomposition of the deformation gradient the material reads,
+    and `J` its determinant.
+    """
+    return 2 * mu * (F - U @ V.transpose()) @ F.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)

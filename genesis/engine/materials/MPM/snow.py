@@ -4,7 +4,7 @@ import quadrants as qd
 
 import genesis as gs
 
-from .base import SamplerType
+from .base import SamplerType, func_corotated_stress
 from .elasto_plastic import ElastoPlastic
 
 
@@ -78,9 +78,4 @@ class Snow(ElastoPlastic):
     ):
         # Hardening coefficient: material harder when compressed
         h = qd.exp(10 * (1.0 - Jp))
-        mu, lam = self.mu * h, self.lam * h
-
-        r = U @ V.transpose()
-        stress = 2 * mu * (F_new - r) @ F_new.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)
-
-        return stress
+        return func_corotated_stress(F_new, U, V, J, self.mu * h, self.lam * h)

@@ -6,7 +6,7 @@ import quadrants as qd
 
 from genesis.typing import PositiveFloat, PositiveInt, ValidFloat
 
-from .elastic import Elastic
+from .elastic import Elastic, func_elastic_stress
 
 
 @qd.data_oriented
@@ -52,8 +52,7 @@ class Muscle(Elastic):
         actu: float,
         m_dir: qd.types.vector(3),
     ):
-        # Quadrants funcs reject 'super()' (see Elastic)
-        stress = Elastic.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+        stress = func_elastic_stress(U, V, F_tmp, F_new, J, self.mu, self.lam, corotated=self.model == "corotation")
 
         AAt = m_dir.outer_product(m_dir)
         stress += self.stiffness * actu * F_tmp @ AAt @ F_tmp.transpose()

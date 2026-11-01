@@ -5,7 +5,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.typing import PositiveFloat
 
-from .base import Base
+from .base import Base, func_corotated_stress
 
 
 @qd.data_oriented
@@ -62,12 +62,28 @@ class Elastic(Base):
         actu: float,
         m_dir: qd.types.vector(3),
     ):
-        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-        if qd.static(self.model == "corotation"):
-            # Quadrants funcs reject 'super()', hence the explicit call of the parent method
-            stress = Base.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
-        else:
-            stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
-                self.lam * qd.log(J) - self.mu
-            )
-        return stress
+        return func_elastic_stress(U, V, F_tmp, F_new, J, self.mu, self.lam, corotated=self.model == "corotation")
+
+
+@qd.func
+def func_elastic_stress(
+    U: qd.types.matrix(3, 3),
+    V: qd.types.matrix(3, 3),
+    F_tmp: qd.types.matrix(3, 3),
+    F_new: qd.types.matrix(3, 3),
+    J: float,
+    mu: float,
+    lam: float,
+    corotated: qd.template(),
+):
+    """
+    Return the stress of the corotated or the neo-Hookean elastic model, of the given Lame parameters.
+
+    The arguments are those of 'Base.update_stress'.
+    """
+    stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if qd.static(corotated):
+        stress = func_corotated_stress(F_new, U, V, J, mu, lam)
+    else:
+        stress = mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (lam * qd.log(J) - mu)
+    return stress

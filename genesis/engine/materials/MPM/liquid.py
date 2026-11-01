@@ -6,7 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 
-from .base import Base
+from .base import Base, func_corotated_stress
 
 
 @qd.data_oriented
@@ -64,7 +64,4 @@ class Liquid(Base):
         actu: float,
         m_dir: qd.types.vector(3),
     ):
-        stress = 2 * self.mu * (F_tmp - U @ V.transpose()) @ F_tmp.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
+        return func_corotated_stress(F_tmp, U, V, J, self.mu, self.lam)
