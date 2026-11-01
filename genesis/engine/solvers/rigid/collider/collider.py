@@ -6,7 +6,7 @@ including broad-phase (sweep-and-prune), narrow-phase (convex-convex, SDF-based,
 terrain), and contact management.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Annotated
 
 import numpy as np
@@ -14,7 +14,6 @@ import torch
 
 import trimesh
 
-import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -28,7 +27,8 @@ from genesis.engine.solvers.rigid.rigid_solver import (
     RigidSolver,
 )
 from genesis.engine.state_change import StateChange, Subscriber
-from genesis.utils.data import ConfigItem, DataItem, iter_data
+from genesis.engine.states import SystemCheckpoint
+from genesis.utils.data import DataKind
 from genesis.utils.misc import (
     get_gpu_core_count,
     get_gpu_cores_per_unit,
@@ -51,6 +51,7 @@ from .contact import (
     func_set_upstream_grad,
     kernel_collider_clear,
     kernel_masked_collider_clear,
+    kernel_set_links_contact_force,
     kernel_wake_up_entities_resting_on_links,
 )
 from .gjk import GJK
@@ -191,6 +192,13 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     def detect_contacts_backward(self) -> tuple[Callable, ...]:
         """The reversal of the narrow phase, which a scene disabling the collisions skips."""
         return (self.backward_narrowphase,) if self._solver.rigid_config.enable_collision else ()
+
+    def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
+        super().load_checkpoint(checkpoint, boundary_only=boundary_only)
+        # The restore of the rigid solver, which precedes this one, clears the contacts and their forces (see 'build'),
+        # so the contact force of the links is summed again from the contacts restored
+        if DataKind.DERIVED in checkpoint.kinds:
+            kernel_set_links_contact_force(self._solver.dyn_state, self.collider_state, self._solver.rigid_config)
 
     def _clear_contacts_readout(self) -> None:
         """Drop the readout of the contacts the last query cached, which the next detection invalidates."""

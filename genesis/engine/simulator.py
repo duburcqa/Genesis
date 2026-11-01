@@ -35,11 +35,11 @@ if TYPE_CHECKING:
 STATE_KINDS = frozenset((DataKind.STATE,))
 
 
-def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SystemCheckpoint]]) -> None:
-    """Write back the boundary checkpoint of every given solver, then flush the zero-copy writes of the restore on
+def restore_checkpoints(systems_checkpoints: Iterable[tuple[System, SystemCheckpoint]]) -> None:
+    """Write back the boundary checkpoint of every given System, then flush the zero-copy writes of the restore on
     Metal."""
-    for solver, checkpoint in solvers_checkpoints:
-        solver.load_checkpoint(checkpoint, boundary_only=True)
+    for system, checkpoint in systems_checkpoints:
+        system.load_checkpoint(checkpoint, boundary_only=True)
     if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
         torch.mps.synchronize()
 
@@ -245,6 +245,17 @@ class Simulator(RBC):
             (self._coupler_options, *[solver._options for solver in self._active_solvers]),
         )
         self._step_system = self.get_system(Step)
+        # The Systems whose state the backward pass of a step replays it from: the solvers tracking gradients, and the
+        # other Systems holding state, such as the warm starts of the collision detection and of the constraint solve
+        self._replayed_systems = [
+            system
+            for system in self.checkpointed_systems
+            if (
+                system.requires_grad
+                if isinstance(system, Solver)
+                else any([isinstance(item, DataItem) and item.kind == DataKind.STATE for item in system.data])
+            )
+        ]
 
         # Every System of a differentiable scene supports gradients, which it declares
         if self._requires_grad:
@@ -439,7 +450,7 @@ class Simulator(RBC):
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SystemCheckpoint]) -> None:
         """
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
-        differentiable solvers.
+        Systems it replays (see '_replayed_systems').
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
@@ -448,8 +459,7 @@ class Simulator(RBC):
         """
         # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
         # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
-        differentiable_solvers = [solver for solver in self._active_solvers if solver.requires_grad]
-        boundary_checkpoints = list(zip(differentiable_solvers, checkpoints))
+        boundary_checkpoints = list(zip(self._replayed_systems, checkpoints))
         substeps_checkpoints = [boundary_checkpoints]
         self._cur_substep_global = substep_start
         restore_checkpoints(boundary_checkpoints)
@@ -458,9 +468,9 @@ class Simulator(RBC):
             self._cur_substep_global += 1
             substeps_checkpoints.append(
                 [
-                    (solver, solver.save_checkpoint(STATE_KINDS, boundary_only=True))
-                    for solver in differentiable_solvers
-                    if not solver.has_frames
+                    (system, system.save_checkpoint(STATE_KINDS, boundary_only=True))
+                    for system in self._replayed_systems
+                    if not system.has_frames
                 ]
             )
         # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
@@ -644,14 +654,12 @@ class StepOperation(Operation):
         self._sim = weakref.proxy(sim)
         self._substep_start = sim.cur_substep_global
         self._steps_start = sim.steps.clone()
-        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it
+        # The state of each System the backward pass replays at the start of the step (see '_replayed_systems')
         self._checkpoints = None
 
     def forward(self) -> tuple[torch.Tensor, ...]:
         self._checkpoints = [
-            solver.save_checkpoint(STATE_KINDS, boundary_only=True)
-            for solver in self._sim._active_solvers
-            if solver.requires_grad
+            system.save_checkpoint(STATE_KINDS, boundary_only=True) for system in self._sim._replayed_systems
         ]
         self._sim._step()
         return ()

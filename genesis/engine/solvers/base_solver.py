@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from enum import IntEnum
-from typing import TYPE_CHECKING, NamedTuple, overload
+from typing import TYPE_CHECKING, overload
 
 import numpy as np
 import torch
@@ -14,17 +14,14 @@ from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFieldsDispatcher
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
-from genesis.engine.states import SystemCheckpoint
 from genesis.engine.step import Dynamics, Integration
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, Size, fill_data
+from genesis.utils.data import Size
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
-    data_to_array,
     drop_repeated_index,
-    has_zerocopy_view,
     indices_to_mask,
     make_static_tuple,
     qd_add_grad,
@@ -111,24 +108,6 @@ def merge_errno(errno_out: np.ndarray, errno_in: np.ndarray) -> int:
     return flags
 
 
-class BoundaryItems(NamedTuple):
-    """The items a boundary checkpoint holds, listed once by the solver (see 'Solver.save_checkpoint')."""
-
-    # Every item the checkpoint holds
-    items: list[DataItem]
-    # The names of the arrays copied at once, in the order of their views
-    names: list[str]
-    # The zero-copy views of the arrays copied at once
-    views: list[torch.Tensor]
-    # The items copied one by one: the scalars, and the arrays without a view
-    items_copied: list[DataItem]
-    # The zero-copy views of the gradients of the arrays, which a backward pass checks at every step, the environment
-    # first with a trailing axis that gives every view one to reduce over
-    grads: list[torch.Tensor]
-    # The items whose gradient has no view, copied at every check
-    items_grad_copied: list[ArrayItem]
-
-
 class GravityMixin:
     """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
 
@@ -205,10 +184,6 @@ class Solver(RBC, Dynamics, Integration):
     material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
-    # Whether the solver holds its state in frames, one per substep of a window of them (see 'n_frames'), frame 0
-    # holding the state between two steps. The simulator copies the last frame into frame 0 at the end of each
-    # window ('copy_frame'), and a boundary checkpoint holds frame 0 alone.
-    has_frames: bool = False
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
@@ -220,10 +195,6 @@ class Solver(RBC, Dynamics, Integration):
         # Whether the state of the solver tracks gradients, and the autograd graph of the simulator recording them
         self._requires_grad: bool = sim.options.requires_grad
         self._rollout_graph: RolloutGraph = sim._rollout_graph
-
-        # The items and views of the boundary checkpoints, built by the first one, which comes after the build, and
-        # valid from then on since the arrays are never reallocated, which spares walking the structs at every step
-        self._boundary_items: BoundaryItems | None = None
 
         # The force fields acting on the solver, as the template argument its kernels and the couplers take
         self.force_fields_dispatcher = ForceFieldsDispatcher()
@@ -555,98 +526,6 @@ class Solver(RBC, Dynamics, Integration):
 
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
-
-    def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SystemCheckpoint:
-        """
-        Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
-
-        A full checkpoint is that of any System (see 'System.save_checkpoint'). A boundary checkpoint holds the state at
-        the boundary of two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame
-        0 of the arrays holding frames, on the device whatever the backend.
-        """
-        if not boundary_only:
-            return super().save_checkpoint(kinds)
-        arrays = {}
-        if self._boundary_items is None:
-            # The gradients ('iter_data' names each one after its array) and the placeholders of the features
-            # switched off (see 'ArrayItem') hold nothing a replay reads
-            self._boundary_items = BoundaryItems(
-                items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
-            )
-            grad_names = set()
-            for item in self.data:
-                if isinstance(item, ConfigItem) or item.kind not in kinds:
-                    continue
-                if isinstance(item, ArrayItem):
-                    is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
-                    if item.name in grad_names or is_placeholder:
-                        continue
-                    if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
-                        grad_names.add(f"{item.name}.grad")
-                        if has_zerocopy_view(item.array.grad):
-                            grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
-                            self._boundary_items.grads.append(grad[..., None])
-                        else:
-                            self._boundary_items.items_grad_copied.append(item)
-                self._boundary_items.items.append(item)
-                if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
-                    self._boundary_items.items_copied.append(item)
-                    continue
-                if isinstance(item.array, torch.Tensor):
-                    view = item.array
-                elif not has_zerocopy_view(item.array):
-                    self._boundary_items.items_copied.append(item)
-                    continue
-                elif self.has_frames:
-                    view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
-                else:
-                    view = qd_to_torch(item.array, copy=False)
-                self._boundary_items.names.append(item.name)
-                self._boundary_items.views.append(view)
-        if self._boundary_items.views:
-            # One fused copy of every array with a view, rather than one launch each
-            copies = [torch.empty_like(view) for view in self._boundary_items.views]
-            # The views read the arrays as the last kernel left them once it is done (see qd_to_torch)
-            if gs.backend == gs.metal:
-                qd.sync()
-            torch._foreach_copy_(copies, self._boundary_items.views)
-            # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-            arrays.update(zip(self._boundary_items.names, copies))
-        items = self._boundary_items.items_copied
-        for item in items:
-            if isinstance(item, ScalarItem):
-                arrays[item.name] = np.array(getattr(item.owner, item.attr))
-            elif self.has_frames:
-                arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
-            else:
-                arrays[item.name] = data_to_array(item.array, to_torch=True, copy=True)
-        # The static configs are provenance, which a boundary checkpoint never leaving the process does without
-        return SystemCheckpoint(arrays=arrays, configs={}, kinds=kinds)
-
-    def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
-        """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
-
-        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint.
-
-        Nothing is notified to the subscribers (see 'mutates'). A solver whose step reads a DERIVED array before
-        recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
-        'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
-        """
-        if not boundary_only:
-            super().load_checkpoint(checkpoint)
-            return
-        # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them in
-        # this process, which spares checking them against the scene
-        if self._boundary_items.views:
-            # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
-            if gs.backend == gs.metal:
-                qd.sync()
-            values = [checkpoint.arrays[name] for name in self._boundary_items.names]
-            torch._foreach_copy_(self._boundary_items.views, values)
-        items = self._boundary_items.items_copied
-        fill_data(items, {item.name: checkpoint.arrays[item.name] for item in items}, frame_only=self.has_frames)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

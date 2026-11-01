@@ -205,6 +205,22 @@ def func_add_contacts_force_to_links(i_b: int, dyn_state: DynState, collider_sta
 
 
 @qd.func
+def func_set_links_contact_force(i_b: int, dyn_state: DynState, collider_state: ColliderState):
+    """Set the contact force of every link of env i_b to the sum of the forces of the contacts it takes part in."""
+    for i_l in range(dyn_state.links.contact_force.shape[0]):
+        dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    func_add_contacts_force_to_links(i_b, dyn_state, collider_state)
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_links_contact_force(dyn_state: DynState, collider_state: ColliderState, rigid_config: qd.template()):
+    """Set the contact force of every link of every env to the sum of the forces of its contacts."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_b in range(dyn_state.links.contact_force.shape[1]):
+        func_set_links_contact_force(i_b, dyn_state, collider_state)
+
+
+@qd.func
 def func_is_link_pair_hibernated(
     i_la: int,
     i_lb: int,
@@ -357,9 +373,7 @@ def kernel_collider_clear(
         func_collider_reset_env(i_b, collider_state, collider_config)
         func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
         # Only the contacts of the sleepers remain listed, so their links alone keep a contact force
-        for i_l in range(dyn_state.links.contact_force.shape[0]):
-            dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        func_add_contacts_force_to_links(i_b, dyn_state, collider_state)
+        func_set_links_contact_force(i_b, dyn_state, collider_state)
 
 
 @qd.kernel(fastcache=True)
@@ -378,9 +392,7 @@ def kernel_masked_collider_clear(
             func_collider_reset_env(i_b, collider_state, collider_config)
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             # See 'kernel_collider_clear'
-            for i_l in range(dyn_state.links.contact_force.shape[0]):
-                dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            func_add_contacts_force_to_links(i_b, dyn_state, collider_state)
+            func_set_links_contact_force(i_b, dyn_state, collider_state)
 
 
 @qd.kernel(fastcache=True)
