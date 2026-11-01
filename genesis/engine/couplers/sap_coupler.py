@@ -75,15 +75,9 @@ if TYPE_CHECKING:
 SAP_N_FEM_SLOTS = 8
 
 
-# Sizes of the SAP coupler, besides the vertices and the elements of the FEM solver (see VERTICES): the tetrahedral
-# volume of the rigid geoms, the equality constraints of every environment and their chunks, the contact pairs, those
-# applying impulses to rigid dofs, the contact handlers, those applying impulses to rigid dofs, the vertex slots the
-# pairs apply to, the chunks of the pairs of a handler, the candidates of a handler, and the rows of the marching
-# tetrahedra tables
 SAP_VOLUME_VERTS = Size("volume_verts")
 SAP_VOLUME_ELEMS = Size("volume_elems")
 SAP_EQUALITIES = Size("equality_constraints")
-SAP_EQUALITY_CHUNKS = Size("equality_chunks")
 SAP_PAIRS = Size("contact_pairs")
 SAP_RIGID_PAIRS = Size("rigid_contact_pairs")
 SAP_HANDLERS = Size("handlers")
@@ -192,22 +186,15 @@ class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     search.
 
     The line search finds the root of the derivative of the cost along the search direction by safeguarded Newton
-    steps within the bracket [`alpha_min`, `alpha_max`], `f` being that derivative scaled by `dell_scale`, unless the
-    slope at the start is small enough for the full step (`is_full_step`).
+    steps within the bracket [`alpha_min`, `alpha_max`], `f_upper` being that derivative scaled by `dell_scale` at
+    `alpha_max`, unless the slope at the start is small enough for the full step (`is_full_step`).
     """
 
     is_active: qd.Tensor = field(bool)
     is_pcg_active: qd.Tensor = field(bool)
     is_linesearch_active: qd.Tensor = field(bool)
     is_full_step: qd.Tensor = field(bool)
-    gradient_norm: qd.Tensor = field(float)
-    momentum_norm: qd.Tensor = field(float)
-    impulse_norm: qd.Tensor = field(float)
-    rTr: qd.Tensor = field(float)
     rTz: qd.Tensor = field(float)
-    rTr_new: qd.Tensor = field(float)
-    rTz_new: qd.Tensor = field(float)
-    pTAp: qd.Tensor = field(float)
     alpha: qd.Tensor = field(float)
     beta: qd.Tensor = field(float)
     energy_prev: qd.Tensor = field(float)
@@ -220,10 +207,7 @@ class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     alpha_min: qd.Tensor = field(float)
     alpha_max: qd.Tensor = field(float)
     alpha_tol: qd.Tensor = field(float)
-    f_lower: qd.Tensor = field(float)
     f_upper: qd.Tensor = field(float)
-    f: qd.Tensor = field(float)
-    df: qd.Tensor = field(float)
     minus_dalpha: qd.Tensor = field(float)
     minus_dalpha_prev: qd.Tensor = field(float)
 
@@ -233,26 +217,22 @@ class SAPEqualityConstraints(Data, kind=DataKind.CONSTANT, shape=(SAP_EQUALITIES
     The joint equality constraints of the rigid solver, which the SAP coupler regularizes and solves with the contacts.
 
     The constraints are ordered by environment, those of environment i_b being from `batch_start[i_b]` to
-    `batch_start[i_b + 1]`. Each one ties the dof `dof1_idx` to the dof `dof2_idx`, its Jacobian row being `Jt`. The SAP
-    regularization of a constraint is `k`, `R` and `v_hat`, its impulse `gamma` and its Hessian `G`. `vec` holds the
-    impulse each constraint applies, and `partials` the partial sums over the chunks of the constraints of each
-    environment.
+    `batch_start[i_b + 1]`. Each one ties the dof `dof1_idx` to the dof `dof2_idx`, its Jacobian row being +1 at the
+    first and -1 at the second. The SAP regularization of a constraint is `R` and `v_hat`, its Hessian being `R_inv`.
+    `vec` holds the impulse each constraint applies, and `sums` the partial sums over the chunks of the constraints of
+    each environment, whose terms are unused.
     """
 
     batch_idx: qd.Tensor = field(int)
     dof1_idx: qd.Tensor = field(int)
     dof2_idx: qd.Tensor = field(int)
     batch_start: qd.Tensor = field(int, shape=(ENVS + 1,))
-    Jt: qd.Tensor = field(float, shape=(SAP_EQUALITIES, DOFS))
-    k: qd.Tensor = field(float)
     R: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     R_inv: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     v_hat: qd.Tensor = field(float, kind=DataKind.SCRATCH)
-    gamma: qd.Tensor = field(float, kind=DataKind.SCRATCH)
-    G: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     dvc: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     vec: qd.Tensor = field(float, kind=DataKind.SCRATCH)
-    partials: qd.Tensor = field(float, shape=(SAP_EQUALITY_CHUNKS, 2, ENVS), kind=DataKind.SCRATCH)
+    sums: FixedOrderSums = field(kind=DataKind.SCRATCH)
 
 
 class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(SAP_PAIRS,)):
@@ -745,7 +725,6 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 "volume_verts": n_rigid_volume_verts,
                 "volume_elems": n_rigid_volume_elems,
                 "equality_constraints": rigid_solver.n_equalities * B,
-                "equality_chunks": min(rigid_solver.n_equalities, SUM_MAX_CHUNKS),
                 "contact_pairs": n_pairs,
                 "rigid_contact_pairs": n_rigid_pairs,
                 "handlers": n_handlers,
@@ -755,6 +734,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 SAPState.fem.sums_v: FixedOrderSums.sizes(n_vertices, 3),
                 SAPState.fem.sums_el: FixedOrderSums.sizes(n_elements, 1),
                 SAPState.rigid.sums: FixedOrderSums.sizes(n_dofs, 3),
+                SAPState.equalities.sums: FixedOrderSums.sizes(rigid_solver.n_equalities, 2),
                 SAPState.pairs.sort: pairs_sort.sizes,
                 **{ref: bvh.sizes for ref, bvh in bvhs.items()},
                 **{ref: dict(handler_candidates=handler.n_candidates) for ref, handler in candidates_handler.items()},
@@ -772,6 +752,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 SAPState.hydroelastic_fem: not self._is_fem_hydroelastic,
                 SAPState.rigid_volume: not self._is_rigid_hydroelastic,
                 SAPState.equalities: not has_equalities,
+                SAPState.equalities.sums.terms: True,
                 (SAPState.pairs.Jt, SAPState.pairs.M_inv_Jt): n_rigid_pairs == 0,
                 (
                     SAPState.pairs.vertices_n_entries,
@@ -860,7 +841,6 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
         if has_equalities:
             kernel_build_equality_constraints(
                 self.sap_state,
-                self.sap_info,
                 rigid_solver.dyn_info.joints,
                 rigid_solver.dyn_info.equalities,
                 rigid_solver.rigid_config,
@@ -2639,7 +2619,6 @@ def kernel_compute_jacobian(
 @qd.kernel(fastcache=True)
 def kernel_build_equality_constraints(
     sap_state: SAPState,
-    sap_info: SAPInfo,
     joints_info: JointsInfo,
     equalities_info: EqualitiesInfo,
     rigid_config: qd.template(),
@@ -2648,11 +2627,8 @@ def kernel_build_equality_constraints(
     """
     Set up the joint equality constraints of every environment, ordered by environment then by equality.
 
-    A constraint ties the first dof of a joint to the first dof of another, with the stiffness of the constraints.
+    A constraint ties the first dof of a joint to the first dof of another.
     """
-    dt2 = sap_info.substep_dt[None] ** 2
-    for i_c, i_d in qd.ndrange(sap_state.equalities.Jt.shape[0], sap_state.equalities.Jt.shape[1]):
-        sap_state.equalities.Jt[i_c, i_d] = 0.0
     # Serial, so that the constraints are ordered by environment then by equality
     qd.loop_config(serialize=True)
     for i_b in range(sap_state.equalities.batch_start.shape[0] - 1):
@@ -2673,12 +2649,6 @@ def kernel_build_equality_constraints(
                 sap_state.equalities.batch_idx[i_c] = i_b
                 sap_state.equalities.dof1_idx[i_c] = i_d1
                 sap_state.equalities.dof2_idx[i_c] = i_d2
-                sap_state.equalities.k[i_c] = sap_info.equality_stiffness[None]
-                sap_state.equalities.R_inv[i_c] = dt2 * sap_info.equality_stiffness[None]
-                sap_state.equalities.R[i_c] = 1.0 / sap_state.equalities.R_inv[i_c]
-                sap_state.equalities.v_hat[i_c] = 0.0
-                sap_state.equalities.Jt[i_c, i_d1] = 1.0
-                sap_state.equalities.Jt[i_c, i_d2] = -1.0
         sap_state.equalities.batch_start[i_b + 1] = n_constraints
 
 
@@ -2789,7 +2759,7 @@ def kernel_compute_regularization(
             i_d2 = sap_state.equalities.dof2_idx[i_c]
             g0 = dofs_state.pos[i_d1, i_b] - dofs_state.pos[i_d2, i_b]
             sap_state.equalities.v_hat[i_c] = -g0 * (1.0 / dt)
-            R = 1.0 / (dt**2 * sap_state.equalities.k[i_c])
+            R = 1.0 / (dt**2 * sap_info.equality_stiffness[None])
             sap_state.equalities.R[i_c] = R
             sap_state.equalities.R_inv[i_c] = 1.0 / R
 
@@ -2823,10 +2793,7 @@ def func_sum_constraints_contacts(
     """Return the sum k over the equality constraints and the pairs of an environment, the handlers in order."""
     value_sum = gs.qd_float(0.0)
     if qd.static(static_config.has_equalities):
-        equalities_sum = gs.qd_float(0.0)
-        for i_chunk in range(sap_state.equalities.partials.shape[0]):
-            equalities_sum += sap_state.equalities.partials[i_chunk, k, i_b]
-        value_sum += equalities_sum
+        value_sum += lu.func_sum_chunks(i_b, k, sap_state.equalities.sums)
     for i_h in range(sap_state.pairs.handlers_n_pairs.shape[0]):
         handler_sum = gs.qd_float(0.0)
         for i_chunk in range(sap_info.contacts.handlers_n_chunks[i_h]):
@@ -2849,7 +2816,10 @@ def func_rigid_contacts_Jt_vec(
     if qd.static(static_config.has_equalities):
         equalities_Jt_vec = gs.qd_float(0.0)
         for i_c in range(sap_state.equalities.batch_start[i_b], sap_state.equalities.batch_start[i_b + 1]):
-            equalities_Jt_vec += sap_state.equalities.Jt[i_c, i_d] * sap_state.equalities.vec[i_c]
+            if i_d == sap_state.equalities.dof1_idx[i_c]:
+                equalities_Jt_vec += sap_state.equalities.vec[i_c]
+            elif i_d == sap_state.equalities.dof2_idx[i_c]:
+                equalities_Jt_vec -= sap_state.equalities.vec[i_c]
         Jt_vec += equalities_Jt_vec
     if qd.static(static_config.has_rigid_contacts):
         for i_h in range(sap_state.pairs.handlers_n_pairs.shape[0]):
@@ -3015,8 +2985,8 @@ def func_compute_constraints_contacts_line_terms(
     the energy along the search direction, the impulses and the Hessians being updated on the way.
     """
     if qd.static(static_config.has_equalities):
-        n_chunks = sap_state.equalities.partials.shape[0]
-        for i_chunk, i_b in qd.ndrange(n_chunks, sap_state.equalities.partials.shape[2]):
+        n_chunks = sap_state.equalities.sums.partials.shape[0]
+        for i_chunk, i_b in qd.ndrange(n_chunks, sap_state.equalities.sums.partials.shape[2]):
             if sap_state.solver.is_linesearch_active[i_b]:
                 term0 = gs.qd_float(0.0)
                 term1 = gs.qd_float(0.0)
@@ -3031,14 +3001,12 @@ def func_compute_constraints_contacts_line_terms(
                     if qd.static(compute_energy):
                         term0 += 0.5 * y**2 * sap_state.equalities.R[i_c]
                     else:
-                        sap_state.equalities.gamma[i_c] = y
-                        sap_state.equalities.G[i_c] = sap_state.equalities.R_inv[i_c]
                         dvc = sap_state.equalities.dvc[i_c]
-                        term0 -= dvc * sap_state.equalities.gamma[i_c]
-                        term1 += dvc**2 * sap_state.equalities.G[i_c]
-                sap_state.equalities.partials[i_chunk, 0, i_b] = term0
+                        term0 -= dvc * y
+                        term1 += dvc**2 * sap_state.equalities.R_inv[i_c]
+                sap_state.equalities.sums.partials[i_chunk, 0, i_b] = term0
                 if qd.static(not compute_energy):
-                    sap_state.equalities.partials[i_chunk, 1, i_b] = term1
+                    sap_state.equalities.sums.partials[i_chunk, 1, i_b] = term1
 
     n_handlers = sap_state.pairs.handlers_n_pairs.shape[0]
     for i_chunk, i_h, i_b in qd.ndrange(
@@ -3171,9 +3139,7 @@ def kernel_compute_constraint_contact_gradient_hessian_diag_prec(
             i_d1 = sap_state.equalities.dof1_idx[i_c]
             i_d2 = sap_state.equalities.dof2_idx[i_c]
             vc = sap_state.rigid.v[i_d1, i_b] - sap_state.rigid.v[i_d2, i_b]
-            sap_state.equalities.gamma[i_c] = (sap_state.equalities.v_hat[i_c] - vc) * sap_state.equalities.R_inv[i_c]
-            sap_state.equalities.G[i_c] = sap_state.equalities.R_inv[i_c]
-            sap_state.equalities.vec[i_c] = sap_state.equalities.gamma[i_c]
+            sap_state.equalities.vec[i_c] = (sap_state.equalities.v_hat[i_c] - vc) * sap_state.equalities.R_inv[i_c]
     # The impulse and the Hessian of each pair, in the world frame
     for i_s in range(sap_state.pairs.sort.n_keys[()]):
         i_p = sap_state.pairs.sort.values[i_s]
@@ -3239,13 +3205,13 @@ def kernel_check_sap_convergence(
         lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.is_active)
     for i_b in range(sap_state.solver.is_active.shape[0]):
         if sap_state.solver.is_active[i_b]:
-            sap_state.solver.gradient_norm[i_b] = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
-            sap_state.solver.momentum_norm[i_b] = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
-            sap_state.solver.impulse_norm[i_b] = func_sum_vertices_dofs(i_b, 2, sap_state, static_config)
+            gradient_norm = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
+            momentum_norm = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
+            impulse_norm = func_sum_vertices_dofs(i_b, 2, sap_state, static_config)
             norm_threshold = sap_info.convergence_atol[None] + sap_info.convergence_rtol[None] * qd.max(
-                sap_state.solver.momentum_norm[i_b], sap_state.solver.impulse_norm[i_b]
+                momentum_norm, impulse_norm
             )
-            sap_state.solver.is_active[i_b] = sap_state.solver.gradient_norm[i_b] >= norm_threshold
+            sap_state.solver.is_active[i_b] = gradient_norm >= norm_threshold
 
 
 @qd.kernel(fastcache=True)
@@ -3288,9 +3254,9 @@ def kernel_init_pcg_solve(
         lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.is_pcg_active)
     for i_b in range(sap_state.solver.is_active.shape[0]):
         if sap_state.solver.is_pcg_active[i_b]:
-            sap_state.solver.rTr[i_b] = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
+            rTr = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
             sap_state.solver.rTz[i_b] = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
-            sap_state.solver.is_pcg_active[i_b] = sap_state.solver.rTr[i_b] > sap_info.pcg_threshold[None]
+            sap_state.solver.is_pcg_active[i_b] = rTr > sap_info.pcg_threshold[None]
 
 
 @qd.kernel(fastcache=True)
@@ -3317,7 +3283,7 @@ def kernel_one_pcg_iter(
             i_d1 = sap_state.equalities.dof1_idx[i_c]
             i_d2 = sap_state.equalities.dof2_idx[i_c]
             vc = sap_state.rigid.p[i_d1, i_b] - sap_state.rigid.p[i_d2, i_b]
-            sap_state.equalities.vec[i_c] = sap_state.equalities.G[i_c] * vc
+            sap_state.equalities.vec[i_c] = sap_state.equalities.R_inv[i_c] * vc
     for i_s in range(sap_state.pairs.sort.n_keys[()]):
         i_p = sap_state.pairs.sort.values[i_s]
         x = func_contact_velocity(i_p, sap_state.fem.p, sap_state.rigid.p, sap_state, static_config)
@@ -3359,8 +3325,8 @@ def kernel_one_pcg_iter(
     # The step
     for i_b in range(sap_state.solver.is_active.shape[0]):
         if sap_state.solver.is_pcg_active[i_b]:
-            sap_state.solver.pTAp[i_b] = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
-            sap_state.solver.alpha[i_b] = sap_state.solver.rTz[i_b] / sap_state.solver.pTAp[i_b]
+            pTAp = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
+            sap_state.solver.alpha[i_b] = sap_state.solver.rTz[i_b] / pTAp
 
     # x, r, z, and the terms of r^T r and r^T z
     if qd.static(static_config.has_fem):
@@ -3393,13 +3359,12 @@ def kernel_one_pcg_iter(
     # Convergence, then beta, r^T r and r^T z
     for i_b in range(sap_state.solver.is_active.shape[0]):
         if sap_state.solver.is_pcg_active[i_b]:
-            sap_state.solver.rTr_new[i_b] = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
-            sap_state.solver.rTz_new[i_b] = func_sum_vertices_dofs(i_b, 2, sap_state, static_config)
-            sap_state.solver.is_pcg_active[i_b] = sap_state.solver.rTr_new[i_b] > sap_info.pcg_threshold[None]
+            rTr = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
+            rTz = func_sum_vertices_dofs(i_b, 2, sap_state, static_config)
+            sap_state.solver.is_pcg_active[i_b] = rTr > sap_info.pcg_threshold[None]
             if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.solver.beta[i_b] = sap_state.solver.rTz_new[i_b] / sap_state.solver.rTz[i_b]
-                sap_state.solver.rTr[i_b] = sap_state.solver.rTr_new[i_b]
-                sap_state.solver.rTz[i_b] = sap_state.solver.rTz_new[i_b]
+                sap_state.solver.beta[i_b] = rTz / sap_state.solver.rTz[i_b]
+                sap_state.solver.rTz[i_b] = rTz
 
     # The search direction
     if qd.static(static_config.has_fem):
@@ -3646,12 +3611,12 @@ def kernel_init_exact_linesearch(
             )
             sap_state.solver.alpha_min[i_b] = 0.0
             sap_state.solver.alpha_max[i_b] = max_step_size
-            sap_state.solver.f_lower[i_b] = -1.0
             sap_state.solver.f_upper[i_b] = sap_state.solver.dell_dalpha[i_b] / sap_state.solver.dell_scale[i_b]
             sap_state.solver.alpha_tol[i_b] = ftol * sap_state.solver.step_size[i_b]
             sap_state.solver.minus_dalpha[i_b] = sap_state.solver.alpha_min[i_b] - sap_state.solver.alpha_max[i_b]
             sap_state.solver.minus_dalpha_prev[i_b] = sap_state.solver.minus_dalpha[i_b]
-            if qd.abs(sap_state.solver.f_lower[i_b]) < ftol:
+            # The scaled derivative is -1 at the start of the bracket, a root for a tolerance above 1
+            if ftol > 1.0:
                 sap_state.solver.is_linesearch_active[i_b] = False
                 sap_state.solver.step_size[i_b] = sap_state.solver.alpha_min[i_b]
             if qd.abs(sap_state.solver.f_upper[i_b]) < ftol:
@@ -3679,37 +3644,37 @@ def kernel_one_exact_linesearch_iter(
 
             # The derivative of the energy, scaled, and its own derivative, which update the bracket
             f_value = sap_state.solver.dell_dalpha[i_b] / sap_state.solver.dell_scale[i_b]
-            sap_state.solver.f[i_b] = f_value
-            sap_state.solver.df[i_b] = sap_state.solver.d2ell_dalpha2[i_b] / sap_state.solver.dell_scale[i_b]
+            df_value = sap_state.solver.d2ell_dalpha2[i_b] / sap_state.solver.dell_scale[i_b]
             f_upper = sap_state.solver.f_upper[i_b]
             if (f_value > 0.0) != (f_upper > 0.0) or (f_value < 0.0) != (f_upper < 0.0):
                 sap_state.solver.alpha_min[i_b] = sap_state.solver.step_size[i_b]
-                sap_state.solver.f_lower[i_b] = f_value
             else:
                 sap_state.solver.alpha_max[i_b] = sap_state.solver.step_size[i_b]
                 sap_state.solver.f_upper[i_b] = f_value
             if qd.abs(f_value) < sap_info.linesearch_ftol[None]:
                 sap_state.solver.is_linesearch_active[i_b] = False
-        if sap_state.solver.is_linesearch_active[i_b]:
-            is_newton_slow = 2.0 * qd.abs(sap_state.solver.f[i_b]) > qd.abs(
-                sap_state.solver.minus_dalpha_prev[i_b] * sap_state.solver.df[i_b]
-            )
-            sap_state.solver.minus_dalpha_prev[i_b] = sap_state.solver.minus_dalpha[i_b]
-            is_bisected = is_newton_slow
-            if not is_newton_slow:
-                sap_state.solver.minus_dalpha[i_b] = sap_state.solver.f[i_b] / sap_state.solver.df[i_b]
-                sap_state.solver.step_size[i_b] = sap_state.solver.step_size[i_b] - sap_state.solver.minus_dalpha[i_b]
-                is_bisected = (
-                    sap_state.solver.step_size[i_b] <= sap_state.solver.alpha_min[i_b]
-                    or sap_state.solver.step_size[i_b] >= sap_state.solver.alpha_max[i_b]
-                )
-            if is_bisected:
-                sap_state.solver.minus_dalpha[i_b] = 0.5 * (
-                    sap_state.solver.alpha_min[i_b] - sap_state.solver.alpha_max[i_b]
-                )
-                sap_state.solver.step_size[i_b] = sap_state.solver.alpha_min[i_b] - sap_state.solver.minus_dalpha[i_b]
-            if qd.abs(sap_state.solver.minus_dalpha[i_b]) < sap_state.solver.alpha_tol[i_b]:
-                sap_state.solver.is_linesearch_active[i_b] = False
+            if sap_state.solver.is_linesearch_active[i_b]:
+                is_newton_slow = 2.0 * qd.abs(f_value) > qd.abs(sap_state.solver.minus_dalpha_prev[i_b] * df_value)
+                sap_state.solver.minus_dalpha_prev[i_b] = sap_state.solver.minus_dalpha[i_b]
+                is_bisected = is_newton_slow
+                if not is_newton_slow:
+                    sap_state.solver.minus_dalpha[i_b] = f_value / df_value
+                    sap_state.solver.step_size[i_b] = (
+                        sap_state.solver.step_size[i_b] - sap_state.solver.minus_dalpha[i_b]
+                    )
+                    is_bisected = (
+                        sap_state.solver.step_size[i_b] <= sap_state.solver.alpha_min[i_b]
+                        or sap_state.solver.step_size[i_b] >= sap_state.solver.alpha_max[i_b]
+                    )
+                if is_bisected:
+                    sap_state.solver.minus_dalpha[i_b] = 0.5 * (
+                        sap_state.solver.alpha_min[i_b] - sap_state.solver.alpha_max[i_b]
+                    )
+                    sap_state.solver.step_size[i_b] = (
+                        sap_state.solver.alpha_min[i_b] - sap_state.solver.minus_dalpha[i_b]
+                    )
+                if qd.abs(sap_state.solver.minus_dalpha[i_b]) < sap_state.solver.alpha_tol[i_b]:
+                    sap_state.solver.is_linesearch_active[i_b] = False
 
 
 @qd.kernel(fastcache=True)
