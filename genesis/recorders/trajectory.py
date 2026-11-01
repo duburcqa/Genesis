@@ -466,9 +466,9 @@ def _header(
         "dt": sim.dt,
         "layout": {key: _json_value(value) for key, value in dataclasses.asdict(layout).items()},
         "configs": {
-            item.name: _json_value(item.config)
-            for solver in sim.active_solvers
-            for item in solver.data
+            f"{type(system).__name__}.{item.name}": _json_value(item.config)
+            for system in sim.checkpointed_systems
+            for item in system.data
             if isinstance(item, ConfigItem)
         },
         "fields": _fields_to_json(fields),
