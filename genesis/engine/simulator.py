@@ -245,25 +245,25 @@ class Simulator(RBC):
             (self._coupler_options, *[solver._options for solver in self._active_solvers]),
         )
         self._step_system = self.get_system(Step)
-        # The Systems whose state the backward pass of a step replays it from: the solvers tracking gradients, and the
-        # other Systems holding state, such as the warm starts of the collision detection and of the constraint solve
-        self._replayed_systems = [
-            system
-            for system in self.checkpointed_systems
-            if (
-                system.requires_grad
-                if isinstance(system, Solver)
-                else any([isinstance(item, DataItem) and item.kind == DataKind.STATE for item in system.data])
-            )
-        ]
-
         # Every System of a differentiable scene supports gradients, which it declares
+        self._replayed_systems: list[System] = []
         if self._requires_grad:
             unsupported_names = [type(system).__name__ for system in self._systems if not system.is_differentiable]
             if unsupported_names:
                 gs.raise_exception(
                     f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
                 )
+            # The Systems whose state the backward pass of a step replays it from: the solvers tracking gradients, and
+            # the other Systems holding state, such as the warm starts of the collision detection and of the solve
+            self._replayed_systems = [
+                system
+                for system in self.checkpointed_systems
+                if (
+                    system.requires_grad
+                    if isinstance(system, Solver)
+                    else any([isinstance(item, DataItem) and item.kind == DataKind.STATE for item in system.data])
+                )
+            ]
 
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
