@@ -17,7 +17,7 @@ from genesis.engine.states.solvers import MPMSolverState
 from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
+from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.misc import qd_isfinite, qd_to_torch
 
 from .base_solver import FRAMES, MaterialDispatcher, func_flag_error
@@ -46,7 +46,7 @@ GRID_X = Size("grid_x")
 GRID_Y = Size("grid_y")
 GRID_Z = Size("grid_z")
 # The scratch of the sparse reset of the grid, without gradient alone (see MPMGrid)
-SPARSE_GRID_RESET = Label("sparse_grid_reset")
+SPARSE_GRID_RESET = "sparse_grid_reset"
 
 
 class MPMParticles(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):

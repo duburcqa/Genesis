@@ -15,7 +15,7 @@ from quadrants.algorithms import sort, sort_scratch_slots
 
 import genesis as gs
 import genesis.utils.linalg as lu
-from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, StructSpec, field
+from genesis.utils.data import Data, DataKind, Size, StaticConfig, StructSpec, field
 from genesis.utils.misc import get_gpu_core_count
 
 
@@ -50,9 +50,9 @@ SORT_KEYS = Size("sort_keys")
 SORT_SLOTS = Size("sort_slots")
 SORT_CHUNKS = Size("sort_chunks")
 # The values moved along the keys, and the scratch of each sort (see SEGMENT_SORT_KIND)
-SORT_VALUES = Label("sort_values")
-DEVICE_RADIX_SORT = Label("device_radix_sort")
-SEGMENT_RADIX_SORT = Label("segment_radix_sort")
+SORT_VALUES = "sort_values"
+DEVICE_RADIX_SORT = "device_radix_sort"
+SEGMENT_RADIX_SORT = "segment_radix_sort"
 
 
 class SegmentSortBuffer(Data, kind=DataKind.SCRATCH, shape=(SORT_KEYS,)):

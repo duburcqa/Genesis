@@ -172,31 +172,6 @@ class SizeExpr(_SizeArithmetic):
 ENVS = Size("envs")
 
 
-class Label:
-    """
-    A family of arrays sharing runtime properties, which the constructor of a struct sets at once (see Data).
-
-    A label equals its name, so the property tables of a constructor take either.
-    """
-
-    __slots__ = ("_value",)
-
-    def __init__(self, value: str):
-        self._value = value
-
-    def __eq__(self, other):
-        return str(self) == str(other) if isinstance(other, (Label, str)) else NotImplemented
-
-    def __hash__(self):
-        return hash(self._value)
-
-    def __str__(self):
-        return self._value
-
-    def __repr__(self):
-        return f"Label({self._value!r})"
-
-
 class FieldRef:
     """
     A reference to a field of a struct, through the class attribute of the same name (see Data).
@@ -232,7 +207,7 @@ class _FieldSpec(NamedTuple):
     dtype: Any = None
     shape: tuple | None = None
     kind: "DataKind | None" = None
-    labels: tuple[Label, ...] = ()
+    labels: tuple[str, ...] = ()
     grad: bool = False
     ndarray: bool = False
     oversize_hint: str = ""
@@ -243,7 +218,7 @@ def field(
     *,
     shape: "tuple[Size | int, ...] | None" = None,
     kind: "DataKind | None" = None,
-    labels: "Label | str | tuple[Label | str, ...]" = (),
+    labels: str | tuple[str, ...] = (),
     grad: bool = False,
     ndarray: bool = False,
     oversize_hint: str = "",
@@ -261,7 +236,7 @@ def field(
     array too large for a backend to address raises at allocation, with `oversize_hint` appended to the message, for
     instance the options shrinking it.
     """
-    labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
+    labels = labels if isinstance(labels, tuple) else (labels,)
     spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, oversize_hint)
     return dataclasses.field(metadata={_SPEC: spec})
 
@@ -274,7 +249,7 @@ class _Node(NamedTuple):
     spec: _FieldSpec
     kind: "DataKind"
     shape: tuple
-    labels: tuple[Label, ...]
+    labels: tuple[str, ...]
 
     @property
     def is_constant(self) -> bool:
@@ -380,7 +355,7 @@ class Data:
                             if (*scope, *item._path) not in paths:
                                 raise TypeError(f"{name}() '{table_name}' selects {item}, which is no field of it.")
                         elif item is not None and not any(
-                            [Label(str(item)) in leaf.labels for leaf in leaves if leaf.path[: len(scope)] == scope]
+                            [item in leaf.labels for leaf in leaves if leaf.path[: len(scope)] == scope]
                         ):
                             raise TypeError(
                                 f"{name}() '{table_name}' selects the label {item}, which no array carries."
@@ -497,7 +472,7 @@ class StructSpec(NamedTuple):
 
     config: StaticConfig
     sizes: dict[str, Any]
-    unused: dict[Label | FieldRef | None, Any]
+    unused: dict[str | FieldRef | None, Any]
 
 
 def _resolve_type(annotation: Any, owner: type) -> Any:
@@ -590,7 +565,7 @@ def _selection_depth(scope, items, leaf) -> int | None:
         elif isinstance(item, FieldRef):
             if leaf.path[len(scope) : len(scope) + len(item._path)] == item._path:
                 depths.append(len(scope) + len(item._path))
-        elif Label(str(item)) in leaf.labels:
+        elif item in leaf.labels:
             depths.append(-1)
     return max(depths, default=None)
 

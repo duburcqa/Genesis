@@ -8,7 +8,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import EDGES, VFACES, VVERTS
-from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
+from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 
 
 class RigidErrorCode(IntEnum):
@@ -39,11 +39,11 @@ TREES = Size("trees")
 TREES_LEVELS_LINKS = Size("trees_levels_links")
 CHILD_LINKS = Size("child_links")
 # The arrays of the dynamics, which a kinematic-only solver never reads
-DYNAMICS = Label("dynamics")
+DYNAMICS = "dynamics"
 # The tables of the level sweep (see trees_levels_links_idx)
-LEVEL_SWEEP = Label("level_sweep")
+LEVEL_SWEEP = "level_sweep"
 # The scratch of the register-tiled mass factor (see mass_mat_tiled_scratch)
-TILED_MASS = Label("tiled_mass")
+TILED_MASS = "tiled_mass"
 
 
 class RigidInfo(Data, kind=DataKind.CONSTANT):
@@ -154,25 +154,25 @@ NOSLIP_LANES = Size("noslip_lanes")
 TILE_CLASSES = Size("tile_classes")
 # The rows of the constraint state and of the islands the cooperative kernels read, one env per block, which they
 # read from consecutive addresses once stored environment-first
-COOPERATIVE_ROWS = Label("cooperative_rows")
+COOPERATIVE_ROWS = "cooperative_rows"
 # The Jacobian rows, which the cooperative kernels and serialized execution read whole for one env (see jac)
-JACOBIAN_ROWS = Label("jacobian_rows")
+JACOBIAN_ROWS = "jacobian_rows"
 # The rows serialized execution reads env by env, in the outermost loop of every constraint kernel
-SERIAL_ROWS = Label("serial_rows")
-NEWTON = Label("newton")
-CONE_INCREMENTAL = Label("cone_incremental")
-SIGNORINI = Label("signorini")
-CONE_FREE_REUSE = Label("cone_free_reuse")
-NOSLIP = Label("noslip")
-NOSLIP_COOPERATIVE = Label("noslip_cooperative")
-HIBERNATION = Label("hibernation")
+SERIAL_ROWS = "serial_rows"
+NEWTON = "newton"
+CONE_INCREMENTAL = "cone_incremental"
+SIGNORINI = "signorini"
+CONE_FREE_REUSE = "cone_free_reuse"
+NOSLIP = "noslip"
+NOSLIP_COOPERATIVE = "noslip_cooperative"
+HIBERNATION = "hibernation"
 # The reverse Cuthill-McKee tree reorder of the CPU per-island skyline path (see rcm_tree_pos)
-RCM = Label("rcm")
+RCM = "rcm"
 # The contact lists of the islands, of the skyline reorder or of the cooperative contact sort (see contact_id)
-ISLAND_CONTACTS = Label("island_contacts")
-WORKLISTS = Label("worklists")
+ISLAND_CONTACTS = "island_contacts"
+WORKLISTS = "worklists"
 # The buffers of the backward pass of the constraint solve
-BACKWARD = Label("backward")
+BACKWARD = "backward"
 
 
 class IslandSlices(Data, kind=DataKind.SCRATCH, shape=(TREES, ENVS)):
@@ -352,7 +352,7 @@ class IKScratch(Data, kind=DataKind.SCRATCH):
 
 
 # The scratch of the kinematics queries, over the dofs of the widest entity of the solver (see ENTITY_DOFS)
-KINEMATICS = Label("kinematics")
+KINEMATICS = "kinematics"
 
 
 class KinematicsScratch(Data, kind=DataKind.SCRATCH):
@@ -500,17 +500,17 @@ CONTACT_SLOTS = Size("contact_slots")
 # Threads of the terrain pass, each testing the prism under one triangle
 TERRAIN_THREADS = Size("terrain_threads")
 # The scratch of the box-box detection
-BOX_BOX = Label("box_box")
+BOX_BOX = "box_box"
 # The contact cache, which the convex-convex detection alone reads
-CONTACT_CACHE = Label("contact_cache")
+CONTACT_CACHE = "contact_cache"
 # The inputs of the differentiable contact detection, which the backward pass reads
-DIFF_CONTACTS = Label("diff_contacts")
+DIFF_CONTACTS = "diff_contacts"
 # The work queue of the split narrowphase and of the terrain pass, its contact slots, and the status of each slot
-WORK_QUEUE = Label("work_queue")
-SPLIT_NARROWPHASE = Label("split_narrowphase")
-PERTURBED_SLOTS = Label("perturbed_slots")
+WORK_QUEUE = "work_queue"
+SPLIT_NARROWPHASE = "split_narrowphase"
+PERTURBED_SLOTS = "perturbed_slots"
 # The scratch of the link-pair contact pruning, read by the threads of the block running an environment
-PRUNING = Label("pruning")
+PRUNING = "pruning"
 
 
 class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS)):
@@ -708,7 +708,7 @@ POLYTOPE_HORIZONS = POLYTOPE_VERTS + 1
 PAIR_CONTACTS = Size("pair_contacts")
 POLYGON_VERTS = Size("polygon_verts")
 # The arrays of the EPA, of the multi-contact detection and of their results, which the overlap test never reads
-EPA = Label("epa")
+EPA = "epa"
 
 
 class MDVertex(Data, kind=DataKind.SCRATCH):
@@ -968,7 +968,7 @@ JOINTS_INFO_ENVS = Size("joints_info_envs")
 # The backward slots of a link, one per joint plus the link itself
 LINK_BW_SLOTS = Size("link_bw_slots")
 # The arrays the midpoint integration of free bodies reads (see func_midpoint_free_body)
-MIDPOINT = Label("midpoint")
+MIDPOINT = "midpoint"
 
 
 class DofsInfo(Data, kind=DataKind.INFO, shape=(DOFS, DOFS_INFO_ENVS)):

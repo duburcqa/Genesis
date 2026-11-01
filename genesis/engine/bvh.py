@@ -13,7 +13,7 @@ from enum import IntEnum
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import Data, DataKind, Label, Size, StaticConfig, StructSpec, field
+from genesis.utils.data import Data, DataKind, Size, StaticConfig, StructSpec, field
 from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
 
 
@@ -48,7 +48,7 @@ BVH_LEAVES = Size("bvh_leaves")
 # Lanes reducing the extent of one tree, each over a strided slice of its leaves, folded by one thread per tree
 EXTENT_LANES = 64
 # The scratch of the fit sweeping the nodes level by level (see BVH_FIT_KIND)
-BLOCK_SWEEP_FIT = Label("block_sweep_fit")
+BLOCK_SWEEP_FIT = "block_sweep_fit"
 
 
 class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
