@@ -19,7 +19,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, GeomsInfo, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, HibernationState, LinksState, RigidInfo
 from genesis.grad.bridge import reversed_with
 from genesis.utils.array_class import ConstraintState, DynInfo, DynState, LinksState, RigidInfo
 
@@ -103,13 +103,13 @@ def kernel_compute_mass_matrix(
 @qd.func
 def func_forward_dynamics(
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
+    func_torque_and_passive_force(dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_compute_mass_matrix_and_link_force(
         dyn_state,
@@ -131,12 +131,12 @@ def func_forward_dynamics(
 @qd.kernel(fastcache=True)
 def kernel_forward_dynamics(
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+    func_forward_dynamics(dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
 @reversed_with(is_backward=True)
@@ -1604,7 +1604,7 @@ def kernel_refresh_invweight_and_meaninertia(
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -1622,8 +1622,8 @@ def kernel_refresh_invweight_and_meaninertia(
         for i_l, i_b_ in qd.ndrange(dyn_info.links.parent_idx.shape[0], envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
             if dyn_state.links.is_hibernated[i_l, i_b]:
-                i_is = constraint_state.island.links_island_idx[i_l, i_b]
-                func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                i_is = hibernation_state.links_island_idx[i_l, i_b]
+                func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
     func_enter_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 
@@ -1668,7 +1668,7 @@ def kernel_refresh_invweight_and_meaninertia(
 @qd.func
 def func_torque_and_passive_force(
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -1770,8 +1770,8 @@ def func_torque_and_passive_force(
                 # Actuation on a sleeping link wakes its island, the unit that sleeps and wakes together (see
                 # func_wakeup_island, whose atomic claim serves the links of one island waking it at once)
                 if wakeup and dyn_state.links.is_hibernated[i_l, i_b]:
-                    i_is = constraint_state.island.links_island_idx[i_l, i_b]
-                    func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                    i_is = hibernation_state.links_island_idx[i_l, i_b]
+                    func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
@@ -2460,7 +2460,7 @@ def kernel_integrate(
 @qd.kernel(fastcache=True)
 def kernel_forward_dynamics_without_qacc(
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -2474,7 +2474,7 @@ def kernel_forward_dynamics_without_qacc(
     in manual_bw.py), skipping the LDL^T factor chain. Quadrants autodiff reverses the mass matrix computed here back
     to the poses of the links.
     """
-    func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
+    func_torque_and_passive_force(dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_compute_mass_matrix_and_link_force(
         dyn_state,

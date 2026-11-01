@@ -201,7 +201,7 @@ class FieldRef:
     """
     A reference to a field of a struct, through the class attribute of the same name (see Data).
 
-    A reference to a member reaches its fields as attributes in turn, `ConstraintState.island.link_id`, and selects
+    A reference to a member reaches its fields as attributes in turn, `ConstraintState.island.dof_id`, and selects
     every array of the member in the property tables of the constructor.
     """
 

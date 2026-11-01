@@ -15,7 +15,14 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import (
+    ColliderState,
+    ConstraintState,
+    DynInfo,
+    DynState,
+    HibernationState,
+    RigidInfo,
+)
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
 from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
@@ -168,7 +175,7 @@ def kernel_wake_up_entities_by_links(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -183,10 +190,10 @@ def kernel_wake_up_entities_by_links(
         i_l = links_idx[i_l_]
         if dyn_state.links.is_hibernated[i_l, i_b]:
             func_wakeup_island(
-                constraint_state.island.links_island_idx[i_l, i_b],
+                hibernation_state.links_island_idx[i_l, i_b],
                 i_b,
                 dyn_state,
-                constraint_state,
+                hibernation_state,
                 dyn_info,
                 rigid_info,
                 rigid_config,
@@ -198,6 +205,7 @@ def kernel_wake_up_entities_held_by_links(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -233,8 +241,8 @@ def kernel_wake_up_entities_held_by_links(
                     i_sleeper = i_la
                 if i_sleeper >= 0:
                     if dyn_state.links.is_hibernated[i_sleeper, i_b]:
-                        i_is = constraint_state.island.links_island_idx[i_sleeper, i_b]
-                        func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                        i_is = hibernation_state.links_island_idx[i_sleeper, i_b]
+                        func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -242,7 +250,7 @@ def kernel_wake_up_entities_by_dofs(
     dofs_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -257,10 +265,10 @@ def kernel_wake_up_entities_by_dofs(
 
         if dyn_state.dofs.is_hibernated[i_d, i_b]:
             func_wakeup_island(
-                constraint_state.island.dofs_island_idx[i_d, i_b],
+                hibernation_state.dofs_island_idx[i_d, i_b],
                 i_b,
                 dyn_state,
-                constraint_state,
+                hibernation_state,
                 dyn_info,
                 rigid_info,
                 rigid_config,
@@ -272,7 +280,7 @@ def kernel_wake_up_entities_by_qs(
     qs_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -289,10 +297,10 @@ def kernel_wake_up_entities_by_qs(
             if dyn_info.links.q_start[I_l] <= i_q and i_q < dyn_info.links.q_end[I_l]:
                 if dyn_state.links.is_hibernated[i_l, i_b]:
                     func_wakeup_island(
-                        constraint_state.island.links_island_idx[i_l, i_b],
+                        hibernation_state.links_island_idx[i_l, i_b],
                         i_b,
                         dyn_state,
-                        constraint_state,
+                        hibernation_state,
                         dyn_info,
                         rigid_info,
                         rigid_config,
@@ -347,7 +355,7 @@ def func_wakeup_links_island(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -359,8 +367,8 @@ def func_wakeup_links_island(
             i_b = envs_idx[i_b_]
             i_l = links_idx[i_l_]
             if dyn_state.links.is_hibernated[i_l, i_b]:
-                i_is = constraint_state.island.links_island_idx[i_l, i_b]
-                func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                i_is = hibernation_state.links_island_idx[i_l, i_b]
+                func_wakeup_island(i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -371,7 +379,7 @@ def kernel_set_links_mass(
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -381,7 +389,7 @@ def kernel_set_links_mass(
 ):
     # Waking here rather than from a kernel of its own: a setter that reaches a sleeping body is one launch, and the
     # weighing below reads the tree at its neutral configuration, which the sleeping bodies are not carried to.
-    func_wakeup_links_island(links_idx, envs_idx, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+    func_wakeup_links_island(links_idx, envs_idx, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
     # Shared link info holds one value for every environment, so it is written once: scaling what is already there is
     # not idempotent, and a loop over the batch would apply the ratio once per environment.
@@ -419,14 +427,14 @@ def kernel_set_links_COM(
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     refresh_position: qd.template(),
     refresh_velocity: qd.template(),
 ):
-    func_wakeup_links_island(links_idx, envs_idx, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+    func_wakeup_links_island(links_idx, envs_idx, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
     # Shared link info holds one value for every environment, so it is written once. See kernel_set_links_mass.
     if qd.static(rigid_config.batch_links_info):
@@ -463,13 +471,13 @@ def kernel_set_links_inertia(
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: DynState,
-    constraint_state: ConstraintState,
+    hibernation_state: HibernationState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     refresh_position: qd.template(),
 ):
-    func_wakeup_links_island(links_idx, envs_idx, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+    func_wakeup_links_island(links_idx, envs_idx, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config)
 
     # Shared link info holds one value for every environment, so it is written once. See kernel_set_links_mass.
     if qd.static(rigid_config.batch_links_info):

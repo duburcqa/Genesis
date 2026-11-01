@@ -3,7 +3,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, HibernationState, RigidInfo
 from genesis.utils.misc import qd_to_torch
 
 from . import linesearch, solver
@@ -127,6 +127,7 @@ def _func_update_constraint_forces_batch(
 @qd.func
 def _func_update_qfrc_constraint_per_dof(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     rigid_config: qd.template(),
     update_gradient: qd.template(),
@@ -156,7 +157,7 @@ def _func_update_qfrc_constraint_per_dof(
             con_base = 0
             con_n = constraint_state.n_constraints[i_b]
             if qd.static(not rigid_config.is_single_island):
-                i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
+                i_island = hibernation_state.dofs_island_idx[i_d, i_b]
                 is_island_moving = constraint_state.island.improved[i_island, i_b]
                 con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
                 con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
@@ -200,6 +201,7 @@ def _func_update_gradient(
 def _func_islands_linesearch_and_apply(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -259,6 +261,7 @@ def _func_islands_linesearch_and_apply(
                     sh_pending,
                     sh_alpha,
                     dyn_state,
+                    hibernation_state,
                     constraint_state,
                     rigid_info,
                     rigid_config,
@@ -278,6 +281,7 @@ def _func_islands_linesearch_and_apply(
 def _func_islands_update_search_direction(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -307,7 +311,16 @@ def _func_islands_update_search_direction(
                 sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
                 sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
                 improved = linesearch.func_exit_islands_coop(
-                    i_b, tid, sh_acc, sh_pending, sh_alpha, constraint_state, rigid_info, rigid_config, certify=False
+                    i_b,
+                    tid,
+                    sh_acc,
+                    sh_pending,
+                    sh_alpha,
+                    hibernation_state,
+                    constraint_state,
+                    rigid_info,
+                    rigid_config,
+                    certify=False,
                 )
                 if tid == 0:
                     constraint_state.improved[i_b] = improved
@@ -330,6 +343,7 @@ def _func_islands_update_search_direction(
 def _kernel_solve_graph(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -337,14 +351,18 @@ def _kernel_solve_graph(
 ):
     while qd.graph.do_while(graph_counter):
         # Every island's line search in lockstep, the step applied and the CG gradients saved per island
-        _func_islands_linesearch_and_apply(graph_counter, dyn_state, constraint_state, rigid_info, rigid_config)
+        _func_islands_linesearch_and_apply(
+            graph_counter, dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config
+        )
         if qd.static(not rigid_config.enable_cooperative_constraint_kernels):
             _func_update_constraint_forces(constraint_state, rigid_config)
         # The tiled Newton factor below reads the gradient alone, so the thread of a dof forms it with its force
         is_tiled_newton = qd.static(
             rigid_config.solver_type == gs.constraint_solver.Newton and not rigid_config.has_per_env_solve_seed
         )
-        _func_update_qfrc_constraint_per_dof(dyn_state, constraint_state, rigid_config, update_gradient=is_tiled_newton)
+        _func_update_qfrc_constraint_per_dof(
+            dyn_state, hibernation_state, constraint_state, rigid_config, update_gradient=is_tiled_newton
+        )
         if qd.static(is_tiled_newton):
             # Every island's Hessian block maintained in nt_H, patched with the rows whose active state flipped, then a
             # tiled factor + solve of every island in its own shared tile, which reads the block without consuming it,
@@ -354,8 +372,10 @@ def _kernel_solve_graph(
             solver.func_island_tiled_factor_solve_all(constraint_state, rigid_info, rigid_config, write_L=False)
             solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=True)
         else:
-            _func_update_gradient(dyn_state, constraint_state, rigid_info, rigid_config)
-        _func_islands_update_search_direction(graph_counter, constraint_state, rigid_info, rigid_config)
+            _func_update_gradient(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+        _func_islands_update_search_direction(
+            graph_counter, dyn_state, hibernation_state, constraint_state, rigid_info, rigid_config
+        )
 
 
 @solver.func_solve_body.register(
@@ -364,7 +384,9 @@ def _kernel_solve_graph(
         and rigid_config.prefer_decomposed_solver != 0
     )
 )
-def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
+def func_solve_decomposed(
+    dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations
+):
     """
     GPU graph accelerated solver loop with parallel grid-search linesearch and GPU-side iteration via graph.do_while.
 
@@ -379,7 +401,9 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
     in rigid/data.py): the seed and every factor then run one env per thread.
     """
     # The graph maintains the assembled Hessian in nt_H, so the seed leaves it there (write_L=False).
-    solver.func_solve_init(dyn_state, constraint_state, rigid_info, rigid_config, write_L=False)
+    solver.func_solve_init(
+        dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=False
+    )
     if _n_iterations <= 0:
         return
     if gs.use_zerocopy:
@@ -389,4 +413,12 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
             torch.mps.synchronize()
     else:
         constraint_state.graph_counter.fill(_n_iterations)
-    _kernel_solve_graph(constraint_state.graph_counter, dyn_state, constraint_state, rigid_info, rigid_config)
+    _kernel_solve_graph(
+        constraint_state.graph_counter,
+        dyn_state,
+        hibernation_state,
+        constraint_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+    )

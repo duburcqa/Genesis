@@ -12,7 +12,13 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.pipeline import Phase, Stages, System
-from genesis.engine.solvers.rigid.data import DataManager, RigidErrorCode, RigidSimStaticConfig, cholesky_tile_size_for
+from genesis.engine.solvers.rigid.data import (
+    DataManager,
+    HibernationState,
+    RigidErrorCode,
+    RigidSimStaticConfig,
+    cholesky_tile_size_for,
+)
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SystemCheckpoint
 from genesis.engine.step import Completion
@@ -20,7 +26,7 @@ from genesis.grad.bridge import is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
-from genesis.utils.data import ConfigItem, DataItem
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -346,6 +352,30 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             force_update_all_geoms=True,
             is_backward=False,
         )
+
+        # A static link belongs to no tree, so the partition build labels it with no island (see func_build_islands):
+        # its slot of links_island_idx holds -1 for the life of the scene. The hibernated-island daisy chain must start
+        # empty (-1 = no successor); it persists across steps, written when an island hibernates and cleared on wakeup.
+        self.hibernation_state.links_island_idx.fill(-1)
+        if self._use_hibernation:
+            self.hibernation_state.hibernated_next_link.fill(-1)
+            # A single-island scene keeps one island holding the links of its one tree, which the sleep and wake paths
+            # read: the list is written once here, and the partition build leaves it (see func_build_single_island).
+            if self.rigid_config.is_single_island:
+                links_idx = np.flatnonzero(qd_to_numpy(self.rigid_info.links_tree_idx) == 0)
+                link_id = qd_to_numpy(self.hibernation_state.link_id)
+                link_id[: len(links_idx)] = links_idx[:, None]
+                self.hibernation_state.link_id.from_numpy(link_id)
+                links_island_idx = qd_to_numpy(self.hibernation_state.links_island_idx)
+                links_island_idx[links_idx] = 0
+                self.hibernation_state.links_island_idx.from_numpy(links_island_idx)
+                for link_slice in (
+                    self.hibernation_state.link_slices.n,
+                    self.hibernation_state.link_slices.curr,
+                ):
+                    link_slice_np = qd_to_numpy(link_slice)
+                    link_slice_np[0] = len(links_idx)
+                    link_slice.from_numpy(link_slice_np)
 
         self._init_collider()
         self._init_constraint_solver()
@@ -784,6 +814,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
+        self.hibernation_state = HibernationState(
+            sizes=dict(envs=self._B, links=self.n_links_, dofs=self.n_dofs_, trees=self.n_trees_),
+            env_first=dict(cooperative_rows=self.rigid_config.constraint_layout_batch_first),
+            unused=dict(hibernation=not self._use_hibernation),
+        )
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
 
@@ -954,7 +989,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             jac_row,
             solve_out,
             self.dyn_state,
-            self.constraint_solver.constraint_state,
+            self.hibernation_state,
             self.dyn_info,
             self.rigid_info,
             self.rigid_config,
@@ -1417,6 +1452,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 enable_collision=self._enable_collision,
             )
 
+    def _func_forward_dynamics(self):
+        kernel_forward_dynamics(
+            self.dyn_state,
+            self.hibernation_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+        )
+
+    def _func_update_acc(self):
+        kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+
+    def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
+        func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
+
     @mutates()
     def apply_links_external_wrench(
         self,
@@ -1484,7 +1534,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 links_idx,
                 envs_idx,
                 self.dyn_state,
-                self.constraint_solver.constraint_state,
+                self.hibernation_state,
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
@@ -1623,11 +1673,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 dofs_hibernated_dst = qd_to_torch(self.dyn_state.dofs.is_hibernated, transpose=True, copy=False)
                 geoms_hibernated_dst = qd_to_torch(self.dyn_state.geoms.is_hibernated, transpose=True, copy=False)
                 entities_hibernated_dst = qd_to_torch(self.dyn_state.entities.is_hibernated, transpose=True, copy=False)
-                islands_hibernated_dst = qd_to_torch(
-                    self.constraint_solver.constraint_state.island.is_hibernated, transpose=True, copy=False
-                )
+                islands_hibernated_dst = qd_to_torch(self.hibernation_state.is_hibernated, transpose=True, copy=False)
                 islands_next_link_dst = qd_to_torch(
-                    self.constraint_solver.constraint_state.island.hibernated_next_link, transpose=True, copy=False
+                    self.hibernation_state.hibernated_next_link, transpose=True, copy=False
                 )
                 n_awake_dofs_dst = qd_to_torch(self.rigid_info.n_awake_dofs, copy=False)
 
@@ -1707,7 +1755,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 kernel_reset_hibernation(
                     envs_idx,
                     self.dyn_state,
-                    self.constraint_solver.constraint_state,
+                    self.hibernation_state,
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
@@ -1725,6 +1773,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         yield from super().data
+        yield from iter_data(self, "hibernation_state")
         yield from self.collider.data
         yield from self.constraint_solver.data
 
@@ -1852,7 +1901,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         links_idx,
                         envs_idx,
                         self.dyn_state,
-                        self.constraint_solver.constraint_state,
+                        self.hibernation_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -1862,6 +1911,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         links_idx,
                         envs_idx,
                         self.dyn_state,
+                        self.hibernation_state,
                         self.collider.collider_state,
                         self.constraint_solver.constraint_state,
                         self.dyn_info,
@@ -1998,7 +2048,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         links_idx,
                         envs_idx,
                         self.dyn_state,
-                        self.constraint_solver.constraint_state,
+                        self.hibernation_state,
                         self.dyn_info,
                         self.rigid_info,
                         self.rigid_config,
@@ -2008,6 +2058,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                         links_idx,
                         envs_idx,
                         self.dyn_state,
+                        self.hibernation_state,
                         self.collider.collider_state,
                         self.constraint_solver.constraint_state,
                         self.dyn_info,
@@ -2121,7 +2172,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.data_manager.weight_scratch.jac_row,
                 self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
-                self.constraint_solver.constraint_state,
+                self.hibernation_state,
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
@@ -2137,7 +2188,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.data_manager.weight_scratch.jac_row,
                 self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
-                self.constraint_solver.constraint_state,
+                self.hibernation_state,
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
@@ -2152,7 +2203,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.data_manager.weight_scratch.jac_row,
                 self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
-                self.constraint_solver.constraint_state,
+                self.hibernation_state,
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
@@ -2256,7 +2307,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                     qs_idx,
                     envs_idx,
                     self.dyn_state,
-                    self.constraint_solver.constraint_state,
+                    self.hibernation_state,
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
@@ -2491,7 +2542,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 dofs_idx,
                 envs_idx,
                 self.dyn_state,
-                self.constraint_solver.constraint_state,
+                self.hibernation_state,
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,

@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.simt as su
-from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynState, HibernationState, RigidInfo
 
 
 @qd.func
@@ -545,6 +545,7 @@ def func_dual_finish_batch(
 @qd.func
 def func_noslip(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
@@ -575,7 +576,7 @@ def func_noslip(
         if i_island < constraint_state.island.n_islands[i_b]:
             run_island = True
             if qd.static(rigid_config.use_hibernation):
-                run_island = not constraint_state.island.is_hibernated[i_island, i_b]
+                run_island = not hibernation_state.is_hibernated[i_island, i_b]
             if run_island:
                 n_colors = 1
                 if qd.static(rigid_config.enable_cooperative_noslip):

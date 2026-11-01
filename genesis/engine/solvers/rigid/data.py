@@ -186,6 +186,27 @@ class IslandSlices(Data, kind=DataKind.SCRATCH, shape=(TREES, ENVS)):
     start: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
 
 
+class HibernationState(Data, kind=DataKind.SCRATCH):
+    """
+    The islands the links and dofs of the rigid solver belong to in each environment, and which of them sleep.
+
+    The constraint solver rebuilds the islands every step (see island.py). The rigid solver reads them to wake the
+    island of a body its setters move.
+    """
+
+    # The island of each link and of each dof, -1 for a static link and for a dof-less tree and its links. link_slices
+    # maps an island to its slice of link_id.
+    links_island_idx: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=COOPERATIVE_ROWS)
+    dofs_island_idx: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    link_slices: IslandSlices = field(labels=HIBERNATION)
+    link_id: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=(COOPERATIVE_ROWS, HIBERNATION))
+    # is_hibernated marks an island whose every link is asleep. hibernated_next_link chains the links of a sleeping
+    # component, which the partition build re-unions before labeling, so the component stays one island across steps
+    # although its bodies generate no live contacts.
+    is_hibernated: qd.Tensor = field(int, shape=(TREES, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
+    hibernated_next_link: qd.Tensor = field(int, shape=(LINKS, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
+
+
 class IslandState(Data, kind=DataKind.SCRATCH):
     """
     The partition of the kinematic trees of each environment into islands, with the per-island lists of links, dofs,
@@ -194,21 +215,16 @@ class IslandState(Data, kind=DataKind.SCRATCH):
 
     # Partition of the dof-carrying kinematic trees (see trees_root_idx in RigidInfo) into islands, the connected
     # components of the trees under the contact, equality and hibernation couplings, rebuilt every step by island.py.
-    # trees_parent_idx is the union-find forest over the trees, trees_island_idx the island of each tree and
-    # links_island_idx that of each link, -1 for a static link and for a dof-less tree and its links. link_slices maps
-    # an island to its slice of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending
-    # unless the CPU skyline path reorders it by contact adjacency).
+    # trees_parent_idx is the union-find forest over the trees and trees_island_idx the island of each tree (see
+    # HibernationState for the islands of the links and the dofs). dof_slices maps an island to its slice of dof_id
+    # (island-local dof -> global dof, ascending unless the CPU skyline path reorders it by contact adjacency).
     trees_parent_idx: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
     trees_island_idx: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
-    links_island_idx: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=COOPERATIVE_ROWS)
     n_islands: qd.Tensor = field(int, shape=(ENVS,))
-    link_slices: IslandSlices = field(labels=HIBERNATION)
-    link_id: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=(COOPERATIVE_ROWS, HIBERNATION))
     dof_slices: IslandSlices
     dof_id: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Inverse of dof_id: dof_local_pos[d] is the island-local position of global dof d
     dof_local_pos: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
-    dofs_island_idx: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # First dof of an island whose dof list holds consecutive dofs in ascending order, -1 otherwise (see func_list_item
     # in linesearch.py).
     dof_range_start: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
@@ -228,11 +244,6 @@ class IslandState(Data, kind=DataKind.SCRATCH):
     constraint_id: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Island of each constraint, -1 for one touching no island
     constraint_island_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
-    # is_hibernated marks an island whose every link is asleep. hibernated_next_link chains the links of a sleeping
-    # component, which the partition build re-unions before labeling, so the component stays one island across steps
-    # although its bodies generate no live contacts.
-    is_hibernated: qd.Tensor = field(int, shape=(TREES, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
-    hibernated_next_link: qd.Tensor = field(int, shape=(LINKS, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
     # (env, island) work-lists of the cooperative per-island factor+solve, one per island size class (see
     # island_tile_caps): class c holds its factor_worklist_size[c] awake islands in its own region of the two index
     # lists, of n_trees * _B slots each, in the order of the atomic reservation of the partition pass. Read where an env

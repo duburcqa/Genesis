@@ -24,7 +24,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd.misc import func_list_item, func_list_range_start
-from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, HibernationState, RigidInfo
 
 from . import solver as constraint_solver
 
@@ -1196,6 +1196,7 @@ def func_linesearch_islands_coop(
     sh_pending,
     sh_alpha,
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -1312,7 +1313,7 @@ def func_linesearch_islands_coop(
                     i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     i_slot = 0
                     if n_group > 1:
-                        i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
+                        i_slot = hibernation_state.dofs_island_idx[i_d, i_b] - base
                     if constraint_state.island.improved[base + i_slot, i_b]:
                         terms_dofs = func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state, rigid_config)
                 i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
@@ -1530,7 +1531,7 @@ def func_linesearch_islands_coop(
                 i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                 i_slot = 0
                 if n_group > 1:
-                    i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
+                    i_slot = hibernation_state.dofs_island_idx[i_d, i_b] - base
                 alpha = sh_alpha[i_slot]
                 constraint_state.qacc[i_d, i_b] = (
                     constraint_state.qacc[i_d, i_b] + constraint_state.search[i_d, i_b] * alpha
@@ -1562,6 +1563,7 @@ def func_exit_islands_coop(
     sh_acc,
     sh_pending,
     sh_alpha,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -1602,7 +1604,7 @@ def func_exit_islands_coop(
                 i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                 i_slot = 0
                 if n_group > 1:
-                    i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
+                    i_slot = hibernation_state.dofs_island_idx[i_d, i_b] - base
                 if constraint_state.island.improved[base + i_slot, i_b]:
                     terms = func_dof_exit_terms(i_d, i_b, constraint_state, rigid_config)
             i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
@@ -1635,7 +1637,7 @@ def func_exit_islands_coop(
                     i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     i_slot = 0
                     if n_group > 1:
-                        i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
+                        i_slot = hibernation_state.dofs_island_idx[i_d, i_b] - base
                     if sh_pending[i_slot] != 0:
                         if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
                             constraint_state.search[i_d, i_b] = -constraint_state.Mgrad[i_d, i_b]

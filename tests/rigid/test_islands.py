@@ -129,7 +129,7 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     solver = scene.rigid_solver
     island_state = solver.constraint_solver.constraint_state.island
 
-    island_idx = qd_to_numpy(island_state.links_island_idx)
+    island_idx = qd_to_numpy(solver.hibernation_state.links_island_idx)
     island_of = {
         name: island_idx[entity.base_link_idx]
         for name, entity in (

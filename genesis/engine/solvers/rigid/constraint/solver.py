@@ -23,6 +23,7 @@ from genesis.engine.solvers.rigid.data import (
     ConstraintState,
     DynInfo,
     DynState,
+    HibernationState,
     RigidErrorCode,
     RigidInfo,
     cholesky_packed_tile_shape,
@@ -177,7 +178,6 @@ class ConstraintSolver(System):
             sizes=dict(
                 envs=solver._B,
                 dofs=solver.n_dofs_,
-                links=solver.n_links_,
                 trees=solver.n_trees_,
                 constraints=self.len_constraints_,
                 contacts=rigid_solver._options.max_contacts,
@@ -201,7 +201,6 @@ class ConstraintSolver(System):
                 cone_free_reuse=not config.enable_cone_free_hessian_reuse,
                 noslip=solver._options.noslip_iterations == 0,
                 noslip_cooperative=not config.enable_cooperative_noslip,
-                hibernation=not solver._use_hibernation,
                 rcm=not config.sparse_solve,
                 island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
                 worklists=not (config.enable_tiled_island_seed and not config.is_single_island),
@@ -259,30 +258,6 @@ class ConstraintSolver(System):
             self.nt_vec = cs.nt_vec
 
         self.reset()
-
-        # A static link belongs to no tree, so the partition build labels it with no island (see func_build_islands):
-        # its slot of links_island_idx holds -1 for the life of the scene. The hibernated-island daisy chain must start
-        # empty (-1 = no successor); it persists across steps, written when an island hibernates and cleared on wakeup.
-        self.constraint_state.island.links_island_idx.fill(-1)
-        if self._solver._use_hibernation:
-            self.constraint_state.island.hibernated_next_link.fill(-1)
-            # A single-island scene keeps one island holding the links of its one tree, which the sleep and wake paths
-            # read: the list is written once here, and the partition build leaves it (see func_build_single_island).
-            if self._solver.rigid_config.is_single_island:
-                links_idx = np.flatnonzero(qd_to_numpy(self._solver.rigid_info.links_tree_idx) == 0)
-                link_id = qd_to_numpy(self.constraint_state.island.link_id)
-                link_id[: len(links_idx)] = links_idx[:, None]
-                self.constraint_state.island.link_id.from_numpy(link_id)
-                links_island_idx = qd_to_numpy(self.constraint_state.island.links_island_idx)
-                links_island_idx[links_idx] = 0
-                self.constraint_state.island.links_island_idx.from_numpy(links_island_idx)
-                for link_slice in (
-                    self.constraint_state.island.link_slices.n,
-                    self.constraint_state.island.link_slices.curr,
-                ):
-                    link_slice_np = qd_to_numpy(link_slice)
-                    link_slice_np[0] = len(links_idx)
-                    link_slice.from_numpy(link_slice_np)
 
     def reset(self, envs_idx=None):
         self._eq_const_info_cache.clear()
@@ -358,6 +333,7 @@ class ConstraintSolver(System):
     def add_inequality_constraints(self):
         kernel_add_inequality_constraints(
             self._solver.dyn_state,
+            self._solver.hibernation_state,
             self._collider.collider_state,
             self.constraint_state,
             self._solver.dyn_info,
@@ -371,6 +347,7 @@ class ConstraintSolver(System):
         self._eq_const_info_cache.clear()
         func_solve_body(
             self._solver.dyn_state,
+            self._solver.hibernation_state,
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
@@ -385,6 +362,7 @@ class ConstraintSolver(System):
         # done (monolith) or skipped (decomposed re-factors in-loop).
         func_solve_body(
             self._solver.dyn_state,
+            self._solver.hibernation_state,
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
@@ -393,6 +371,7 @@ class ConstraintSolver(System):
         )
         kernel_resolve_post(
             self._solver.dyn_state,
+            self._solver.hibernation_state,
             self._collider.collider_state,
             self.constraint_state,
             self._solver.dyn_info,
@@ -539,6 +518,7 @@ class ConstraintSolver(System):
             envs_idx,
             int(eq_type),
             self._solver.dyn_state,
+            self._solver.hibernation_state,
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
@@ -1583,6 +1563,7 @@ def kernel_add_equality_constraints(
 @qd.func
 def _sort_contacts_and_build_islands(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -1621,15 +1602,33 @@ def _sort_contacts_and_build_islands(
                 if qd.static(rigid_config.use_hibernation):
                     is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
-                    func_build_single_island_coop(i_b, tid, constraint_state, rigid_info, rigid_config)
+                    func_build_single_island_coop(
+                        i_b, tid, hibernation_state, constraint_state, rigid_info, rigid_config
+                    )
                 else:
                     if qd.static(rigid_config.use_hibernation):
                         func_build_islands_coop(
-                            i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                            i_b,
+                            tid,
+                            dyn_state,
+                            hibernation_state,
+                            collider_state,
+                            constraint_state,
+                            dyn_info,
+                            rigid_info,
+                            rigid_config,
                         )
             else:
                 func_build_islands_coop(
-                    i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                    i_b,
+                    tid,
+                    dyn_state,
+                    hibernation_state,
+                    collider_state,
+                    constraint_state,
+                    dyn_info,
+                    rigid_info,
+                    rigid_config,
                 )
             if qd.static(collider_config.has_non_box_plane_convex_convex):
                 qd.simt.block.sync()
@@ -1638,7 +1637,7 @@ def _sort_contacts_and_build_islands(
             if qd.static(not rigid_config.is_single_island):
                 i_island = tid
                 while i_island < constraint_state.island.n_islands[i_b]:
-                    func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
+                    func_append_factor_worklist(i_b, i_island, hibernation_state, constraint_state, rigid_config)
                     i_island = i_island + _K
     else:
         qd.loop_config(
@@ -1650,14 +1649,30 @@ def _sort_contacts_and_build_islands(
                 if qd.static(rigid_config.use_hibernation):
                     is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
-                    func_build_single_island(i_b, constraint_state, rigid_info, rigid_config)
+                    func_build_single_island(i_b, hibernation_state, constraint_state, rigid_info, rigid_config)
                 else:
                     if qd.static(rigid_config.use_hibernation):
                         func_build_islands(
-                            i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                            i_b,
+                            dyn_state,
+                            hibernation_state,
+                            collider_state,
+                            constraint_state,
+                            dyn_info,
+                            rigid_info,
+                            rigid_config,
                         )
             else:
-                func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                func_build_islands(
+                    i_b,
+                    dyn_state,
+                    hibernation_state,
+                    collider_state,
+                    constraint_state,
+                    dyn_info,
+                    rigid_info,
+                    rigid_config,
+                )
             if qd.static(collider_config.has_non_box_plane_convex_convex):
                 func_sort_contacts(
                     i_b,
@@ -1671,15 +1686,19 @@ def _sort_contacts_and_build_islands(
                     dyn_state.geoms.quat,
                 )
             if qd.static(rigid_config.sparse_solve and not has_trivial_partition):
-                func_reorder_island_dofs(i_b, collider_state, constraint_state, rigid_info)
+                func_reorder_island_dofs(i_b, hibernation_state, collider_state, constraint_state, rigid_info)
             if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
                 for i_island in range(constraint_state.island.n_islands[i_b]):
-                    func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
+                    func_append_factor_worklist(i_b, i_island, hibernation_state, constraint_state, rigid_config)
 
 
 @qd.func
 def func_append_factor_worklist(
-    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_config: qd.template()
+    i_b: int,
+    i_island: int,
+    hibernation_state: HibernationState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
 ):
     """Append island i_island of env i_b to the factor work-list of its size class, the smallest tile cap holding the
     island's dofs and the last class for the islands above every cap (see island_tile_caps).
@@ -1689,7 +1708,7 @@ def func_append_factor_worklist(
     """
     is_listed = True
     if qd.static(rigid_config.use_hibernation):
-        is_listed = constraint_state.island.is_hibernated[i_island, i_b] == 0
+        is_listed = hibernation_state.is_hibernated[i_island, i_b] == 0
     if is_listed:
         CAPS = qd.static(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
         N_CLASSES = qd.static(len(CAPS))
@@ -1707,6 +1726,7 @@ def func_append_factor_worklist(
 @qd.func
 def func_add_inequality_constraints(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -1722,7 +1742,14 @@ def func_add_inequality_constraints(
     # launch (see _sort_contacts_and_build_islands); the constraint grouping it feeds waits for the assembled
     # constraints, in func_solve_init.
     _sort_contacts_and_build_islands(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
+        dyn_state,
+        hibernation_state,
+        collider_state,
+        constraint_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+        collider_config,
     )
 
     add_frictionloss_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
@@ -1734,6 +1761,7 @@ def func_add_inequality_constraints(
 @qd.kernel(fastcache=True)
 def kernel_add_inequality_constraints(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -1743,7 +1771,14 @@ def kernel_add_inequality_constraints(
 ):
     """Run func_add_inequality_constraints on its own, outside the substep graph that captures it."""
     func_add_inequality_constraints(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
+        dyn_state,
+        hibernation_state,
+        collider_state,
+        constraint_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+        collider_config,
     )
 
 
@@ -2264,6 +2299,7 @@ def kernel_delete_dynamic_constraint(
     envs_idx: qd.types.ndarray(),
     eq_type: int,
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -2286,9 +2322,9 @@ def kernel_delete_dynamic_constraint(
                         if i_side == 1:
                             i_l = link_b
                         if dyn_state.links.is_hibernated[i_l, i_b]:
-                            i_is = constraint_state.island.links_island_idx[i_l, i_b]
+                            i_is = hibernation_state.links_island_idx[i_l, i_b]
                             func_wakeup_island(
-                                i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config
+                                i_is, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
                             )
                 if i_e < constraint_state.qd_n_equalities[i_b] - 1:
                     # Swap-remove must move the whole constraint record, not just its type,
@@ -5561,6 +5597,7 @@ def func_update_gradient_batch(
 @qd.func
 def func_update_gradient_no_solve(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -5579,7 +5616,7 @@ def func_update_gradient_no_solve(
     ):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
             # The gradient of an island standing still is kept (see improved in IslandState)
-            i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
+            i_island = hibernation_state.dofs_island_idx[i_d, i_b]
             if constraint_state.island.improved[i_island, i_b]:
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
@@ -5700,6 +5737,7 @@ def initialize_Ma(
 @qd.kernel(fastcache=True)
 def func_solve_init(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -5797,12 +5835,12 @@ def func_solve_init(
             sh_chunk = qd.simt.block.SharedArray((_K,), gs.qd_int)
             if tid == 0:
                 constraint_state.improved[i_b] = constraint_state.n_constraints[i_b] > 0
-            func_group_constraints_by_island_coop(i_b, tid, sh_chunk, constraint_state, rigid_config)
+            func_group_constraints_by_island_coop(i_b, tid, sh_chunk, hibernation_state, constraint_state, rigid_config)
     else:
         qd.loop_config(name="init_improved", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
         for i_b in qd.ndrange(_B):
             constraint_state.improved[i_b] = constraint_state.n_constraints[i_b] > 0
-            func_group_constraints_by_island(i_b, constraint_state, rigid_config)
+            func_group_constraints_by_island(i_b, hibernation_state, constraint_state, rigid_config)
     constraint_state.solver_iter_counter[()] = 0
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_tiled_island_seed):
@@ -5814,8 +5852,10 @@ def func_solve_init(
         func_island_hessian_assemble_all(constraint_state, rigid_info, rigid_config)
         func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False, is_enabled=True)
         if qd.static(not rigid_config.has_scalar_seed_factor):
-            func_update_gradient_no_solve(dyn_state, constraint_state, rigid_config)
-            func_island_tiled_factor_solve_all(constraint_state, rigid_info, rigid_config, write_L)
+            func_update_gradient_no_solve(
+                dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config
+            )
+            func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config, write_L)
             func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=not write_L)
     else:
         # Where the solve is seeded one env per thread (see has_per_env_solve_seed in rigid/data.py), the factor, the
@@ -5869,6 +5909,7 @@ def func_solve_init(
                             sh_acc,
                             sh_pending,
                             sh_alpha,
+                            hibernation_state,
                             constraint_state,
                             rigid_info,
                             rigid_config,
@@ -5998,7 +6039,7 @@ def func_solve_seed_batch(
 
 def _get_static_config(*args, **kwargs):
     # Positional index of rigid_config in func_solve_body's signature.
-    return args[4] if len(args) > 4 else kwargs["rigid_config"]
+    return args[5] if len(args) > 5 else kwargs["rigid_config"]
 
 
 def _get_geometry_hash(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
@@ -6017,6 +6058,7 @@ def _get_geometry_hash(dyn_state, constraint_state, dyn_info, rigid_info, rigid_
 )
 def func_solve_body(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -6061,14 +6103,16 @@ def _kernel_solve_monolith(
     # warp; islands only reshape the per-env factor into block-diagonal blocks, they do not change the solve scheme.
     is_compatible=lambda *args, **kwargs: _get_static_config(*args, **kwargs).prefer_decomposed_solver != 1
 )
-def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
+def func_solve_body_monolith(
+    dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations
+):
     # This entrypoint statically IS the monolith arm, so it owns its init: func_solve_init groups the constraints by
     # island, factors (persisting L in nt_H for the incremental iterations) and seeds the gradient the packed-env body
     # consumes, then the solve kernel runs. Keeping the init inside the entrypoint (rather than in resolve, before the
     # dispatch) is what lets each arm declare its own init behavior - the dispatcher may run a different arm on the next
     # step during autotuning.
-    func_solve_init(dyn_state, constraint_state, rigid_info, rigid_config, write_L=True)
-    _kernel_solve_monolith(dyn_state, constraint_state, rigid_info, rigid_config)
+    func_solve_init(dyn_state, hibernation_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=True)
+    _kernel_solve_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations)
 
 
 # =====================================================================================================================
@@ -6127,6 +6171,7 @@ def func_contact_constraint_force(
 @qd.func
 def func_update_contact_force(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -6171,13 +6216,14 @@ def func_update_contact_force(
         if qd.static(rigid_config.use_hibernation):
             for i_island in range(constraint_state.island.n_islands[i_b]):
                 func_hibernate_island_if_settled(
-                    i_island, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config
+                    i_island, i_b, dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config
                 )
 
 
 @qd.func
 def func_resolve_post(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -6192,13 +6238,18 @@ def func_resolve_post(
     """
     func_update_qacc(dyn_state, constraint_state, rigid_config, errno)
     if qd.static(noslip):
-        constraint_noslip.func_noslip(dyn_state, collider_state, constraint_state, rigid_info, rigid_config)
-    func_update_contact_force(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+        constraint_noslip.func_noslip(
+            dyn_state, hibernation_state, collider_state, constraint_state, rigid_info, rigid_config
+        )
+    func_update_contact_force(
+        dyn_state, hibernation_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+    )
 
 
 @qd.kernel(fastcache=True)
 def kernel_resolve_post(
     dyn_state: DynState,
+    hibernation_state: HibernationState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -6208,7 +6259,17 @@ def kernel_resolve_post(
     errno: qd.Tensor,
 ):
     """Run func_resolve_post on its own, outside the substep graph that captures it (see kernel_substep_post)."""
-    func_resolve_post(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno)
+    func_resolve_post(
+        dyn_state,
+        hibernation_state,
+        collider_state,
+        constraint_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+        noslip,
+        errno,
+    )
 
 
 @qd.func
