@@ -1,7 +1,9 @@
 from typing import TYPE_CHECKING, Annotated, Any
 
+from pydantic import ConfigDict, Field, StrictBool
+
 import quadrants as qd
-from pydantic import Field, StrictBool
+from quadrants.lang._quadrants_callable import QuadrantsCallable
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, ValidFloat
@@ -40,6 +42,9 @@ class Base(Material["FEMEntity"]):
         If True, Hessian is computed only once. Default is False.
     """
 
+    # The quadrants funcs a kernel dispatches over are methods of the material, which pydantic takes for fields otherwise
+    model_config = ConfigDict(ignored_types=(QuadrantsCallable,))
+
     E: PositiveFloat = 1e6
     nu: Annotated[ValidFloat, Field(gt=-1.0, lt=0.5)] = 0.2
     rho: PositiveFloat = 1000.0
@@ -48,14 +53,9 @@ class Base(Material["FEMEntity"]):
     contact_resistance: PositiveFloat | None = None
     hessian_invariant: StrictBool = False
 
-    # Dispatch fields, set by subclass model_post_init rather than by the user. has_rotation asks the solver for the
-    # rotation of the deformation gradient of each element, which pre_compute returns and the energy functions read.
+    # Whether 'pre_compute' returns the rotation of the deformation gradient of each element, which the energy functions
+    # read (see FEMStaticConfig), set by the subclasses
     has_rotation: bool = Field(default=False, exclude=True, repr=False)
-    pre_compute: Any = Field(default=None, exclude=True, repr=False)
-    update_stress: Any = Field(default=None, exclude=True, repr=False)
-    compute_energy_gradient_hessian: Any = Field(default=None, exclude=True, repr=False)
-    compute_energy_gradient: Any = Field(default=None, exclude=True, repr=False)
-    compute_energy: Any = Field(default=None, exclude=True, repr=False)
 
     # Auto-generated fields, computed in model_post_init rather than by the user.
     mu: ValidFloat = Field(default=0.0, exclude=True)
@@ -66,27 +66,27 @@ class Base(Material["FEMEntity"]):
         self.mu = self.E / (2.0 * (1.0 + self.nu))
         self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
 
-        # Set dispatch defaults
-        if self.update_stress is None:
-            self.update_stress = self._update_stress_noop
-        if self.compute_energy_gradient_hessian is None:
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_noop
-        if self.compute_energy_gradient is None:
-            self.compute_energy_gradient = self._compute_energy_gradient_noop
-        if self.compute_energy is None:
-            self.compute_energy = self._compute_energy_noop
-
-    # A material without a constitutive model (Cloth, whose physics the IPC coupler owns) dispatches stress here.
-    # The explicit solver compiles this into its static per-material loop even when no element ever executes it, so
-    # it must return a zero response rather than raise, which quadrants cannot compile.
     @qd.func
-    def _update_stress_noop(
+    def pre_compute(self, F: qd.types.matrix(3, 3)):
+        """Return the rotation of the deformation gradient `F` the energy of the material linearizes around."""
+        raise NotImplementedError
+
+    @qd.func
+    def update_stress(
         self, mu: float, lam: float, J: float, F: qd.types.matrix(3, 3), actu: float, m_dir: qd.types.vector(3)
     ):
+        """
+        Return the first Piola-Kirchhoff stress of an element, zero for a material without a constitutive model.
+
+        `mu`, `lam` are the Lame parameters of the element, `J` and `F` the determinant of its deformation gradient and
+        the gradient itself, `actu` its actuation and `m_dir` the direction of its muscle fibers. The explicit solver
+        compiles the stress of every material of the scene, so a material whose physics another solver owns (Cloth,
+        simulated by the IPC coupler) returns zero rather than raising.
+        """
         return qd.Matrix.zero(gs.qd_float, 3, 3)
 
     @qd.func
-    def _compute_energy_gradient_hessian_noop(
+    def compute_energy_gradient_hessian(
         self,
         i_e: int,
         i_b: int,
@@ -99,10 +99,16 @@ class Base(Material["FEMEntity"]):
         m_dir: qd.types.vector(3),
         hessian: qd.template(),
     ):
+        """
+        Return the energy density of an element and its gradient, writing the blocks of its Hessian into `hessian`.
+
+        `R` is the rotation of 'pre_compute' for a material that has one, the identity otherwise, the other arguments
+        being those of 'update_stress'.
+        """
         raise NotImplementedError
 
     @qd.func
-    def _compute_energy_gradient_noop(
+    def compute_energy_gradient(
         self,
         mu: float,
         lam: float,
@@ -112,10 +118,11 @@ class Base(Material["FEMEntity"]):
         actu: float,
         m_dir: qd.types.vector(3),
     ):
+        """Return the energy density of an element and its gradient (see 'compute_energy_gradient_hessian')."""
         raise NotImplementedError
 
     @qd.func
-    def _compute_energy_noop(
+    def compute_energy(
         self,
         mu: float,
         lam: float,
@@ -125,4 +132,5 @@ class Base(Material["FEMEntity"]):
         actu: float,
         m_dir: qd.types.vector(3),
     ):
+        """Return the energy density of an element (see 'compute_energy_gradient_hessian')."""
         raise NotImplementedError

@@ -1,7 +1,8 @@
 from typing import Any
 
+from pydantic import Field
+
 import quadrants as qd
-from pydantic import Field, PrivateAttr
 
 from genesis.typing import PositiveInt, ValidFloat
 
@@ -36,20 +37,16 @@ class Muscle(Elastic):
     # Auto-generated, equal to E.
     stiffness: ValidFloat = Field(default=0.0, exclude=True)
 
-    _update_stress_without_actuation: Any = PrivateAttr(default=None)
-
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-
         self.stiffness = self.E
-        self._update_stress_without_actuation = self.update_stress
-        self.update_stress = self._update_stress_with_actuation
 
     @qd.func
-    def _update_stress_with_actuation(
+    def update_stress(
         self, mu: float, lam: float, J: float, F: qd.types.matrix(3, 3), actu: float, m_dir: qd.types.vector(3)
     ):
-        stress = self._update_stress_without_actuation(mu, lam, J, F, actu, m_dir)
+        # Quadrants funcs reject 'super()', hence the explicit call of the parent method
+        stress = Elastic.update_stress(self, mu, lam, J, F, actu, m_dir)
 
         l = (F @ m_dir).norm(1e-12)
         mmT = m_dir.outer_product(m_dir)
