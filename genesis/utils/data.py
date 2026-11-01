@@ -296,7 +296,7 @@ class Data:
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
     `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
     environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
-    placeholder no kernel reads. `binds` maps a field to the struct or array allocated elsewhere it holds.
+    placeholder no kernel reads.
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -349,11 +349,11 @@ class Data:
         layout: "Mapping[Any, tuple[int, ...] | None] | tuple[int, ...] | None" = None,
         unused: Mapping[Any, bool] | bool | None = None,
         requires_grad: bool = False,
-        binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
+        _binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
     ):
         cls = type(self)
         name = cls.__name__
-        binds = {(key._path if isinstance(key, FieldRef) else (key,)): bound for key, bound in (binds or {}).items()}
+        binds = {(key._path if isinstance(key, FieldRef) else (key,)): bound for key, bound in (_binds or {}).items()}
 
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
         # fields each has left
@@ -387,7 +387,7 @@ class Data:
         # Quadrants assumes distinct kernel arguments never alias
         for key_path in binds:
             if key_path not in paths:
-                raise TypeError(f"{name}() 'binds' names {'.'.join(key_path)}, which is no field of it.")
+                raise TypeError(f"{name}() '_binds' names {'.'.join(key_path)}, which is no field of it.")
         sizes = _by_path(name, "sizes", sizes or {}, paths)
         for entries in sizes.values():
             if unknown := sorted(entries.keys() - _size_names(cls)):
