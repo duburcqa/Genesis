@@ -540,7 +540,6 @@ def kernel_init_vert_fields(
     verts_state_idx: qd.types.ndarray(),
     verts: qd.types.ndarray(),
     faces: qd.types.ndarray(),
-    edges: qd.types.ndarray(),
     normals: qd.types.ndarray(),
     is_fixed: qd.types.ndarray(),
     dyn_info: DynInfo,
@@ -548,7 +547,6 @@ def kernel_init_vert_fields(
 ):
     n_verts = verts.shape[0]
     n_faces = faces.shape[0]
-    n_edges = edges.shape[0]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_v in range(n_verts):
@@ -566,17 +564,6 @@ def kernel_init_vert_fields(
             dyn_info.faces.verts_idx[i_f][j] = faces[i_f, j]
         dyn_info.faces.geom_idx[i_f] = verts_geom_idx[faces[i_f, 0]]
 
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_ed in range(n_edges):
-        dyn_info.edges.v0[i_ed] = edges[i_ed, 0]
-        dyn_info.edges.v1[i_ed] = edges[i_ed, 1]
-        # minus = verts_info.init_pos[edges[i_ed, 0]] - verts_info.init_pos[edges[i_ed, 1]]
-        # edges_info.length[i_ed] = minus.norm()
-        # FIXME: the line below does not work
-        dyn_info.edges.length[i_ed] = (
-            dyn_info.verts.init_pos[edges[i_ed, 0]] - dyn_info.verts.init_pos[edges[i_ed, 1]]
-        ).norm()
-
 
 @qd.kernel(fastcache=True)
 def kernel_init_vvert_fields(
@@ -584,7 +571,6 @@ def kernel_init_vvert_fields(
     vverts_state_idx: qd.types.ndarray(),
     vverts: qd.types.ndarray(),
     vfaces: qd.types.ndarray(),
-    vnormals: qd.types.ndarray(),
     dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
@@ -595,7 +581,6 @@ def kernel_init_vvert_fields(
     for i_vv in range(n_vverts):
         for j in qd.static(range(3)):
             dyn_info.vverts.init_pos[i_vv][j] = vverts[i_vv, j]
-            dyn_info.vverts.init_vnormal[i_vv][j] = vnormals[i_vv, j]
 
         dyn_info.vverts.vgeom_idx[i_vv] = vverts_vgeom_idx[i_vv]
         dyn_info.vverts.vverts_state_idx[i_vv] = vverts_state_idx[i_vv]
@@ -612,11 +597,9 @@ def kernel_init_geom_fields(
     geoms_link_idx: qd.types.ndarray(),
     geoms_vert_start: qd.types.ndarray(),
     geoms_face_start: qd.types.ndarray(),
-    geoms_edge_start: qd.types.ndarray(),
     geoms_verts_state_start: qd.types.ndarray(),
     geoms_vert_end: qd.types.ndarray(),
     geoms_face_end: qd.types.ndarray(),
-    geoms_edge_end: qd.types.ndarray(),
     geoms_pos: qd.types.ndarray(),
     geoms_center: qd.types.ndarray(),
     geoms_quat: qd.types.ndarray(),
@@ -661,10 +644,6 @@ def kernel_init_geom_fields(
 
         dyn_info.geoms.face_start[i_g] = geoms_face_start[i_g]
         dyn_info.geoms.face_end[i_g] = geoms_face_end[i_g]
-
-        dyn_info.geoms.edge_start[i_g] = geoms_edge_start[i_g]
-        dyn_info.geoms.edge_end[i_g] = geoms_edge_end[i_g]
-        dyn_info.geoms.edge_num[i_g] = geoms_edge_end[i_g] - geoms_edge_start[i_g]
 
         dyn_info.geoms.verts_state_start[i_g] = geoms_verts_state_start[i_g]
 
@@ -742,7 +721,6 @@ def kernel_init_vgeom_fields(
     vgeoms_vface_end: qd.types.ndarray(),
     vgeoms_pos: qd.types.ndarray(),
     vgeoms_quat: qd.types.ndarray(),
-    vgeoms_color: qd.types.ndarray(),
     dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
@@ -763,8 +741,6 @@ def kernel_init_vgeom_fields(
         dyn_info.vgeoms.vface_end[i_vg] = vgeoms_vface_end[i_vg]
 
         dyn_info.vgeoms.link_idx[i_vg] = vgeoms_link_idx[i_vg]
-        for j in qd.static(range(4)):
-            dyn_info.vgeoms.color[i_vg][j] = vgeoms_color[i_vg, j]
 
 
 @qd.kernel(fastcache=True)
@@ -776,7 +752,6 @@ def kernel_init_entity_fields(
     entities_geom_start: qd.types.ndarray(),
     entities_geom_end: qd.types.ndarray(),
     entities_gravity_compensation: qd.types.ndarray(),
-    entities_is_local_collision_mask: qd.types.ndarray(),
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -788,7 +763,6 @@ def kernel_init_entity_fields(
     for i_e in range(n_entities):
         dyn_info.entities.dof_start[i_e] = entities_dof_start[i_e]
         dyn_info.entities.dof_end[i_e] = entities_dof_end[i_e]
-        dyn_info.entities.n_dofs[i_e] = entities_dof_end[i_e] - entities_dof_start[i_e]
 
         dyn_info.entities.link_start[i_e] = entities_link_start[i_e]
         dyn_info.entities.link_end[i_e] = entities_link_end[i_e]

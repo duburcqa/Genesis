@@ -32,7 +32,6 @@ class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
     """The scratch of the Minkowski portal refinement (MPR) of each worker: its simplex and the status of its portal."""
 
     simplex_support: MPRSimplexSupport
-    simplex_size: qd.Tensor = field(int)
     # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
     # perturbation reconstruction and the EPA, an INVALID one forces a GJK refinement.
     portal_status: qd.Tensor = field(int)

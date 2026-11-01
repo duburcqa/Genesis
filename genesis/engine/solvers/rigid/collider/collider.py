@@ -31,7 +31,6 @@ from genesis.engine.states import SystemCheckpoint
 from genesis.utils.data import DataKind
 from genesis.utils.misc import (
     get_gpu_core_count,
-    get_gpu_cores_per_unit,
     has_zerocopy_view,
     qd_to_numpy,
     qd_to_torch,

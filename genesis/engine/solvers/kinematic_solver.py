@@ -779,7 +779,6 @@ class KinematicSolver(Solver):
 
         vgeoms = self.vgeoms
         vverts = np.concatenate([vg.init_vverts for vg in vgeoms], dtype=gs.np_float)
-        vnormals = np.concatenate([vg.init_vnormals for vg in vgeoms], dtype=gs.np_float)
         vfaces = np.concatenate([vg.init_vfaces + vg._vvert_start for vg in vgeoms], dtype=gs.np_int)
         vverts_vgeom_idx = np.concatenate([np.full(vg.n_vverts, vg.idx) for vg in vgeoms], dtype=gs.np_int)
         vverts_state_idx = np.full(self.n_vverts, -1, dtype=gs.np_int)
@@ -790,9 +789,7 @@ class KinematicSolver(Solver):
             for vgeom in entity.vgeoms:
                 local = np.arange(vgeom.n_vverts, dtype=gs.np_int)
                 vverts_state_idx[vgeom._vvert_start + local] = vgeom._vvert_start + entity_custom_offset + local
-        kernel_init_vvert_fields(
-            vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, vnormals, self.dyn_info, self.rigid_config
-        )
+        kernel_init_vvert_fields(vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, self.dyn_info, self.rigid_config)
 
     def _init_vgeom_fields(self):
         if self.n_vgeoms > 0:
@@ -805,7 +802,6 @@ class KinematicSolver(Solver):
                 np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
                 np.array([vgeom.init_pos for vgeom in vgeoms], dtype=gs.np_float),
                 np.array([vgeom.init_quat for vgeom in vgeoms], dtype=gs.np_float),
-                np.array([vgeom.desc.vmesh.color for vgeom in vgeoms], dtype=gs.np_float),
                 self.dyn_info,
                 self.rigid_config,
             )

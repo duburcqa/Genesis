@@ -309,7 +309,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.n_geoms_ = max(1, self.n_geoms)
         self.n_verts_ = max(1, self.n_verts)
         self.n_faces_ = max(1, self.n_faces)
-        self.n_edges_ = max(1, self.n_edges)
         self.n_free_verts_ = max(1, self.n_free_verts)
         self.n_fixed_verts_ = max(1, self.n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
@@ -1108,7 +1107,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 ),
                 np.concatenate([geom.init_verts for geom in geoms], dtype=gs.np_float),
                 np.concatenate([geom.init_faces + geom.vert_start for geom in geoms], dtype=gs.np_int),
-                np.concatenate([geom.init_edges + geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.concatenate([geom.init_normals for geom in geoms], dtype=gs.np_float),
                 np.concatenate(
                     [np.full(geom.n_verts, geom.is_fixed and not geom.entity._batch_fixed_verts) for geom in geoms],
@@ -1191,11 +1189,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 np.array([geom.link.idx for geom in geoms], dtype=gs.np_int),
                 np.array([geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.array([geom.face_start for geom in geoms], dtype=gs.np_int),
-                np.array([geom.edge_start for geom in geoms], dtype=gs.np_int),
                 np.array([geom.verts_state_start for geom in geoms], dtype=gs.np_int),
                 np.array([geom.vert_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.face_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.edge_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.init_pos for geom in geoms], dtype=gs.np_float),
                 np.array(geoms_center, dtype=gs.np_float),
                 np.array([geom.init_quat for geom in geoms], dtype=gs.np_float),
