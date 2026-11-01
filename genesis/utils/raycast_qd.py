@@ -451,117 +451,6 @@ def kernel_cast_ray(
             result.hit_point[i_b] = ray_start + hit_distance * ray_direction_world
 
 
-@qd.func
-def write_ray_hit(
-    i_b: int,
-    i_p: int,
-    i_s: int,
-    hit_face: int,
-    hit_distance: float,
-    ray_start_world,
-    ray_direction_world,
-    ray_dir_local,
-    is_world_frame: qd.types.ndarray(ndim=1),
-    max_ranges: qd.types.ndarray(ndim=1),
-    no_hit_values: qd.types.ndarray(ndim=1),
-    sensor_cache_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_counts: qd.types.ndarray(ndim=1),
-    sensor_return_points: qd.types.ndarray(ndim=1),
-    output_hits: qd.types.ndarray(ndim=2),
-    eps: float,
-    is_merge: qd.template(),
-    is_last: qd.template(),
-):
-    """Write the hit of a ray of a sensor at its slots of the output, the common tail of the cast kernels.
-
-    `is_merge` and `is_last` are compile-time flags marking a cast's position in a chain of BVH passes sharing one
-    output buffer (first pass is_merge=False, subsequent passes is_merge=True, final pass is_last=True): the first
-    pass writes a value into every slot, and each later pass only overwrites a slot when it found a closer hit, so
-    the chain composes with no scratch storage. A miss must not beat a real hit from another pass whatever the
-    sensor's ``no_hit_value`` (it may be below max_range, e.g. 0 or -1): a miss on a non-final pass seeds the slot
-    with ``max_range`` - a hit is always strictly below it, so a hit wins every distance comparison - and
-    ``no_hit_value`` is stamped only by the final pass, over any slot still holding that sentinel.
-
-    `sensor_return_points[i_s]` gates the hit-point writes; a distances-only sensor skips them.
-    """
-    i_p_sensor = i_p - sensor_point_offsets[i_s]
-    i_p_offset = sensor_cache_offsets[i_s]
-    # Distances follow the point block (num_rays*3) when points are stored, else start at the block front.
-    i_p_dist = i_p_offset + i_p_sensor
-    if sensor_return_points[i_s]:
-        i_p_dist += sensor_point_counts[i_s] * 3
-    if hit_face >= 0 and (not is_merge or hit_distance < output_hits[i_p_dist, i_b]):
-        output_hits[i_p_dist, i_b] = hit_distance
-
-        if sensor_return_points[i_s]:
-            hit_point = qd.math.vec3(0.0, 0.0, 0.0)
-            if is_world_frame[i_s]:
-                hit_point = ray_start_world + hit_distance * ray_direction_world
-            else:
-                # Local frame output along provided local ray direction
-                hit_point = hit_distance * gu.qd_normalize(ray_dir_local, eps)
-            # Store points at: cache_offset + point_idx_in_sensor * 3
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
-    elif not is_merge:
-        # First-pass miss: zero the point and seed the distance - no_hit_value if this pass is also the last (single
-        # BVH), else the max_range sentinel so a later pass's hit wins.
-        if sensor_return_points[i_s]:
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
-        if is_last:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
-        else:
-            output_hits[i_p_dist, i_b] = max_ranges[i_s]
-    elif is_last:
-        # Final-pass miss: a slot still at the sentinel means every pass missed, so stamp no_hit_value.
-        if output_hits[i_p_dist, i_b] >= max_ranges[i_s]:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
-
-
-@qd.func
-def func_ray_of_thread(
-    i_flat: int,
-    n_points: int,
-    n_envs: int,
-    points_to_sensor_idx: qd.types.ndarray(ndim=1),
-    links_pos: qd.types.ndarray(ndim=3),
-    links_quat: qd.types.ndarray(ndim=3),
-    ray_starts: qd.types.ndarray(ndim=2),
-    ray_directions: qd.types.ndarray(ndim=2),
-    eps: float,
-    is_env_major: qd.template(),
-):
-    """Map a thread of a cast kernel to its env, ray and sensor, and return the ray in world frame with its local
-    direction."""
-    # The thread -> (ray, env) split is chosen at compile time from is_env_major:
-    #  - env-major (one tree serves several envs): env is the fastest-varying index, so a warp spans consecutive
-    #    envs mostly reading the same tree's nodes -> a coalesced broadcast.
-    #  - ray-major (distinct per-env trees): the ray is the fastest-varying index, so a warp stays within one env's
-    #    tree and rides ray coherence instead of diverging across n_env different trees.
-    i_p = 0
-    i_b = 0
-    if qd.static(is_env_major):
-        i_p = i_flat // n_envs
-        i_b = i_flat % n_envs
-    else:
-        i_b = i_flat // n_points
-        i_p = i_flat % n_points
-    i_s = points_to_sensor_idx[i_p]
-    link_pos = qd.math.vec3(links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2])
-    link_quat = qd.math.vec4(
-        links_quat[i_b, i_s, 0], links_quat[i_b, i_s, 1], links_quat[i_b, i_s, 2], links_quat[i_b, i_s, 3]
-    )
-    ray_start_local = qd.math.vec3(ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2])
-    ray_start_world = gu.qd_transform_by_trans_quat(ray_start_local, link_pos, link_quat)
-    ray_dir_local = qd.math.vec3(ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2])
-    ray_direction_world = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, link_quat), eps)
-    return i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local
-
-
 @qd.kernel(fastcache=True)
 def kernel_cast_rays(
     points_to_sensor_idx: qd.types.ndarray(ndim=1),  # [n_points]
@@ -598,10 +487,15 @@ def kernel_cast_rays(
     RaycastContext.activate), the second one with the distance of the first hit as its range, so that it reports a hit
     only when closer.
 
-    See write_ray_hit for `is_merge` / `is_last`, which chain the launches over several BVH sets into one output
-    buffer. ``output_hits`` is a 2D array of shape (total_cache_size, n_env) where in the first dimension each
-    sensor's data is stored as [sensor_points (n_points * 3), sensor_ranges (n_points)], the point block being present
-    only for sensors with sensor_return_points set.
+    `is_merge` and `is_last` mark the position of the launch in a chain of launches over several BVH sets sharing one
+    output buffer (first launch is_merge=False, later ones is_merge=True, final one is_last=True): the first launch
+    writes a value into every slot, and each later one only overwrites a slot when it found a closer hit, so the chain
+    composes with no scratch storage. A miss must not beat a real hit of another launch whatever the ``no_hit_value``
+    of the sensor (it may be below max_range, e.g. 0 or -1): a miss of a non-final launch seeds the slot with
+    ``max_range``, which every hit is strictly below, and ``no_hit_value`` is stamped only by the final launch, over
+    any slot still holding that sentinel. ``output_hits`` is a 2D array of shape (total_cache_size, n_env) where in
+    the first dimension each sensor's data is stored as [sensor_points (n_points * 3), sensor_ranges (n_points)], the
+    point block being present only for sensors with sensor_return_points set, which gates the hit-point writes.
 
     env_bvh_idx routes each env to the BVH tree slot it casts against: identity for per-env trees, all-zero for one
     shared tree, group ids for a grouped static BVH (N distinct geometries, N <= n_env). is_env_major is a
@@ -610,18 +504,29 @@ def kernel_cast_rays(
     n_points = ray_starts.shape[0]
     n_envs = output_hits.shape[-1]
     for i_flat in range(n_points * n_envs):
-        i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
-            i_flat,
-            n_points,
-            n_envs,
-            points_to_sensor_idx,
-            links_pos,
-            links_quat,
-            ray_starts,
-            ray_directions,
-            eps,
-            is_env_major,
+        # The thread -> (ray, env) split is chosen at compile time from is_env_major:
+        #  - env-major (one tree serves several envs): env is the fastest-varying index, so a warp spans consecutive
+        #    envs mostly reading the same tree's nodes -> a coalesced broadcast.
+        #  - ray-major (distinct per-env trees): the ray is the fastest-varying index, so a warp stays within one env's
+        #    tree and rides ray coherence instead of diverging across n_env different trees.
+        i_p = 0
+        i_b = 0
+        if qd.static(is_env_major):
+            i_p = i_flat // n_envs
+            i_b = i_flat % n_envs
+        else:
+            i_b = i_flat // n_points
+            i_p = i_flat % n_points
+        i_s = points_to_sensor_idx[i_p]
+        link_pos = qd.math.vec3(links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2])
+        link_quat = qd.math.vec4(
+            links_quat[i_b, i_s, 0], links_quat[i_b, i_s, 1], links_quat[i_b, i_s, 2], links_quat[i_b, i_s, 3]
         )
+        ray_start_local = qd.math.vec3(ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2])
+        ray_start_world = gu.qd_transform_by_trans_quat(ray_start_local, link_pos, link_quat)
+        ray_dir_local = qd.math.vec3(ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2])
+        ray_direction_world = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, link_quat), eps)
+
         hit_face, hit_distance, _hit_normal = bvh_ray_cast(
             env_bvh_idx_a[i_b],
             i_b,
@@ -651,24 +556,39 @@ def kernel_cast_rays(
             if hit_face_b >= 0:
                 hit_face = hit_face_b
                 hit_distance = hit_distance_b
-        write_ray_hit(
-            i_b,
-            i_p,
-            i_s,
-            hit_face,
-            hit_distance,
-            ray_start_world,
-            ray_direction_world,
-            ray_dir_local,
-            is_world_frame,
-            max_ranges,
-            no_hit_values,
-            sensor_cache_offsets,
-            sensor_point_offsets,
-            sensor_point_counts,
-            sensor_return_points,
-            output_hits,
-            eps,
-            is_merge,
-            is_last,
-        )
+
+        i_p_sensor = i_p - sensor_point_offsets[i_s]
+        i_p_offset = sensor_cache_offsets[i_s]
+        # Distances follow the point block (num_rays*3) when points are stored, else start at the block front.
+        i_p_dist = i_p_offset + i_p_sensor
+        if sensor_return_points[i_s]:
+            i_p_dist += sensor_point_counts[i_s] * 3
+        if hit_face >= 0 and (not is_merge or hit_distance < output_hits[i_p_dist, i_b]):
+            output_hits[i_p_dist, i_b] = hit_distance
+
+            if sensor_return_points[i_s]:
+                hit_point = qd.math.vec3(0.0, 0.0, 0.0)
+                if is_world_frame[i_s]:
+                    hit_point = ray_start_world + hit_distance * ray_direction_world
+                else:
+                    # Local frame output along provided local ray direction
+                    hit_point = hit_distance * gu.qd_normalize(ray_dir_local, eps)
+                # Store points at: cache_offset + point_idx_in_sensor * 3
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
+        elif not is_merge:
+            # First-launch miss: zero the point and seed the distance - no_hit_value if this launch is also the last
+            # (single BVH), else the max_range sentinel so a hit of a later launch wins.
+            if sensor_return_points[i_s]:
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
+            if is_last:
+                output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+            else:
+                output_hits[i_p_dist, i_b] = max_ranges[i_s]
+        elif is_last:
+            # Final-launch miss: a slot still at the sentinel means every launch missed, so stamp no_hit_value.
+            if output_hits[i_p_dist, i_b] >= max_ranges[i_s]:
+                output_hits[i_p_dist, i_b] = no_hit_values[i_s]
