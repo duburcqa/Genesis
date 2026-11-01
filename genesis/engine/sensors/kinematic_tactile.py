@@ -9,6 +9,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.bvh import BVHTreeState
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
 from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, DynState, RigidInfo
 from genesis.options.sensors import (
@@ -636,13 +637,14 @@ class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin
         scattered from them.
         """
         solver = shared_metadata.solver
+        collider = solver.sim.get_system(Collider)
         if not shared_metadata.is_raycast:
             _kernel_build_sensor_geom_idx(
                 shared_metadata.links_idx,
                 shared_metadata.filter_links_idx,
                 shared_metadata.sensor_geoms_idx,
                 shared_metadata.sensor_n_geoms,
-                solver.collider.collider_state,
+                collider.collider_state,
             )
             return
         _kernel_build_sensor_contact_idx(
@@ -650,7 +652,7 @@ class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin
             shared_metadata.filter_links_idx,
             shared_metadata.sensor_contacts_idx,
             shared_metadata.sensor_n_contacts,
-            solver.collider.collider_state,
+            collider.collider_state,
         )
         B, n_sensors = shared_metadata.sensor_n_contacts.shape
         mask_shape = (B, n_sensors, solver.n_geoms)
@@ -661,7 +663,7 @@ class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin
             shared_metadata.sensor_contacts_idx,
             shared_metadata.sensor_n_contacts,
             shared_metadata.sensor_candidate_geom_mask,
-            solver.collider.collider_state,
+            collider.collider_state,
         )
 
 
@@ -986,7 +988,7 @@ class KinematicTaxelSensor(
             solver.dyn_info,
             solver.rigid_info,
             shared_metadata.sdf_info,
-            solver.collider.collider_config,
+            solver.sim.get_system(Collider).collider_config,
             eps=gs.EPS,
             is_raycast=shared_metadata.is_raycast,
             is_split=entry_b is not entry_a,
