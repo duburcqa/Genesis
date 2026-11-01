@@ -124,39 +124,37 @@ def func_mpm_pbd(
     )
 
 
-class MPMSPH(GridCoupling):
-    """
-    Exchange momentum between the cells of the material point method grid and the smoothed particles in them.
-
-    See func_mpm_particles.
-    """
-
-    grid_coupling = func_mpm_sph
+class MPMParticles(GridCoupling):
+    """The coupling of the material point method grid with the particles of another solver (see func_mpm_particles)."""
 
     mpm_particles_info: MPMParticlesInfo
+
+    def __init__(self, mpm_solver: MPMSolver, particle_solver: SPHSolver | PBDSolver) -> None:
+        self._mpm_solver = mpm_solver
+        self._particle_solver = particle_solver
+
+    def build(self) -> None:
+        stencil_size = int(np.floor(self._mpm_solver.dx / self._particle_solver.hash_grid_cell_size) + 2)
+        self.mpm_particles_info = MPMParticlesInfo(values=dict(stencil_size=stencil_size))
+
+
+class MPMSPH(MPMParticles):
+    """Exchange momentum between the cells of the material point method grid and the smoothed particles in them."""
+
+    grid_coupling = func_mpm_sph
 
     def __init__(
         self, mpm_solver: MPMSolver, sph_solver: SPHSolver, options: Annotated[LegacyCouplerOptions, Enabled("mpm_sph")]
     ) -> None:
-        self.mpm_particles_info = MPMParticlesInfo(
-            values=dict(stencil_size=int(np.floor(mpm_solver.dx / sph_solver.hash_grid_cell_size) + 2))
-        )
+        super().__init__(mpm_solver, sph_solver)
 
 
-class MPMPBD(GridCoupling):
-    """
-    Exchange momentum between the cells of the material point method grid and the free PBD particles in them.
-
-    See func_mpm_particles.
-    """
+class MPMPBD(MPMParticles):
+    """Exchange momentum between the cells of the material point method grid and the free PBD particles in them."""
 
     grid_coupling = func_mpm_pbd
-
-    mpm_particles_info: MPMParticlesInfo
 
     def __init__(
         self, mpm_solver: MPMSolver, pbd_solver: PBDSolver, options: Annotated[LegacyCouplerOptions, Enabled("mpm_pbd")]
     ) -> None:
-        self.mpm_particles_info = MPMParticlesInfo(
-            values=dict(stencil_size=int(np.floor(mpm_solver.dx / pbd_solver.hash_grid_cell_size) + 2))
-        )
+        super().__init__(mpm_solver, pbd_solver)

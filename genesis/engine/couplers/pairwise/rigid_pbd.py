@@ -190,7 +190,11 @@ class RigidPBD(Coupling):
         self._pbd_solver = pbd_solver
         self._rigid_solver = rigid_solver
         self.clamped_inv_dt = min(1.0 / pbd_solver.substep_dt, CLAMPED_INV_DT)
-        self.rigid_pbd_info = RigidPBDInfo(sizes=dict(particles=pbd_solver.n_particles, envs=pbd_solver.sim._B))
+
+    def build(self) -> None:
+        self.rigid_pbd_info = RigidPBDInfo(
+            sizes=dict(particles=self._pbd_solver.n_particles, envs=self._pbd_solver.sim._B)
+        )
         self.rigid_pbd_info.link_idx.fill(-1)
 
     def attach_particles(self, particles_idx, envs_idx, link_idx):

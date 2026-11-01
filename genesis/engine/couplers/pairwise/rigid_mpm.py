@@ -218,13 +218,20 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
         options: Annotated[MPMOptions, Enabled("enable_CPIC")],
     ) -> None:
         self._mpm_solver = mpm_solver
-        self.rigid_mpm_cpic = RigidMPMCPICState(
-            sizes=dict(particles=mpm_solver.n_particles, geoms=max(1, rigid_solver.n_geoms), envs=mpm_solver.sim._B)
-        )
+        self._rigid_solver = rigid_solver
         # The thin rigid geoms the particles saw belong to the trajectory they leave
         mpm_solver.subscribe(
             Subscriber(
                 frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx, links_idx: self.reset(envs_idx)
+            )
+        )
+
+    def build(self) -> None:
+        self.rigid_mpm_cpic = RigidMPMCPICState(
+            sizes=dict(
+                particles=self._mpm_solver.n_particles,
+                geoms=max(1, self._rigid_solver.n_geoms),
+                envs=self._mpm_solver.sim._B,
             )
         )
 
