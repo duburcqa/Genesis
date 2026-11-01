@@ -7,7 +7,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import VFACES, VVERTS
+from genesis.engine.solvers.base_solver import EDGES, VFACES, VVERTS
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 
 
@@ -59,6 +59,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
     qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
+    links_T: qd.Tensor = field((float, (4, 4)), shape=(LINKS,), kind=DataKind.DERIVED)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
@@ -453,6 +454,8 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     bw_p: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
     bw_Ap: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
     bw_Ju: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    bw_y: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    bw_w: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     timers: qd.Tensor = field(_timer_dtype, shape=(10, ENVS))
     # Iteration of the solver loop, from 0
     solver_iter_counter: qd.Tensor = field(qd.i32, shape=())
@@ -662,6 +665,7 @@ class ColliderStaticConfig(StaticConfig):
     ccd_algorithm: int
     # GPU core count, sizing the split narrow phase launches and scratch states
     gpu_cores: int
+    gpu_cores_per_unit: int
 
 
 # The workers of the scratch of a detection component: one per environment, or the threads of a pass draining a queue of
@@ -925,6 +929,7 @@ MIDPOINT = "midpoint"
 class DofsInfo(Data, kind=DataKind.INFO, shape=(DOFS, DOFS_INFO_ENVS)):
     """The model parameters of each dof of the rigid solver, per environment where the options batch them."""
 
+    entity_idx: qd.Tensor = field(int)
     stiffness: qd.Tensor = field(float)
     invweight: qd.Tensor = field(float)
     armature: qd.Tensor = field(float)
@@ -1067,7 +1072,9 @@ class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
     sol_params: qd.Tensor = field((float, 7))
     q_start: qd.Tensor = field(int)
     dof_start: qd.Tensor = field(int)
+    q_end: qd.Tensor = field(int)
     dof_end: qd.Tensor = field(int)
+    n_dofs: qd.Tensor = field(int)
     pos: qd.Tensor = field((float, 3))
 
 
@@ -1091,15 +1098,22 @@ class GeomsInfo(Data, kind=DataKind.INFO, shape=(GEOMS,)):
     friction_torsional: qd.Tensor = field(float)
     friction_rolling: qd.Tensor = field(float)
     sol_params: qd.Tensor = field((float, 7))
+    vert_num: qd.Tensor = field(int)
     vert_start: qd.Tensor = field(int)
     vert_end: qd.Tensor = field(int)
     verts_state_start: qd.Tensor = field(int)
+    verts_state_end: qd.Tensor = field(int)
+    face_num: qd.Tensor = field(int)
     face_start: qd.Tensor = field(int)
     face_end: qd.Tensor = field(int)
+    edge_num: qd.Tensor = field(int)
+    edge_start: qd.Tensor = field(int)
+    edge_end: qd.Tensor = field(int)
     is_convex: qd.Tensor = field(bool)
     contype: qd.Tensor = field(int)
     conaffinity: qd.Tensor = field(int)
     is_fixed: qd.Tensor = field(bool)
+    is_decomposed: qd.Tensor = field(bool)
     is_hollow: qd.Tensor = field(bool)
     needs_coup: qd.Tensor = field(int)
     coup_friction: qd.Tensor = field(float)
@@ -1125,6 +1139,7 @@ class VertsInfo(Data, kind=DataKind.CONSTANT, shape=(VERTS,)):
     init_pos: qd.Tensor = field((float, 3))
     init_normal: qd.Tensor = field((float, 3))
     geom_idx: qd.Tensor = field(int)
+    init_center_pos: qd.Tensor = field((float, 3))
     verts_state_idx: qd.Tensor = field(int)
     is_fixed: qd.Tensor = field(bool)
 
@@ -1134,6 +1149,14 @@ class FacesInfo(Data, kind=DataKind.CONSTANT, shape=(FACES,)):
 
     verts_idx: qd.Tensor = field((int, 3))
     geom_idx: qd.Tensor = field(int)
+
+
+class EdgesInfo(Data, kind=DataKind.CONSTANT, shape=(EDGES,)):
+    """The edges of the collision meshes of the rigid geoms, with their length."""
+
+    v0: qd.Tensor = field(int)
+    v1: qd.Tensor = field(int)
+    length: qd.Tensor = field(float)
 
 
 class VertsState(Data, kind=DataKind.DERIVED):
@@ -1146,6 +1169,7 @@ class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
     """The vertices of the visual meshes of the rigid geoms, in the frame of their visual geom."""
 
     init_pos: qd.Tensor = field((float, 3))
+    init_vnormal: qd.Tensor = field((float, 3))
     vgeom_idx: qd.Tensor = field(int)
     vverts_state_idx: qd.Tensor = field(int)
 
@@ -1168,15 +1192,18 @@ class VFacesInfo(Data, kind=DataKind.CONSTANT, shape=(VFACES,)):
 
 
 class VGeomsInfo(Data, kind=DataKind.CONSTANT, shape=(VGEOMS,)):
-    """The model parameters of each visual geom of the rigid solver: its pose on its link and mesh ranges."""
+    """The model parameters of each visual geom of the rigid solver: its pose on its link, mesh ranges and color."""
 
     pos: qd.Tensor = field((float, 3))
     quat: qd.Tensor = field((float, 4))
     link_idx: qd.Tensor = field(int)
+    vvert_num: qd.Tensor = field(int)
     vvert_start: qd.Tensor = field(int)
     vvert_end: qd.Tensor = field(int)
+    vface_num: qd.Tensor = field(int)
     vface_start: qd.Tensor = field(int)
     vface_end: qd.Tensor = field(int)
+    color: qd.Tensor = field((float, 4))
 
 
 class VGeomsState(Data, kind=DataKind.DERIVED, shape=(VGEOMS, ENVS)):
@@ -1199,15 +1226,22 @@ class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS
 
 
 class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
-    """The model parameters of each entity of the rigid solver: dof, link and geom ranges, and gravity compensation."""
+    """
+    The model parameters of each entity of the rigid solver: its dof, link and geom ranges, gravity compensation and
+    collision mask option.
+    """
 
     dof_start: qd.Tensor = field(int)
     dof_end: qd.Tensor = field(int)
+    n_dofs: qd.Tensor = field(int)
     link_start: qd.Tensor = field(int)
     link_end: qd.Tensor = field(int)
+    n_links: qd.Tensor = field(int)
     geom_start: qd.Tensor = field(int)
     geom_end: qd.Tensor = field(int)
+    n_geoms: qd.Tensor = field(int)
     gravity_compensation: qd.Tensor = field(float)
+    is_local_collision_mask: qd.Tensor = field(bool)
 
 
 class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):
@@ -1226,6 +1260,7 @@ class DynInfo(Data):
     geoms: GeomsInfo = field(labels=DYNAMICS)
     verts: VertsInfo = field(labels=DYNAMICS)
     faces: FacesInfo = field(labels=DYNAMICS)
+    edges: EdgesInfo = field(labels=DYNAMICS)
     vverts: VVertsInfo
     vfaces: VFacesInfo
     vgeoms: VGeomsInfo
@@ -1444,6 +1479,7 @@ class RigidData(Data):
                 geoms=solver.n_geoms_,
                 verts=solver.n_verts_,
                 faces=solver.n_faces_,
+                edges=solver.n_edges_,
                 free_verts=solver.n_free_verts_,
                 fixed_verts=solver.n_fixed_verts_,
                 candidate_equalities=solver.n_candidate_equalities_,

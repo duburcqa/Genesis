@@ -32,6 +32,7 @@ from genesis.options.solvers import RigidOptions
 from genesis.utils.data import DataKind
 from genesis.utils.misc import (
     get_gpu_core_count,
+    get_gpu_cores_per_unit,
     has_zerocopy_view,
     qd_to_numpy,
     qd_to_torch,
@@ -317,6 +318,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         self._has_nonconvex_nonterrain = has_nonconvex_nonterrain
         self.collider_config = ColliderStaticConfig(
             gpu_cores=get_gpu_core_count(),
+            gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
             # narrowphase finding nothing in a scene whose convex pairs all take a box specialization.

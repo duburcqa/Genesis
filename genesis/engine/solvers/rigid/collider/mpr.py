@@ -32,6 +32,7 @@ class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
     """The scratch of the Minkowski portal refinement (MPR) of each worker: its simplex and the status of its portal."""
 
     simplex_support: MPRSimplexSupport
+    simplex_size: qd.Tensor = field(int)
     # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
     # perturbation reconstruction and the EPA, an INVALID one forces a GJK refinement.
     portal_status: qd.Tensor = field(int)
@@ -511,6 +512,7 @@ def func_mpr_contact_from_centers(
     mpr_state.simplex_support.v1[0, i_b] = center_a
     mpr_state.simplex_support.v2[0, i_b] = center_b
     mpr_state.simplex_support.v[0, i_b] = center_a - center_b
+    mpr_state.simplex_size[i_b] = 1
 
     # Every stage (see MPR_STAGE in constants.py) queries its support points through the single query of the loop below,
     # each stage setting the direction of the next query and the stage it serves.
@@ -569,6 +571,7 @@ def func_mpr_contact_from_centers(
             mpr_state.simplex_support.v1[1, i_b] = v1
             mpr_state.simplex_support.v2[1, i_b] = v2
             mpr_state.simplex_support.v[1, i_b] = v
+            mpr_state.simplex_size[i_b] = 2
 
             if v.dot(direction) < 0.0:
                 support_type = MPR_SUPPORT_TYPE.NONE
@@ -605,6 +608,7 @@ def func_mpr_contact_from_centers(
                 mpr_state.simplex_support.v1[2, i_b] = v1
                 mpr_state.simplex_support.v2[2, i_b] = v2
                 mpr_state.simplex_support.v[2, i_b] = v
+                mpr_state.simplex_size[i_b] = 3
 
                 va = mpr_state.simplex_support.v[1, i_b] - mpr_state.simplex_support.v[0, i_b]
                 vb = mpr_state.simplex_support.v[2, i_b] - mpr_state.simplex_support.v[0, i_b]
@@ -650,6 +654,7 @@ def func_mpr_contact_from_centers(
                     mpr_state.simplex_support.v1[3, i_b] = v1
                     mpr_state.simplex_support.v2[3, i_b] = v2
                     mpr_state.simplex_support.v[3, i_b] = v
+                    mpr_state.simplex_size[i_b] = 4
                     stage = MPR_STAGE.REFINE
         else:
             # The refinement reaches the surface of the Minkowski difference when the new support point gains less than

@@ -451,6 +451,10 @@ class KinematicSolver(Solver):
         has_dofs = sum(joint.n_dofs for joint in joints) > 0
         if has_dofs:
             kernel_init_dof_fields(
+                np.concatenate(
+                    [(joint.link._entity_idx_in_solver,) * joint.n_dofs for joint in joints if joint.n_dofs],
+                    dtype=gs.np_int,
+                ),
                 np.concatenate([joint.desc.dofs_motion_ang for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_motion_vel for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_limit for joint in joints], dtype=gs.np_float),
@@ -629,6 +633,7 @@ class KinematicSolver(Solver):
             kernel_init_joint_fields(
                 np.array([joint.q_start for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_start for joint in joints], dtype=gs.np_int),
+                np.array([joint.q_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.type for joint in joints], dtype=gs.np_int),
                 joints_sol_params,
@@ -667,6 +672,8 @@ class KinematicSolver(Solver):
             if is_init_qpos_out_of_bounds:
                 gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
             self.qpos.from_numpy(init_qpos)
+
+        self.links_T = self.rigid_info.links_T
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
@@ -778,6 +785,7 @@ class KinematicSolver(Solver):
 
         vgeoms = self.vgeoms
         vverts = np.concatenate([vg.init_vverts for vg in vgeoms], dtype=gs.np_float)
+        vnormals = np.concatenate([vg.init_vnormals for vg in vgeoms], dtype=gs.np_float)
         vfaces = np.concatenate([vg.init_vfaces + vg._vvert_start for vg in vgeoms], dtype=gs.np_int)
         vverts_vgeom_idx = np.concatenate([np.full(vg.n_vverts, vg.idx) for vg in vgeoms], dtype=gs.np_int)
         vverts_state_idx = np.full(self.n_vverts, -1, dtype=gs.np_int)
@@ -788,7 +796,9 @@ class KinematicSolver(Solver):
             for vgeom in entity.vgeoms:
                 local = np.arange(vgeom.n_vverts, dtype=gs.np_int)
                 vverts_state_idx[vgeom._vvert_start + local] = vgeom._vvert_start + entity_custom_offset + local
-        kernel_init_vvert_fields(vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, self.dyn_info, self.rigid_config)
+        kernel_init_vvert_fields(
+            vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, vnormals, self.dyn_info, self.rigid_config
+        )
 
     def _init_vgeom_fields(self):
         if self.n_vgeoms > 0:
@@ -801,6 +811,7 @@ class KinematicSolver(Solver):
                 np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
                 np.array([vgeom.init_pos for vgeom in vgeoms], dtype=gs.np_float),
                 np.array([vgeom.init_quat for vgeom in vgeoms], dtype=gs.np_float),
+                np.array([vgeom.desc.vmesh.color for vgeom in vgeoms], dtype=gs.np_float),
                 self.dyn_info,
                 self.rigid_config,
             )
@@ -830,6 +841,7 @@ class KinematicSolver(Solver):
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0.0 for entity in entities], dtype=gs.np_float),
+                np.array([False for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
                 self.rigid_config,
