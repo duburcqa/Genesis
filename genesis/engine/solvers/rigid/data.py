@@ -1397,6 +1397,17 @@ class RigidSimStaticConfig(StaticConfig):
     has_island_above_tile_cap: bool = False
 
     @property
+    def island_tile_caps(self) -> tuple[int, ...]:
+        """The ascending dof caps of the shared tiles of the per-island factor (see island_tile_cap_first)."""
+        caps = []
+        cap = self.island_tile_cap_first
+        while cap < self.island_tile_cap_last:
+            caps.append(cap)
+            cap *= 2
+        caps.append(self.island_tile_cap_last)
+        return tuple(caps)
+
+    @property
     def rows_per_contact(self) -> int:
         """Constraint rows per contact.
 
@@ -1452,17 +1463,6 @@ def cholesky_packed_tile_shape(max_dofs):
     n_blocks = (max_dofs + tile_size - 1) // tile_size
     n_rows = min(tile_size, max_dofs)
     return int(n_blocks * (n_blocks + 1) // 2 * n_rows), int(n_rows + 1)
-
-
-def island_tile_caps(cap_first, cap_last):
-    """Return the ascending dof caps of the shared tiles of the per-island factor (see island_tile_cap_first)."""
-    caps = []
-    cap = cap_first
-    while cap < cap_last:
-        caps.append(cap)
-        cap *= 2
-    caps.append(cap_last)
-    return tuple(caps)
 
 
 class RigidData(Data):

@@ -29,7 +29,6 @@ from genesis.engine.solvers.rigid.data import (
     RigidInfo,
     cholesky_packed_tile_shape,
     cholesky_tile_size_for,
-    island_tile_caps,
 )
 from genesis.engine.solvers.rigid.rigid_solver import RigidConstraints, RigidConstraintsBackward, RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
@@ -175,7 +174,7 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
         # One update slot per fused update of the per-island factor, one for the whole-env factor of a single island
         nt_vec_n_slots = config.hessian_rank_update_batch if config.sparse_solve or not config.is_single_island else 1
-        n_tile_classes = len(island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
+        n_tile_classes = len(config.island_tile_caps)
         is_serialized = config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = ConstraintState(
             sizes=dict(
@@ -1421,9 +1420,7 @@ def _sort_contacts_and_build_islands(
     has_trivial_partition = qd.static(rigid_config.is_single_island and not rigid_config.sparse_solve)
     if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
         # Reset the per-class (env, island) work-list counters before the per-env builds append to them
-        N_CLASSES = qd.static(
-            len(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
-        )
+        N_CLASSES = qd.static(len(rigid_config.island_tile_caps))
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_class in range(N_CLASSES):
             constraint_state.island.factor_worklist_size[i_class] = 0
@@ -1546,7 +1543,7 @@ def func_append_factor_worklist(
     if qd.static(rigid_config.use_hibernation):
         is_listed = hibernation_state.is_hibernated[i_island, i_b] == 0
     if is_listed:
-        CAPS = qd.static(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
+        CAPS = qd.static(rigid_config.island_tile_caps)
         N_CLASSES = qd.static(len(CAPS))
         region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
         n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
@@ -3212,7 +3209,7 @@ def func_island_hessian_assemble_all(
     where the assembly costs one per row. An island above the last tile cap factors in place (see
     func_island_assemble_factor_solve_tiled), so its block is assembled anew.
     """
-    N_CLASSES = qd.static(len(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)))
+    N_CLASSES = qd.static(len(rigid_config.island_tile_caps))
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
     ROW_TILE = qd.static(32)
@@ -3327,7 +3324,7 @@ def func_island_tiled_factor_solve_all(
     reservation of a launch follows the islands it factors instead of the largest island that could ever form. All T
     lanes of a block read the same work item, so n_constraints/improved and the hibernation and contiguity branches are
     uniform and the per-island block.sync is well-formed."""
-    TILE_CAPS = qd.static(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
+    TILE_CAPS = qd.static(rigid_config.island_tile_caps)
     N_CLASSES = qd.static(len(TILE_CAPS))
     # A single-island scene launches the last class alone, one block per env for its island 0, and skips the
     # work-list: the last cap is the env's dof count rounded up to the tile, or the shared-memory bound below it, and
