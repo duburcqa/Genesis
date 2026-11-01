@@ -198,7 +198,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
     constraint_solver: ConstraintSolver | None
 
     # The constraint force of a substep, after its smooth acceleration, and its integration, which another System may
-    # take over (see 'System.supersedes' and 'System.relocations')
+    # take over (see 'System.relocations')
     constraints = Phase()
     integration = Phase()
 
@@ -3339,7 +3339,7 @@ RigidSolver.api(func_apply_coupling_force, update_qvel, update_qacc_from_qvel_de
 
 
 class RigidConstraints(System):
-    """A System solving the constraints of the rigid entities in place of the rigid solver, which it supersedes."""
+    """A System solving the constraints of the rigid entities in place of the rigid solver, whose constraint force it drops."""
 
     slot = RigidSolver.constraints
     solve_rigid_constraints: Stages

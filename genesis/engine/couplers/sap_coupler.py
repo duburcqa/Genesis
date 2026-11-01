@@ -552,8 +552,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
     # are predicted in place of their constraint force, and their acceleration is recovered from the velocities the
     # couplings solve before they are integrated
     rigid_integration = Phase()
-    supersedes = (RigidSolver.constraints,)
-    relocations = {RigidSolver.integration: rigid_integration}
+    relocations = {RigidSolver.constraints: None, RigidSolver.integration: rigid_integration}
     solve_rigid_constraints = update_qvel
 
     # ------------------------------------------------------------------------------------

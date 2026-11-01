@@ -105,7 +105,7 @@ class IPCCoupler(RBC, Coupler, Coupling):
     # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
     is_differentiable = False
     # IPC computes the dynamics of the FEM entities itself
-    supersedes = (RoleOf(FEMSolver, Dynamics),)
+    relocations = {RoleOf(FEMSolver, Dynamics): None}
 
     def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:
         """

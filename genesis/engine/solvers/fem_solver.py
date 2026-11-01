@@ -858,7 +858,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
             )
-        if self._sim.coupler is not None and RoleOf(FEMSolver, Dynamics) in self._sim.coupler.supersedes:
+        if self._sim.coupler is not None and RoleOf(FEMSolver, Dynamics) in self._sim.coupler.relocations:
             gs.raise_exception(
                 "Vertex constraints are not supported by a coupler computing the dynamics of FEM entities."
             )

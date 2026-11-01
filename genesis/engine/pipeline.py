@@ -84,10 +84,9 @@ class System:
 
     # Whether the System supports a scene with `requires_grad`, which every System of such a scene must
     is_differentiable: bool = True
-    # The slots the roles of other Systems, or the stages of other slots, move to while this System exists (see RoleOf)
-    relocations: ClassVar[dict["RoleOf | Phase", "SlotRef | Phase"]] = {}
-    # The Systems, roles of Systems, or stages their owner adds to a slot, absent while this System exists
-    supersedes: ClassVar["tuple[type[System] | RoleOf | Phase, ...]"] = ()
+    # The slots the roles of other Systems, or the stages their owner adds to a slot, move to while this System exists,
+    # None dropping them (see RoleOf)
+    relocations: ClassVar[dict["RoleOf | Phase", "SlotRef | Phase | None"]] = {}
     # The Systems and the structs its constructor depends on, whose Data its stages bind, the structs read-only
     _dependencies: "tuple[System, ...]" = ()
     _data_dependencies: ClassVar[dict[str, Data]] = {}
@@ -144,8 +143,9 @@ class System:
     def build(self) -> None:
         """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
 
-    def get_parts(self) -> "tuple[System, ...]":
-        """Return the Systems this one builds and holds itself, its annotated parts, which join the scene once built."""
+    @property
+    def parts(self) -> "tuple[System, ...]":
+        """The Systems this one builds and holds itself, its annotated parts, which join the scene once built."""
         parts = [vars(self).get(name) for name, cls in _get_owned_attrs(type(self)).items() if issubclass(cls, System)]
         return tuple([part for part in parts if part is not None])
 
@@ -240,7 +240,7 @@ class SlotRef(NamedTuple):
 
 
 class RoleOf(NamedTuple):
-    """A role a System class plays, which another System relocates or supersedes (see 'System.relocations')."""
+    """A role a System class plays, which another System relocates (see 'System.relocations')."""
 
     system: type
     role: type
@@ -832,7 +832,7 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
     assert system is not None, "A stage is added within the scope of its System (see 'assemble_systems')."
     scope: dict[str, list[Any]] = {}
     for dependency in (system, *system._dependencies):
-        for owner in (dependency, *dependency.get_parts()):
+        for owner in (dependency, *dependency.parts):
             for name, value in vars(owner).items():
                 if not name.startswith("_") and all([value is not other for other in scope.get(name, ())]):
                     scope.setdefault(name, []).append(value)
@@ -840,13 +840,13 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
         if all([struct is not other for other in scope.get(name, ())]):
             scope.setdefault(name, []).append(struct)
     units = [unit for unit in (system, _scope_slot_owner) if unit is not None]
-    owners = [dep for unit in units for dep in unit._dependencies if any([part is unit for part in dep.get_parts()])]
-    unit_systems = [unit_system for unit in (*units, *owners) for unit_system in (unit, *unit.get_parts())]
+    owners = [dep for unit in units for dep in unit._dependencies if any([part is unit for part in dep.parts])]
+    unit_systems = [unit_system for unit in (*units, *owners) for unit_system in (unit, *unit.parts)]
     # The Data another System of the scope declares it owns stays read-only, even held by a System of the unit
     owned_ids = {
         id(vars(other).get(name))
         for dependency in (system, *system._dependencies)
-        for other in (dependency, *dependency.get_parts())
+        for other in (dependency, *dependency.parts)
         if all([other is not unit_system for unit_system in unit_systems])
         for name in _get_owned_attrs(type(other))
     }
@@ -896,10 +896,6 @@ def assemble_systems(
 
     def decide(cls: type[System]) -> "dict[str, Any] | str | None":
         """Return the arguments of a pending class to create, why it is absent, or None while it waits."""
-        if any(
-            [issubclass(cls, item) for system in systems for item in type(system).supersedes if isinstance(item, type)]
-        ):
-            return "superseded"
         # The values a dependency may take, and the classes that may still provide one: the pending classes, the
         # Systems not built yet, and what they own
         values = [
@@ -987,7 +983,7 @@ def assemble_systems(
             built_ids.add(id(system))
             is_progressing = True
             # The parts of a System join the Systems of the scene, built with it, and depend on it
-            for part in system.get_parts():
+            for part in system.parts:
                 if all([part is not other for other in systems]):
                     part._dependencies = (system, *part._dependencies)
                     systems.append(part)
@@ -1023,12 +1019,12 @@ def assemble_systems(
 
 def _route_roles(systems: Sequence[System]) -> None:
     """Add the stage of every role of every System to its slot, or to the slot another System relocates it to."""
-    # The stages the owner of a slot adds to it are dropped by a System superseding the slot, and moved by a System
-    # relocating it, before the roles fill it
+    # The stages the owner of a slot adds to it are moved or dropped by a System relocating the slot, before the roles
+    # fill it
     for system in systems:
-        moves = [(slot, None) for slot in type(system).supersedes if isinstance(slot, Phase)]
-        moves += [(slot, target) for slot, target in type(system).relocations.items() if isinstance(slot, Phase)]
-        for slot, target in moves:
+        for slot, target in type(system).relocations.items():
+            if not isinstance(slot, Phase):
+                continue
             owner = _get_owner(systems, system, slot.owner)
             if owner is None:
                 continue
@@ -1036,8 +1032,7 @@ def _route_roles(systems: Sequence[System]) -> None:
             if target is not None:
                 _get_declared(_get_owner(systems, system, target.owner), target.name).items += source.items
             source.items.clear()
-    relocations: dict[RoleOf, tuple[SlotRef, System]] = {}
-    superseded_roles: list[RoleOf] = []
+    relocations: dict[RoleOf, tuple[SlotRef | Phase | None, System]] = {}
     for system in systems:
         for role_of, slot in type(system).relocations.items():
             if not isinstance(role_of, RoleOf):
@@ -1047,17 +1042,14 @@ def _route_roles(systems: Sequence[System]) -> None:
                     f"{type(system).__name__} and {type(relocations[role_of][1]).__name__} both relocate {role_of}."
                 )
             relocations[role_of] = (slot, system)
-        superseded_roles += [item for item in type(system).supersedes if isinstance(item, RoleOf)]
     for system in systems:
         for role in get_roles(type(system)):
             role_ofs = [
-                role_of
-                for role_of in (*relocations, *superseded_roles)
-                if role_of.role is role and isinstance(system, role_of.system)
+                role_of for role_of in relocations if role_of.role is role and isinstance(system, role_of.system)
             ]
-            if any([role_of in superseded_roles for role_of in role_ofs]):
-                continue
             slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
+            if slot is None:
+                continue
             slot = SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot
             owner = _get_owner(systems, system, slot.owner)
             if owner is None:

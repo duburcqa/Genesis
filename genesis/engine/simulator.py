@@ -601,9 +601,9 @@ class Simulator(RBC):
         """
         The Systems a checkpoint holds the data of: the active solvers, then the other Systems holding data now.
 
-        The data of a part belongs to the data of the System holding it (see 'System.get_parts').
+        The data of a part belongs to the data of the System holding it (see 'System.parts').
         """
-        parts = [part for system in self._systems for part in system.get_parts()]
+        parts = [part for system in self._systems for part in system.parts]
         return [
             *self._active_solvers,
             *[
