@@ -1,4 +1,5 @@
 import argparse
+import gc
 import os
 import pathlib
 import signal
@@ -14,7 +15,8 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import V
+from genesis.engine.solvers import ConstraintSolver
+from genesis.utils.data import ArrayItem, V
 
 RET_SUCCESS = 42
 RET_SKIP = 43
@@ -82,7 +84,7 @@ def test_switching(backend, order):
                 for item in rigid_solver.data
                 if isinstance(item, ArrayItem)
             }
-            data_refs["constraint_state"] = weakref.ref(rigid_solver.constraint_solver.constraint_state)
+            data_refs["constraint_state"] = weakref.ref(scene.sim.get_system(ConstraintSolver).constraint_state)
             del rigid_solver
 
         finally:

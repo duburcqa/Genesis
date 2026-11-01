@@ -11,8 +11,8 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import CHECKPOINT_KINDS, DataItem, DataKind, iter_data
-from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, DataItem, DataKind, iter_data
+from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, SAPCoupler, pairwise
@@ -305,17 +305,19 @@ class Simulator(RBC):
     def destroy(self):
         self._sensor_manager.destroy()
 
-        # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
-        # They are gathered first, since 'data' reads the gradient of an array after yielding it.
-        for solver in self._active_solvers:
-            if type(solver).data is not Solver.data:
-                arrays = [
-                    item.array
-                    for item in solver.data
-                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
-                ]
-                for array in arrays:
-                    qd_destroy_data(array)
+        # The ndarrays of the Systems are freed with their scene, whatever still references them, or else by 'qd.reset'.
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it. The IPC world holds
+        # the state of a scene coupled by IPC (see 'IPCCoupler.data').
+        for system in self._systems:
+            if isinstance(system, IPCCoupler):
+                continue
+            arrays = [
+                item.array
+                for item in system.data
+                if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
+            ]
+            for array in arrays:
+                qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
