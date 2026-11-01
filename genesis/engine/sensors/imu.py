@@ -15,7 +15,6 @@ from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSenso
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
-    from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager

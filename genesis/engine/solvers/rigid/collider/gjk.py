@@ -1,5 +1,4 @@
 import math
-from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import quadrants as qd
@@ -17,7 +16,6 @@ from genesis.engine.solvers.rigid.data import (
     GJKStaticConfig,
     RigidInfo,
 )
-from genesis.utils.data import ConfigItem, DataItem, iter_data
 
 from . import support_field
 from .constants import (

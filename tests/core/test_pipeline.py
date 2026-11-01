@@ -1,5 +1,4 @@
 import functools
-from typing import Annotated
 
 import pytest
 

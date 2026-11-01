@@ -13,7 +13,7 @@ import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
 from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, GJKInfo, GJKState, RigidInfo
 
-from .constants import EPA_POLY_INIT_RETURN_CODE, GJK_RETURN_CODE, RETURN_CODE
+from .constants import EPA_POLY_INIT_RETURN_CODE, RETURN_CODE
 from .gjk_support import func_support
 from .gjk_utils import (
     func_origin_tetra_intersection,

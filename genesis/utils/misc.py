@@ -1159,8 +1159,7 @@ def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) ->
 
 
 def qd_zero_grad(value) -> None:
-    """Zero the `.grad` buffers of a Quadrants field/ndarray, or every grad-bearing slot of a `dataclass` /
-    `@qd.data_oriented` struct-of-arrays.
+    """Zero the `.grad` buffers of a Quadrants field/ndarray, or every grad-bearing slot of a `dataclass` struct.
 
     Reverse-mode accumulation in Genesis writes through `qd.atomic_add`, so adjoint buffers must start at zero between
     consecutive `loss.backward()` calls. Solvers call this from `reset_grad` to clear all owned adjoint storage without
@@ -1181,19 +1180,10 @@ def qd_zero_grad(value) -> None:
                 grad.fill(0.0)
         return
 
-    cls = type(value)
-    if dataclasses.is_dataclass(cls):
-        # The fields alone: a struct also declares its data kind as a class variable (see DataKind in data.py)
-        attr_names = [field.name for field in dataclasses.fields(cls)]
-    else:
-        attr_names = get_own_annotations(cls)
-        if not attr_names:
-            raise_exception(
-                f"qd_zero_grad: expected `qd.Field`, `qd.Ndarray`, or a `dataclass` / `@qd.data_oriented` "
-                f"struct-of-arrays; got `{cls.__name__}`."
-            )
-    for attr_name in attr_names:
-        qd_zero_grad(getattr(value, attr_name, None))
+    assert dataclasses.is_dataclass(value), f"qd_zero_grad: unsupported type `{type(value).__name__}`."
+    # The fields alone: a struct also declares its data kind as a class variable (see DataKind in data.py)
+    for data_field in dataclasses.fields(value):
+        qd_zero_grad(getattr(value, data_field.name, None))
 
 
 # FIXME: quadrants#1039 - the fastcache key misses the members an item reads in its funcs, so the kernels looping over
