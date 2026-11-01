@@ -28,9 +28,13 @@ from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
     VERTICES,
     FEMInfo,
+    FEMPCGVertices,
     FEMState,
     FEMVertexConstraintsInfo,
     func_compute_element_mapping_matrix,
+    func_elastic_products,
+    func_fem_matrix_vector_product,
+    func_pcg_update_residual,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import (
     func_solve_mass_batch,
@@ -61,7 +65,7 @@ from genesis.engine.step import Coupling, Integration, Preparation
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
-from genesis.utils.linalg import SUM_MAX_CHUNKS, FixedOrderSums
+from genesis.utils.linalg import SUM_MAX_CHUNKS, FixedOrderSums, PCGScalars
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
 
@@ -139,24 +143,16 @@ class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
     The unknowns of the SAP solve at the FEM vertices, and the scratch of its conjugate gradient and line search.
 
     `v` is the velocity being solved for, `v_diff` its change from the free velocity, `gradient` the gradient of the
-    cost and `impulse` the contact impulse. `corners` holds the elastic contribution of each element to each of its
-    four vertices, which the vertices sum in a fixed order (see FEMVerticesProperties).
+    cost, `impulse` the contact impulse and `dp` the product of the matrix of the Newton step with its solution. `pcg`
+    holds the vectors of the conjugate gradient, the line search starting from `pcg.x_prev`.
     """
 
     v: qd.Tensor = field((float, 3))
     v_diff: qd.Tensor = field((float, 3))
     gradient: qd.Tensor = field((float, 3))
     impulse: qd.Tensor = field((float, 3))
-    diag3x3: qd.Tensor = field((float, (3, 3)))
-    prec: qd.Tensor = field((float, (3, 3)))
-    x: qd.Tensor = field((float, 3))
-    r: qd.Tensor = field((float, 3))
-    z: qd.Tensor = field((float, 3))
-    p: qd.Tensor = field((float, 3))
-    Ap: qd.Tensor = field((float, 3))
-    x_prev: qd.Tensor = field((float, 3))
     dp: qd.Tensor = field((float, 3))
-    corners: qd.Tensor = field((float, 3), shape=(ELEMENTS, 4, ENVS))
+    pcg: FEMPCGVertices
     sums_v: FixedOrderSums
     sums_el: FixedOrderSums
 
@@ -182,8 +178,8 @@ class SAPRigidDofs(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
 
 class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     """
-    The scalars of the SAP solve of each environment: its Newton iterations, its conjugate gradient and its exact line
-    search.
+    The scalars of the SAP solve of each environment: its Newton iterations, its conjugate gradient `pcg_scalars` and
+    its exact line search.
 
     The line search finds the root of the derivative of the cost along the search direction by safeguarded Newton
     steps within the bracket [`alpha_min`, `alpha_max`], `f_upper` being that derivative scaled by `dell_scale` at
@@ -191,12 +187,9 @@ class SAPSolverScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     """
 
     is_active: qd.Tensor = field(bool)
-    is_pcg_active: qd.Tensor = field(bool)
     is_linesearch_active: qd.Tensor = field(bool)
     is_full_step: qd.Tensor = field(bool)
-    rTz: qd.Tensor = field(float)
-    alpha: qd.Tensor = field(float)
-    beta: qd.Tensor = field(float)
+    pcg_scalars: PCGScalars
     energy_prev: qd.Tensor = field(float)
     step_size: qd.Tensor = field(float)
     m: qd.Tensor = field(float)
@@ -2695,7 +2688,7 @@ def kernel_compute_regularization(
             for i_slot in qd.static(range(fem_slots_vert.n)):
                 i_v = fem_slots_vert[i_slot]
                 if i_v >= 0:
-                    W += fem_slots_weight[i_slot] ** 2 * dt2_inv * fem_state.newton.prec[i_v, i_b]
+                    W += fem_slots_weight[i_slot] ** 2 * dt2_inv * fem_state.newton.pcg.prec[i_v, i_b]
         frame = sap_state.pairs.frame[i_p]
         W = frame.transpose() @ W @ frame
 
@@ -2821,82 +2814,6 @@ def func_sum_rigid_Jt_vec(sap_state: SAPState, sap_info: SAPInfo):
                 i_p = sap_state.pairs.sort.values[i_s]
                 Jt_vec += sap_state.pairs.Jt[i_p, i_d].dot(sap_state.pairs.vec[i_p])
             sap_state.pairs.dofs_partials[i_chunk, i_d, i_r, i_b] = Jt_vec
-
-
-@qd.func
-def func_compute_elastic_products(
-    i_e: int,
-    i_b: int,
-    S: qd.types.matrix(4, 3),
-    src: qd.template(),
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-):
-    """Return S^T x of an element, x being the values of a field at its vertices, and its Hessian times it."""
-    el2v = fem_info.elements.el2v[i_e]
-    p9 = qd.Vector.zero(gs.qd_float, 9)
-    for i, j in qd.static(qd.ndrange(3, 4)):
-        p9[i * 3 : i * 3 + 3] = p9[i * 3 : i * 3 + 3] + (S[j, i] * src[el2v[j], i_b])
-
-    H9_p9 = qd.Vector.zero(gs.qd_float, 9)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        H9_p9[i * 3 : i * 3 + 3] = H9_p9[i * 3 : i * 3 + 3] + (
-            fem_state.newton.hessian[i, j, i_e, i_b] @ p9[j * 3 : j * 3 + 3]
-        )
-    return p9, H9_p9
-
-
-@qd.func(requires_top_level=True)
-def func_compute_fem_matrix_vector_product(
-    src: qd.template(),
-    dst: qd.template(),
-    active: qd.template(),
-    vertex_constraints: FEMVertexConstraintsInfo,
-    sap_state: SAPState,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    static_config: qd.template(),
-    add_contacts: qd.template(),
-    sum_dot: qd.template(),
-):
-    """
-    Compute the product of the FEM matrix with a field of the vertices, the mass matrix plus the elastic stiffness.
-
-    With `add_contacts`, the product includes the contact Hessian, the pairs holding the contact part of the product in
-    their impulses. With `sum_dot`, the partial sums of src.dot(dst) over the vertices go to slot 0 of the sums of the
-    vertices.
-    """
-    # Elasticity, per corner of the elements
-    for i_e, i_b in qd.ndrange(sap_state.fem.corners.shape[0], sap_state.fem.corners.shape[2]):
-        if active[i_b]:
-            dt = fem_info.substep_dt[None]
-            S = func_compute_element_mapping_matrix(i_e, i_b, vertex_constraints, fem_info, static_config)
-            _, new_p9 = func_compute_elastic_products(i_e, i_b, S, src, fem_state, fem_info)
-            scale = fem_info.elements.V[i_e] * dt**2 * (fem_info.damping_beta[None] / dt + 1.0)
-            for i in qd.static(range(4)):
-                sap_state.fem.corners[i_e, i, i_b] = (
-                    S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]
-                ) * scale
-
-    # Inertia, and the elastic contributions of the corners touching the vertex in their order
-    for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
-        if active[i_b]:
-            dt = fem_info.substep_dt[None]
-            damping_alpha_factor = fem_info.damping_alpha[None] * dt + 1.0
-            dst_v = fem_info.vertices.mass_over_dt2[i_v] * src[i_v, i_b] * dt**2 * damping_alpha_factor
-            for i_entry in range(fem_info.vertices.corner_start[i_v], fem_info.vertices.corner_start[i_v + 1]):
-                i_corner = fem_info.vertices.corner[i_entry]
-                dst_v += sap_state.fem.corners[i_corner // 4, i_corner % 4, i_b]
-            if qd.static(add_contacts):
-                Jt_vec, _ = func_fem_contacts_Jt(
-                    i_v, i_b, vertex_constraints, sap_state, static_config, compute_hessian=False
-                )
-                dst_v += Jt_vec
-            dst[i_v, i_b] = dst_v
-            if qd.static(sum_dot):
-                sap_state.fem.sums_v.terms[i_v, 0, i_b] = src[i_v, i_b].dot(dst_v)
-    if qd.static(sum_dot):
-        lu.func_reduce_terms(sap_state.fem.sums_v, active)
 
 
 @qd.func(requires_top_level=True)
@@ -3035,8 +2952,10 @@ def kernel_init_unconstrained_gradient_diag(
     if qd.static(static_config.has_fem):
         for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
             sap_state.fem.gradient[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            # The Hessian of the FEM solver is in positions, which turns into velocities times dt^2
-            sap_state.fem.diag3x3[i_v, i_b] = fem_state.newton.diag3x3[i_v, i_b] * fem_info.substep_dt[None] ** 2
+            # See kernel_compute_unconstrained_gradient for the dt^2
+            sap_state.fem.pcg.diag3x3[i_v, i_b] = (
+                fem_state.newton.pcg.diag3x3[i_v, i_b] * fem_info.substep_dt[None] ** 2
+            )
             sap_state.fem.v_diff[i_v, i_b] = sap_state.fem.v[i_v, i_b] - fem_state.vertices.vel[f + 1, i_v, i_b]
     if qd.static(static_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
@@ -3054,18 +2973,24 @@ def kernel_compute_unconstrained_gradient(
     rigid_info: RigidInfo,
     static_config: qd.template(),
 ):
-    """Compute the free motion part of the gradient, A (v - v*), A being the mass matrix of the free motion."""
+    """
+    Compute the free motion part of the gradient, A (v - v*), A being the mass matrix of the free motion.
+
+    The FEM part of A is the matrix of the Newton step of the implicit solver, in positions, which turns into velocities
+    times dt^2.
+    """
     if qd.static(static_config.has_fem):
-        func_compute_fem_matrix_vector_product(
+        func_fem_matrix_vector_product(
+            fem_info.substep_dt[None] ** 2,
             sap_state.fem.v_diff,
             sap_state.fem.gradient,
+            sap_state.fem.pcg.corners,
             sap_state.solver.is_active,
+            fem_state.newton.hessian,
+            sap_state.fem.sums_v,
             vertex_constraints,
-            sap_state,
-            fem_state,
             fem_info,
             static_config,
-            add_contacts=False,
             sum_dot=False,
         )
     if qd.static(static_config.has_rigid):
@@ -3121,9 +3046,9 @@ def kernel_compute_constraint_contact_gradient_hessian_diag_prec(
                 )
                 sap_state.fem.impulse[i_v, i_b] = Jt_gamma
                 sap_state.fem.gradient[i_v, i_b] -= Jt_gamma
-                diag3x3 = sap_state.fem.diag3x3[i_v, i_b] + Jt_A_J
-                sap_state.fem.diag3x3[i_v, i_b] = diag3x3
-                sap_state.fem.prec[i_v, i_b] = diag3x3.inverse()
+                diag3x3 = sap_state.fem.pcg.diag3x3[i_v, i_b] + Jt_A_J
+                sap_state.fem.pcg.diag3x3[i_v, i_b] = diag3x3
+                sap_state.fem.pcg.prec[i_v, i_b] = diag3x3.inverse()
     if qd.static(static_config.has_rigid):
         # The impulses and the gradient of the dofs, gathering the equality constraints and the pairs
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
@@ -3180,38 +3105,38 @@ def kernel_init_pcg_solve(
 ):
     """Start the conjugate gradient solve of the Newton step from zero, with minus the gradient as residual."""
     for i_b in range(sap_state.solver.is_active.shape[0]):
-        sap_state.solver.is_pcg_active[i_b] = sap_state.solver.is_active[i_b]
+        sap_state.solver.pcg_scalars.is_active[i_b] = sap_state.solver.is_active[i_b]
     if qd.static(static_config.has_fem):
         for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.fem.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
+                sap_state.fem.pcg.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
                 r = -sap_state.fem.gradient[i_v, i_b]
-                z = sap_state.fem.prec[i_v, i_b] @ r
-                sap_state.fem.r[i_v, i_b] = r
-                sap_state.fem.z[i_v, i_b] = z
-                sap_state.fem.p[i_v, i_b] = z
+                z = sap_state.fem.pcg.prec[i_v, i_b] @ r
+                sap_state.fem.pcg.r[i_v, i_b] = r
+                sap_state.fem.pcg.z[i_v, i_b] = z
+                sap_state.fem.pcg.p[i_v, i_b] = z
                 sap_state.fem.sums_v.terms[i_v, 0, i_b] = r.dot(r)
                 sap_state.fem.sums_v.terms[i_v, 1, i_b] = r.dot(z)
-        lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.is_pcg_active)
+        lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.pcg_scalars.is_active)
     if qd.static(static_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
                 sap_state.rigid.x[i_d, i_b] = 0.0
                 sap_state.rigid.r[i_d, i_b] = -sap_state.rigid.gradient[i_d, i_b]
                 sap_state.rigid.sums.terms[i_d, 0, i_b] = sap_state.rigid.r[i_d, i_b] ** 2
         for i_b in range(sap_state.rigid.r.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
                 func_solve_mass_batch(i_b, sap_state.rigid.r, sap_state.rigid.z, dyn_state, rigid_info, rigid_config)
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
                 sap_state.rigid.p[i_d, i_b] = sap_state.rigid.z[i_d, i_b]
                 sap_state.rigid.sums.terms[i_d, 1, i_b] = sap_state.rigid.r[i_d, i_b] * sap_state.rigid.z[i_d, i_b]
-        lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.is_pcg_active)
+        lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.pcg_scalars.is_active)
     for i_b in range(sap_state.solver.is_active.shape[0]):
-        if sap_state.solver.is_pcg_active[i_b]:
+        if sap_state.solver.pcg_scalars.is_active[i_b]:
             rTr = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
-            sap_state.solver.rTz[i_b] = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
-            sap_state.solver.is_pcg_active[i_b] = rTr > sap_info.pcg_threshold[None]
+            sap_state.solver.pcg_scalars.rTz[i_b] = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
+            sap_state.solver.pcg_scalars.is_active[i_b] = rTr > sap_info.pcg_threshold[None]
 
 
 @qd.kernel(fastcache=True)
@@ -3241,28 +3166,39 @@ def kernel_one_pcg_iter(
             sap_state.equalities.vec[i_c] = sap_state.equalities.R_inv[i_c] * vc
     for i_s in range(sap_state.pairs.sort.n_keys[()]):
         i_p = sap_state.pairs.sort.values[i_s]
-        x = func_contact_velocity(i_p, sap_state.fem.p, sap_state.rigid.p, sap_state, static_config)
+        x = func_contact_velocity(i_p, sap_state.fem.pcg.p, sap_state.rigid.p, sap_state, static_config)
         sap_state.pairs.vec[i_p] = sap_state.pairs.frame[i_p] @ (sap_state.pairs.G[i_p] @ x)
     if qd.static(static_config.has_rigid_contacts):
         func_sum_rigid_Jt_vec(sap_state, sap_info)
     if qd.static(static_config.has_fem):
-        func_compute_fem_matrix_vector_product(
-            sap_state.fem.p,
-            sap_state.fem.Ap,
-            sap_state.solver.is_pcg_active,
+        # See kernel_compute_unconstrained_gradient for the FEM matrix
+        func_fem_matrix_vector_product(
+            fem_info.substep_dt[None] ** 2,
+            sap_state.fem.pcg.p,
+            sap_state.fem.pcg.Ap,
+            sap_state.fem.pcg.corners,
+            sap_state.solver.pcg_scalars.is_active,
+            fem_state.newton.hessian,
+            sap_state.fem.sums_v,
             vertex_constraints,
-            sap_state,
-            fem_state,
             fem_info,
             static_config,
-            add_contacts=True,
-            sum_dot=True,
+            sum_dot=False,
         )
+        for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
+                Jt_vec, _ = func_fem_contacts_Jt(
+                    i_v, i_b, vertex_constraints, sap_state, static_config, compute_hessian=False
+                )
+                Ap = sap_state.fem.pcg.Ap[i_v, i_b] + Jt_vec
+                sap_state.fem.pcg.Ap[i_v, i_b] = Ap
+                sap_state.fem.sums_v.terms[i_v, 0, i_b] = sap_state.fem.pcg.p[i_v, i_b].dot(Ap)
+        lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.pcg_scalars.is_active)
     if qd.static(static_config.has_rigid):
         func_compute_rigid_mass_mat_vec_product(
             sap_state.rigid.p,
             sap_state.rigid.Ap,
-            sap_state.solver.is_pcg_active,
+            sap_state.solver.pcg_scalars.is_active,
             sap_state,
             sap_info,
             rigid_info,
@@ -3273,61 +3209,53 @@ def kernel_one_pcg_iter(
 
     # The step
     for i_b in range(sap_state.solver.is_active.shape[0]):
-        if sap_state.solver.is_pcg_active[i_b]:
+        if sap_state.solver.pcg_scalars.is_active[i_b]:
             pTAp = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
-            sap_state.solver.alpha[i_b] = sap_state.solver.rTz[i_b] / pTAp
+            sap_state.solver.pcg_scalars.alpha[i_b] = sap_state.solver.pcg_scalars.rTz[i_b] / pTAp
 
     # x, r, z, and the terms of r^T r and r^T z
     if qd.static(static_config.has_fem):
-        for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                alpha = sap_state.solver.alpha[i_b]
-                sap_state.fem.x[i_v, i_b] = sap_state.fem.x[i_v, i_b] + alpha * sap_state.fem.p[i_v, i_b]
-                r = sap_state.fem.r[i_v, i_b] - alpha * sap_state.fem.Ap[i_v, i_b]
-                z = sap_state.fem.prec[i_v, i_b] @ r
-                sap_state.fem.r[i_v, i_b] = r
-                sap_state.fem.z[i_v, i_b] = z
-                sap_state.fem.sums_v.terms[i_v, 1, i_b] = r.norm_sqr()
-                sap_state.fem.sums_v.terms[i_v, 2, i_b] = r.dot(z)
-        lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.is_pcg_active)
+        func_pcg_update_residual(sap_state.fem.pcg, sap_state.solver.pcg_scalars, sap_state.fem.sums_v)
     if qd.static(static_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                alpha = sap_state.solver.alpha[i_b]
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
+                alpha = sap_state.solver.pcg_scalars.alpha[i_b]
                 sap_state.rigid.x[i_d, i_b] = sap_state.rigid.x[i_d, i_b] + alpha * sap_state.rigid.p[i_d, i_b]
                 sap_state.rigid.r[i_d, i_b] = sap_state.rigid.r[i_d, i_b] - alpha * sap_state.rigid.Ap[i_d, i_b]
-                sap_state.rigid.sums.terms[i_d, 1, i_b] = sap_state.rigid.r[i_d, i_b] ** 2
+                sap_state.rigid.sums.terms[i_d, 0, i_b] = sap_state.rigid.r[i_d, i_b] ** 2
         for i_b in range(sap_state.rigid.r.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
                 func_solve_mass_batch(i_b, sap_state.rigid.r, sap_state.rigid.z, dyn_state, rigid_info, rigid_config)
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.rigid.sums.terms[i_d, 2, i_b] = sap_state.rigid.r[i_d, i_b] * sap_state.rigid.z[i_d, i_b]
-        lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.is_pcg_active)
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
+                sap_state.rigid.sums.terms[i_d, 1, i_b] = sap_state.rigid.r[i_d, i_b] * sap_state.rigid.z[i_d, i_b]
+        lu.func_reduce_terms(sap_state.rigid.sums, sap_state.solver.pcg_scalars.is_active)
 
-    # Convergence, then beta, r^T r and r^T z
+    # Convergence, then beta, r^T z and the search direction
     for i_b in range(sap_state.solver.is_active.shape[0]):
-        if sap_state.solver.is_pcg_active[i_b]:
-            rTr = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
-            rTz = func_sum_vertices_dofs(i_b, 2, sap_state, static_config)
-            sap_state.solver.is_pcg_active[i_b] = rTr > sap_info.pcg_threshold[None]
-            if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.solver.beta[i_b] = rTz / sap_state.solver.rTz[i_b]
-                sap_state.solver.rTz[i_b] = rTz
-
-    # The search direction
+        if sap_state.solver.pcg_scalars.is_active[i_b]:
+            rTr = func_sum_vertices_dofs(i_b, 0, sap_state, static_config)
+            rTz = func_sum_vertices_dofs(i_b, 1, sap_state, static_config)
+            sap_state.solver.pcg_scalars.is_active[i_b] = rTr > sap_info.pcg_threshold[None]
+            if sap_state.solver.pcg_scalars.is_active[i_b]:
+                sap_state.solver.pcg_scalars.beta[i_b] = rTz / sap_state.solver.pcg_scalars.rTz[i_b]
+                sap_state.solver.pcg_scalars.rTz[i_b] = rTz
     if qd.static(static_config.has_fem):
-        for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.fem.p[i_v, i_b] = (
-                    sap_state.fem.z[i_v, i_b] + sap_state.solver.beta[i_b] * sap_state.fem.p[i_v, i_b]
-                )
+        lu.func_axpy(
+            sap_state.fem.pcg.p,
+            sap_state.fem.pcg.z,
+            sap_state.solver.pcg_scalars.beta,
+            sap_state.fem.pcg.p,
+            sap_state.solver.pcg_scalars.is_active,
+        )
     if qd.static(static_config.has_rigid):
-        for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_pcg_active[i_b]:
-                sap_state.rigid.p[i_d, i_b] = (
-                    sap_state.rigid.z[i_d, i_b] + sap_state.solver.beta[i_b] * sap_state.rigid.p[i_d, i_b]
-                )
+        lu.func_axpy(
+            sap_state.rigid.p,
+            sap_state.rigid.z,
+            sap_state.solver.pcg_scalars.beta,
+            sap_state.rigid.p,
+            sap_state.solver.pcg_scalars.is_active,
+        )
 
 
 @qd.func(requires_top_level=True)
@@ -3349,7 +3277,7 @@ def func_compute_line_gradient_hessian(
         for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
             if sap_state.solver.is_linesearch_active[i_b]:
                 alpha = sap_state.solver.step_size[i_b]
-                v = sap_state.fem.x_prev[i_v, i_b] + alpha * sap_state.fem.x[i_v, i_b]
+                v = sap_state.fem.pcg.x_prev[i_v, i_b] + alpha * sap_state.fem.pcg.x[i_v, i_b]
                 sap_state.fem.v[i_v, i_b] = v
                 dell = sap_state.fem.dp[i_v, i_b].dot(v - fem_state.vertices.vel[f + 1, i_v, i_b])
                 sap_state.fem.sums_v.terms[i_v, 0, i_b] = dell
@@ -3404,10 +3332,10 @@ def kernel_init_exact_linesearch(
     if qd.static(static_config.has_fem):
         for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
             if sap_state.solver.is_linesearch_active[i_b]:
-                sap_state.fem.sums_v.terms[i_v, 0, i_b] = sap_state.fem.x[i_v, i_b].dot(
+                sap_state.fem.sums_v.terms[i_v, 0, i_b] = sap_state.fem.pcg.x[i_v, i_b].dot(
                     sap_state.fem.gradient[i_v, i_b]
                 )
-                sap_state.fem.x_prev[i_v, i_b] = sap_state.fem.v[i_v, i_b]
+                sap_state.fem.pcg.x_prev[i_v, i_b] = sap_state.fem.v[i_v, i_b]
         lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.is_linesearch_active)
     if qd.static(static_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
@@ -3436,13 +3364,17 @@ def kernel_init_exact_linesearch(
                     * (fem_info.damping_alpha[None] * dt + 1.0)
                 )
         lu.func_reduce_terms(sap_state.fem.sums_v, sap_state.solver.is_linesearch_active)
-        for i_e, i_b in qd.ndrange(sap_state.fem.corners.shape[0], sap_state.fem.corners.shape[2]):
+        for i_e, i_b in qd.ndrange(sap_state.fem.pcg.corners.shape[0], sap_state.fem.pcg.corners.shape[2]):
             if sap_state.solver.is_linesearch_active[i_b]:
                 dt = fem_info.substep_dt[None]
+                el2v = fem_info.elements.el2v[i_e]
+                v_diff = qd.Matrix.zero(gs.qd_float, 3, 4)
+                for i in qd.static(range(4)):
+                    v_diff[:, i] = sap_state.fem.v_diff[el2v[i], i_b]
                 S = func_compute_element_mapping_matrix(i_e, i_b, vertex_constraints, fem_info, static_config)
-                p9, H9_p9 = func_compute_elastic_products(i_e, i_b, S, sap_state.fem.v_diff, fem_state, fem_info)
+                St_v, H_St_v = func_elastic_products(i_e, i_b, S, v_diff, fem_state.newton.hessian)
                 sap_state.fem.sums_el.terms[i_e, 0, i_b] = (
-                    0.5 * p9.dot(H9_p9) * (fem_info.damping_beta[None] / dt + 1.0) * fem_info.elements.V[i_e] * dt**2
+                    0.5 * St_v.dot(H_St_v) * (fem_info.damping_beta[None] / dt + 1.0) * fem_info.elements.V[i_e] * dt**2
                 )
         lu.func_reduce_terms(sap_state.fem.sums_el, sap_state.solver.is_linesearch_active)
     if qd.static(static_config.has_rigid):
@@ -3476,16 +3408,18 @@ def kernel_init_exact_linesearch(
 
     # A @ x along the search direction, and the change of the velocity of the constraints and of the pairs
     if qd.static(static_config.has_fem):
-        func_compute_fem_matrix_vector_product(
-            sap_state.fem.x,
+        # See kernel_compute_unconstrained_gradient for the FEM matrix
+        func_fem_matrix_vector_product(
+            fem_info.substep_dt[None] ** 2,
+            sap_state.fem.pcg.x,
             sap_state.fem.dp,
+            sap_state.fem.pcg.corners,
             sap_state.solver.is_linesearch_active,
+            fem_state.newton.hessian,
+            sap_state.fem.sums_v,
             vertex_constraints,
-            sap_state,
-            fem_state,
             fem_info,
             static_config,
-            add_contacts=False,
             sum_dot=True,
         )
     if qd.static(static_config.has_rigid):
@@ -3512,7 +3446,7 @@ def kernel_init_exact_linesearch(
         i_b = sap_state.pairs.batch_idx[i_p]
         if sap_state.solver.is_linesearch_active[i_b]:
             sap_state.pairs.dvc[i_p] = func_contact_velocity(
-                i_p, sap_state.fem.x, sap_state.rigid.x, sap_state, static_config
+                i_p, sap_state.fem.pcg.x, sap_state.rigid.x, sap_state, static_config
             )
     # The second derivative of the dynamic energy along the search direction
     for i_b in range(sap_state.solver.is_active.shape[0]):
@@ -3541,13 +3475,21 @@ def kernel_init_exact_linesearch(
                 sap_state.solver.step_size[i_b] = 1.0
         sap_state.solver.is_full_step[i_b] = is_full_step
     if qd.static(static_config.has_fem):
-        for i_v, i_b in qd.ndrange(sap_state.fem.v.shape[0], sap_state.fem.v.shape[1]):
-            if sap_state.solver.is_full_step[i_b]:
-                sap_state.fem.v[i_v, i_b] = sap_state.fem.x_prev[i_v, i_b] + sap_state.fem.x[i_v, i_b]
+        lu.func_axpy(
+            sap_state.fem.v,
+            sap_state.fem.pcg.x_prev,
+            sap_state.solver.step_size,
+            sap_state.fem.pcg.x,
+            sap_state.solver.is_full_step,
+        )
     if qd.static(static_config.has_rigid):
-        for i_d, i_b in qd.ndrange(sap_state.rigid.v.shape[0], sap_state.rigid.v.shape[1]):
-            if sap_state.solver.is_full_step[i_b]:
-                sap_state.rigid.v[i_d, i_b] = sap_state.rigid.x_prev[i_d, i_b] + sap_state.rigid.x[i_d, i_b]
+        lu.func_axpy(
+            sap_state.rigid.v,
+            sap_state.rigid.x_prev,
+            sap_state.solver.step_size,
+            sap_state.rigid.x,
+            sap_state.solver.is_full_step,
+        )
 
     # The bracket of the root of the derivative of the energy along the search direction
     for i_b in range(sap_state.solver.is_active.shape[0]):

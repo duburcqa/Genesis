@@ -20,7 +20,7 @@ from genesis.engine.step import Dynamics
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.linalg import FixedOrderSums
+from genesis.utils.linalg import FixedOrderSums, PCGScalars
 from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, qd_zero_grad, tensor_to_array
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
@@ -124,11 +124,32 @@ class FEMExplicitCorners(Data, kind=DataKind.SCRATCH, shape=(CORNER_FRAMES, ELEM
 
 
 class FEMImplicitCorners(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, 4, ENVS)):
-    """The contribution of each element to the force, the diagonal block of the Hessian and A * p of its vertices."""
+    """The contribution of each element to the force and to the diagonal block of the Hessian of its vertices."""
 
     force: qd.Tensor = field((float, 3))
     diag3x3: qd.Tensor = field((float, (3, 3)))
+
+
+class FEMPCGVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The vectors of a preconditioned conjugate gradient solve of a Newton step over the vertices.
+
+    The implicit solver and the SAP coupler solve one each. `diag3x3` is the diagonal block of the matrix of the step at
+    each vertex, whose inverse `prec` preconditions the solve. `x` is the solution, `r` the residual, `z` the
+    preconditioned residual, `p` the search direction, `Ap` the product of the matrix with it, and `x_prev` the iterate
+    the line search starts from. `corners` holds the contribution of each element to a product of the matrix at each of
+    its four vertices, which the vertices sum in a fixed order (see FEMVerticesProperties).
+    """
+
+    diag3x3: qd.Tensor = field((float, (3, 3)))
+    prec: qd.Tensor = field((float, (3, 3)))
+    x: qd.Tensor = field((float, 3))
+    r: qd.Tensor = field((float, 3))
+    z: qd.Tensor = field((float, 3))
+    p: qd.Tensor = field((float, 3))
     Ap: qd.Tensor = field((float, 3))
+    x_prev: qd.Tensor = field((float, 3))
+    corners: qd.Tensor = field((float, 3), shape=(ELEMENTS, 4, ENVS))
 
 
 class FEMNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
@@ -137,9 +158,9 @@ class FEMNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
 
     Per element: the elastic `energy` density, its `gradient` with respect to the deformation gradient, the blocks
     `hessian[i, j]` of its Hessian, and the `rotation` the linear corotated materials linearize around. Per vertex: the
-    `inertia` target, the `diag3x3` block of the Hessian and its inverse `prec`, the conjugate gradient vectors and the
-    position `x_prev` the line search starts from. Per environment: whether the conjugate gradient and the line search
-    are still running, and their scalars.
+    `inertia` target and the conjugate gradient vectors `pcg`, the line search starting from `pcg.x_prev`. Per
+    environment: the scalars of the conjugate gradient `pcg_scalars`, whether the line search is still running, and its
+    scalars.
 
     The Hessian of a material whose Hessian does not depend on the deformation is written once and read by every later
     solve, hence its kind.
@@ -150,28 +171,14 @@ class FEMNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
     hessian: qd.Tensor = field((float, (3, 3)), shape=(3, 3, ELEMENTS, ENVS), kind=DataKind.STATE)
     rotation: qd.Tensor = field((float, (3, 3)), shape=(ELEMENTS, ENVS))
     inertia: qd.Tensor = field((float, 3))
-    diag3x3: qd.Tensor = field((float, (3, 3)))
-    prec: qd.Tensor = field((float, (3, 3)))
-    x: qd.Tensor = field((float, 3))
-    r: qd.Tensor = field((float, 3))
-    z: qd.Tensor = field((float, 3))
-    p: qd.Tensor = field((float, 3))
-    Ap: qd.Tensor = field((float, 3))
-    x_prev: qd.Tensor = field((float, 3))
-    is_pcg_active: qd.Tensor = field(bool, shape=(ENVS,))
     is_linesearch_active: qd.Tensor = field(bool, shape=(ENVS,))
-    rTr: qd.Tensor = field(float, shape=(ENVS,))
-    rTz: qd.Tensor = field(float, shape=(ENVS,))
-    rTr_new: qd.Tensor = field(float, shape=(ENVS,))
-    rTz_new: qd.Tensor = field(float, shape=(ENVS,))
-    pTAp: qd.Tensor = field(float, shape=(ENVS,))
-    alpha: qd.Tensor = field(float, shape=(ENVS,))
-    beta: qd.Tensor = field(float, shape=(ENVS,))
     prev_energy: qd.Tensor = field(float, shape=(ENVS,))
     linesearch_energy: qd.Tensor = field(float, shape=(ENVS,))
     step_size: qd.Tensor = field(float, shape=(ENVS,))
     m: qd.Tensor = field(float, shape=(ENVS,))
     corners: FEMImplicitCorners
+    pcg: FEMPCGVertices
+    pcg_scalars: PCGScalars
     sums_v: FixedOrderSums
     sums_el: FixedOrderSums
 
@@ -1021,28 +1028,112 @@ def func_compute_element_mapping_matrix(
 
 
 @qd.func
+def func_elastic_products(
+    i_e: int, i_b: int, S: qd.types.matrix(4, 3), x: qd.types.matrix(3, 4), hessian: qd.template()
+):
+    """
+    Return S^T x of an element in deformation gradient space and its product with the elastic Hessian `hessian`.
+
+    `x` holds the values of a field at the four vertices of the element as its columns, mapped through `S` (see
+    func_compute_element_mapping_matrix).
+    """
+    St_x = qd.Vector.zero(gs.qd_float, 9)
+    for i, j in qd.static(qd.ndrange(3, 4)):
+        St_x[i * 3 : i * 3 + 3] += S[j, i] * x[:, j]
+
+    H_St_x = qd.Vector.zero(gs.qd_float, 9)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        H_St_x[i * 3 : i * 3 + 3] += hessian[i, j, i_e, i_b] @ St_x[j * 3 : j * 3 + 3]
+    return St_x, H_St_x
+
+
+@qd.func
 def func_damping_force_term(
     f: int, i_e: int, i_b: int, S: qd.types.matrix(4, 3), fem_state: FEMState, fem_info: FEMInfo
 ):
-    """
-    Return the displacement of an element over the substep in deformation gradient space, and its Hessian product.
-
-    The displacement dx of the vertices maps through `S` (see func_compute_element_mapping_matrix), giving S^T dx and
-    H S^T dx.
-    """
-    i_vs = fem_info.elements.el2v[i_e]
-    x_diff = qd.Vector.zero(gs.qd_float, 12)
+    """Return the displacement of an element over the substep in deformation gradient space, and its Hessian product
+    (see func_elastic_products)."""
+    el2v = fem_info.elements.el2v[i_e]
+    x_diff = qd.Matrix.zero(gs.qd_float, 3, 4)
     for i in qd.static(range(4)):
-        i_v = i_vs[i]
-        x_diff[i * 3 : i * 3 + 3] = fem_state.vertices.pos[f + 1, i_v, i_b] - fem_state.vertices.pos[f, i_v, i_b]
-    St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-    for i, j in qd.static(qd.ndrange(3, 4)):
-        St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
+        i_v = el2v[i]
+        x_diff[:, i] = fem_state.vertices.pos[f + 1, i_v, i_b] - fem_state.vertices.pos[f, i_v, i_b]
+    return func_elastic_products(i_e, i_b, S, x_diff, fem_state.newton.hessian)
 
-    H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        H_St_x_diff[i * 3 : i * 3 + 3] += fem_state.newton.hessian[i, j, i_e, i_b] @ St_x_diff[j * 3 : j * 3 + 3]
-    return St_x_diff, H_St_x_diff
+
+@qd.func(requires_top_level=True)
+def func_fem_matrix_vector_product(
+    scale: float,
+    src: qd.template(),
+    dst: qd.template(),
+    corners: qd.template(),
+    active: qd.template(),
+    hessian: qd.template(),
+    sums: FixedOrderSums,
+    vertex_constraints: FEMVertexConstraintsInfo,
+    fem_info: FEMInfo,
+    static_config: qd.template(),
+    sum_dot: qd.template(),
+):
+    """
+    Compute `scale` times the product of the matrix of the Newton step of the implicit solver with a field of the
+    vertices, for the environments whose `active` is set.
+
+    The matrix is the mass matrix over dt^2 plus the elastic stiffness of the Hessian `hessian`, each with its Rayleigh
+    damping, the rows of the constrained vertices being zero. The elements write their contributions to `corners`
+    before the vertices sum them in order. With `sum_dot`, the terms of src.dot(dst) over the vertices go to slot 0 of
+    `sums`, summed in fixed order.
+    """
+    for i_e, i_b in qd.ndrange(corners.shape[0], corners.shape[2]):
+        if active[i_b]:
+            el2v = fem_info.elements.el2v[i_e]
+            x = qd.Matrix.zero(gs.qd_float, 3, 4)
+            for i in qd.static(range(4)):
+                x[:, i] = src[el2v[i], i_b]
+            S = func_compute_element_mapping_matrix(i_e, i_b, vertex_constraints, fem_info, static_config)
+            _, H_St_x = func_elastic_products(i_e, i_b, S, x, hessian)
+            damping_beta_factor = fem_info.damping_beta[None] / fem_info.substep_dt[None] + 1.0
+            for i in qd.static(range(4)):
+                corners[i_e, i, i_b] = (
+                    (S[i, 0] * H_St_x[0:3] + S[i, 1] * H_St_x[3:6] + S[i, 2] * H_St_x[6:9])
+                    * fem_info.elements.V[i_e]
+                    * damping_beta_factor
+                    * scale
+                )
+
+    for i_v, i_b in qd.ndrange(src.shape[0], src.shape[1]):
+        if active[i_b]:
+            damping_alpha_factor = fem_info.damping_alpha[None] * fem_info.substep_dt[None] + 1.0
+            dst_v = fem_info.vertices.mass_over_dt2[i_v] * damping_alpha_factor * scale * src[i_v, i_b]
+            for i_entry in range(fem_info.vertices.corner_start[i_v], fem_info.vertices.corner_start[i_v + 1]):
+                i_corner = fem_info.vertices.corner[i_entry]
+                dst_v += corners[i_corner // 4, i_corner % 4, i_b]
+            dst[i_v, i_b] = dst_v
+            if qd.static(sum_dot):
+                sums.terms[i_v, 0, i_b] = src[i_v, i_b].dot(dst_v)
+    if qd.static(sum_dot):
+        lu.func_reduce_terms(sums, active)
+
+
+@qd.func(requires_top_level=True)
+def func_pcg_update_residual(pcg: FEMPCGVertices, pcg_scalars: PCGScalars, sums: FixedOrderSums):
+    """
+    Step the solution and the residual of the conjugate gradient solve along the search direction, then precondition
+    the residual.
+
+    The terms of r^T r and r^T z over the vertices go to slots 0 and 1 of `sums`, summed in fixed order.
+    """
+    for i_v, i_b in qd.ndrange(pcg.x.shape[0], pcg.x.shape[1]):
+        if pcg_scalars.is_active[i_b]:
+            alpha = pcg_scalars.alpha[i_b]
+            pcg.x[i_v, i_b] += alpha * pcg.p[i_v, i_b]
+            r = pcg.r[i_v, i_b] - alpha * pcg.Ap[i_v, i_b]
+            z = pcg.prec[i_v, i_b] @ r
+            pcg.r[i_v, i_b] = r
+            pcg.z[i_v, i_b] = z
+            sums.terms[i_v, 0, i_b] = r.dot(r)
+            sums.terms[i_v, 1, i_b] = r.dot(z)
+    lu.func_reduce_terms(sums, pcg_scalars.is_active)
 
 
 @qd.kernel
@@ -1234,29 +1325,29 @@ def kernel_accumulate_vertex_force_preconditioner(
             force += fem_state.newton.corners.force[i_corner // 4, i_corner % 4, i_b]
             diag3x3 += fem_state.newton.corners.diag3x3[i_corner // 4, i_corner % 4, i_b]
         fem_state.force[i_v, i_b] = force
-        fem_state.newton.diag3x3[i_v, i_b] = diag3x3
-        fem_state.newton.prec[i_v, i_b] = diag3x3.inverse()
+        fem_state.newton.pcg.diag3x3[i_v, i_b] = diag3x3
+        fem_state.newton.pcg.prec[i_v, i_b] = diag3x3.inverse()
 
 
 @qd.kernel(fastcache=True)
 def kernel_init_pcg_solve(fem_state: FEMState, fem_info: FEMInfo):
     """Start the conjugate gradient solve of the Newton step from zero, with the force as residual."""
-    for i_b in range(fem_state.newton.is_pcg_active.shape[0]):
-        fem_state.newton.is_pcg_active[i_b] = True
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
+    for i_b in range(fem_state.newton.pcg_scalars.is_active.shape[0]):
+        fem_state.newton.pcg_scalars.is_active[i_b] = True
+    for i_v, i_b in qd.ndrange(fem_state.newton.pcg.x.shape[0], fem_state.newton.pcg.x.shape[1]):
         r = fem_state.force[i_v, i_b]
-        z = fem_state.newton.prec[i_v, i_b] @ r
-        fem_state.newton.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        fem_state.newton.r[i_v, i_b] = r
-        fem_state.newton.z[i_v, i_b] = z
-        fem_state.newton.p[i_v, i_b] = z
+        z = fem_state.newton.pcg.prec[i_v, i_b] @ r
+        fem_state.newton.pcg.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        fem_state.newton.pcg.r[i_v, i_b] = r
+        fem_state.newton.pcg.z[i_v, i_b] = z
+        fem_state.newton.pcg.p[i_v, i_b] = z
         fem_state.newton.sums_v.terms[i_v, 0, i_b] = r.dot(r)
         fem_state.newton.sums_v.terms[i_v, 1, i_b] = r.dot(z)
-    lu.func_reduce_terms(fem_state.newton.sums_v, fem_state.newton.is_pcg_active)
-    for i_b in range(fem_state.newton.is_pcg_active.shape[0]):
-        fem_state.newton.rTr[i_b] = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
-        fem_state.newton.rTz[i_b] = lu.func_sum_chunks(i_b, k=1, sums=fem_state.newton.sums_v)
-        fem_state.newton.is_pcg_active[i_b] = fem_state.newton.rTr[i_b] > fem_info.pcg_threshold[None]
+    lu.func_reduce_terms(fem_state.newton.sums_v, fem_state.newton.pcg_scalars.is_active)
+    for i_b in range(fem_state.newton.pcg_scalars.is_active.shape[0]):
+        rTr = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
+        fem_state.newton.pcg_scalars.rTz[i_b] = lu.func_sum_chunks(i_b, k=1, sums=fem_state.newton.sums_v)
+        fem_state.newton.pcg_scalars.is_active[i_b] = rTr > fem_info.pcg_threshold[None]
 
 
 @qd.kernel(fastcache=True)
@@ -1267,76 +1358,44 @@ def kernel_one_pcg_iter(
     static_config: qd.template(),
 ):
     """Run one iteration of the preconditioned conjugate gradient solve of the Newton step."""
-    # A * p, per corner of the elements
-    for i_e, i_b in qd.ndrange(fem_state.newton.energy.shape[0], fem_state.newton.energy.shape[1]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            damping_beta_factor = fem_info.damping_beta[None] / fem_info.substep_dt[None] + 1.0
-            V = fem_info.elements.V[i_e]
-            i_vs = fem_info.elements.el2v[i_e]
-            S = func_compute_element_mapping_matrix(i_e, i_b, vertex_constraints, fem_info, static_config)
-
-            p9 = qd.Vector.zero(gs.qd_float, 9)
-            for i, j in qd.static(qd.ndrange(3, 4)):
-                i_v = i_vs[j]
-                p9[i * 3 : i * 3 + 3] = p9[i * 3 : i * 3 + 3] + S[j, i] * fem_state.newton.p[i_v, i_b]
-
-            new_p9 = qd.Vector.zero(gs.qd_float, 9)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                new_p9[i * 3 : i * 3 + 3] = (
-                    new_p9[i * 3 : i * 3 + 3] + fem_state.newton.hessian[i, j, i_e, i_b] @ p9[j * 3 : j * 3 + 3]
-                )
-
-            for i in qd.static(range(4)):
-                fem_state.newton.corners.Ap[i_e, i, i_b] = (
-                    (S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]) * V * damping_beta_factor
-                )
-
-    # A * p per vertex, and the terms of p^T A p
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            damping_alpha_factor = fem_info.damping_alpha[None] * fem_info.substep_dt[None] + 1.0
-            Ap = fem_info.vertices.mass_over_dt2[i_v] * damping_alpha_factor * fem_state.newton.p[i_v, i_b]
-            for i_entry in range(fem_info.vertices.corner_start[i_v], fem_info.vertices.corner_start[i_v + 1]):
-                i_corner = fem_info.vertices.corner[i_entry]
-                Ap += fem_state.newton.corners.Ap[i_corner // 4, i_corner % 4, i_b]
-            fem_state.newton.Ap[i_v, i_b] = Ap
-            fem_state.newton.sums_v.terms[i_v, 0, i_b] = fem_state.newton.p[i_v, i_b].dot(Ap)
-    lu.func_reduce_terms(fem_state.newton.sums_v, fem_state.newton.is_pcg_active)
+    # A * p, and the terms of p^T A p
+    func_fem_matrix_vector_product(
+        scale=1.0,
+        src=fem_state.newton.pcg.p,
+        dst=fem_state.newton.pcg.Ap,
+        corners=fem_state.newton.pcg.corners,
+        active=fem_state.newton.pcg_scalars.is_active,
+        hessian=fem_state.newton.hessian,
+        sums=fem_state.newton.sums_v,
+        vertex_constraints=vertex_constraints,
+        fem_info=fem_info,
+        static_config=static_config,
+        sum_dot=True,
+    )
 
     # Step size, then x, r, z and the terms of r^T r and r^T z
-    for i_b in range(fem_state.newton.is_pcg_active.shape[0]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            fem_state.newton.pTAp[i_b] = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
-            fem_state.newton.alpha[i_b] = fem_state.newton.rTz[i_b] / fem_state.newton.pTAp[i_b]
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            alpha = fem_state.newton.alpha[i_b]
-            fem_state.newton.x[i_v, i_b] += alpha * fem_state.newton.p[i_v, i_b]
-            fem_state.newton.r[i_v, i_b] -= alpha * fem_state.newton.Ap[i_v, i_b]
-            r = fem_state.newton.r[i_v, i_b]
-            z = fem_state.newton.prec[i_v, i_b] @ r
-            fem_state.newton.z[i_v, i_b] = z
-            fem_state.newton.sums_v.terms[i_v, 0, i_b] = r.dot(r)
-            fem_state.newton.sums_v.terms[i_v, 1, i_b] = r.dot(z)
-    lu.func_reduce_terms(fem_state.newton.sums_v, fem_state.newton.is_pcg_active)
+    for i_b in range(fem_state.newton.pcg_scalars.is_active.shape[0]):
+        if fem_state.newton.pcg_scalars.is_active[i_b]:
+            pTAp = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
+            fem_state.newton.pcg_scalars.alpha[i_b] = fem_state.newton.pcg_scalars.rTz[i_b] / pTAp
+    func_pcg_update_residual(fem_state.newton.pcg, fem_state.newton.pcg_scalars, fem_state.newton.sums_v)
 
-    # Convergence check, then beta, r^T r and r^T z
-    for i_b in range(fem_state.newton.is_pcg_active.shape[0]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            fem_state.newton.rTr_new[i_b] = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
-            fem_state.newton.rTz_new[i_b] = lu.func_sum_chunks(i_b, k=1, sums=fem_state.newton.sums_v)
-            fem_state.newton.is_pcg_active[i_b] = fem_state.newton.rTr_new[i_b] > fem_info.pcg_threshold[None]
-            if fem_state.newton.is_pcg_active[i_b]:
-                fem_state.newton.beta[i_b] = fem_state.newton.rTz_new[i_b] / fem_state.newton.rTz[i_b]
-                fem_state.newton.rTr[i_b] = fem_state.newton.rTr_new[i_b]
-                fem_state.newton.rTz[i_b] = fem_state.newton.rTz_new[i_b]
-
-    # Search direction
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
-        if fem_state.newton.is_pcg_active[i_b]:
-            fem_state.newton.p[i_v, i_b] = (
-                fem_state.newton.z[i_v, i_b] + fem_state.newton.beta[i_b] * fem_state.newton.p[i_v, i_b]
-            )
+    # Convergence check, then beta, r^T z and the search direction
+    for i_b in range(fem_state.newton.pcg_scalars.is_active.shape[0]):
+        if fem_state.newton.pcg_scalars.is_active[i_b]:
+            rTr = lu.func_sum_chunks(i_b, k=0, sums=fem_state.newton.sums_v)
+            rTz = lu.func_sum_chunks(i_b, k=1, sums=fem_state.newton.sums_v)
+            fem_state.newton.pcg_scalars.is_active[i_b] = rTr > fem_info.pcg_threshold[None]
+            if fem_state.newton.pcg_scalars.is_active[i_b]:
+                fem_state.newton.pcg_scalars.beta[i_b] = rTz / fem_state.newton.pcg_scalars.rTz[i_b]
+                fem_state.newton.pcg_scalars.rTz[i_b] = rTz
+    lu.func_axpy(
+        fem_state.newton.pcg.p,
+        fem_state.newton.pcg.z,
+        fem_state.newton.pcg_scalars.beta,
+        fem_state.newton.pcg.p,
+        fem_state.newton.pcg_scalars.is_active,
+    )
 
 
 @qd.func(requires_top_level=True)
@@ -1356,11 +1415,11 @@ def kernel_init_linesearch(f: int, fem_state: FEMState, fem_info: FEMInfo):
         fem_state.newton.step_size[i_b] = 1.0
 
     # Inertia, x_prev, m
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
+    for i_v, i_b in qd.ndrange(fem_state.newton.pcg.x.shape[0], fem_state.newton.pcg.x.shape[1]):
         diff = fem_state.vertices.pos[f + 1, i_v, i_b] - fem_state.newton.inertia[i_v, i_b]
         fem_state.newton.sums_v.terms[i_v, 0, i_b] = 0.5 * fem_info.vertices.mass_over_dt2[i_v] * diff.dot(diff)
-        fem_state.newton.sums_v.terms[i_v, 1, i_b] = -fem_state.newton.x[i_v, i_b].dot(fem_state.force[i_v, i_b])
-        fem_state.newton.x_prev[i_v, i_b] = fem_state.vertices.pos[f + 1, i_v, i_b]
+        fem_state.newton.sums_v.terms[i_v, 1, i_b] = -fem_state.newton.pcg.x[i_v, i_b].dot(fem_state.force[i_v, i_b])
+        fem_state.newton.pcg.x_prev[i_v, i_b] = fem_state.vertices.pos[f + 1, i_v, i_b]
     lu.func_reduce_terms(fem_state.newton.sums_v, fem_state.newton.is_linesearch_active)
     # Elastic
     func_sum_elements_energy(fem_state, fem_info)
@@ -1382,10 +1441,11 @@ def kernel_one_linesearch_iter(
 ):
     """Try the current step of the line search, then shrink it unless the energy decreased enough (Armijo)."""
     # Position at the step, and inertia energy
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
+    for i_v, i_b in qd.ndrange(fem_state.newton.pcg.x.shape[0], fem_state.newton.pcg.x.shape[1]):
         if fem_state.newton.is_linesearch_active[i_b]:
             fem_state.vertices.pos[f + 1, i_v, i_b] = (
-                fem_state.newton.x_prev[i_v, i_b] + fem_state.newton.step_size[i_b] * fem_state.newton.x[i_v, i_b]
+                fem_state.newton.pcg.x_prev[i_v, i_b]
+                + fem_state.newton.step_size[i_b] * fem_state.newton.pcg.x[i_v, i_b]
             )
             mass_over_dt2 = fem_info.vertices.mass_over_dt2[i_v]
             diff = fem_state.vertices.pos[f + 1, i_v, i_b] - fem_state.newton.inertia[i_v, i_b]
@@ -1439,8 +1499,8 @@ def kernel_one_linesearch_iter(
 @qd.kernel(fastcache=True)
 def kernel_skip_linesearch(f: int, fem_state: FEMState):
     """Take the full Newton step."""
-    for i_v, i_b in qd.ndrange(fem_state.newton.x.shape[0], fem_state.newton.x.shape[1]):
-        fem_state.vertices.pos[f + 1, i_v, i_b] += fem_state.newton.x[i_v, i_b]
+    for i_v, i_b in qd.ndrange(fem_state.newton.pcg.x.shape[0], fem_state.newton.pcg.x.shape[1]):
+        fem_state.vertices.pos[f + 1, i_v, i_b] += fem_state.newton.pcg.x[i_v, i_b]
 
 
 @qd.kernel(fastcache=True)

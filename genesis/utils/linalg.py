@@ -35,6 +35,20 @@ class FixedOrderSums(Data, kind=DataKind.SCRATCH):
         return dict(sum_items=n_items, sums=n_sums, sum_chunks=min(n_items, SUM_MAX_CHUNKS))
 
 
+class PCGScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """
+    The scalars of the preconditioned conjugate gradient solve of each environment.
+
+    `is_active` tells whether the solve still runs, `rTz` is the dot product of the residual with the preconditioned
+    residual, and `alpha` and `beta` are the step size and the update of the search direction of the current iteration.
+    """
+
+    is_active: qd.Tensor = field(bool)
+    rTz: qd.Tensor = field(float)
+    alpha: qd.Tensor = field(float)
+    beta: qd.Tensor = field(float)
+
+
 @qd.func
 def mat_mul(A: qd.Tensor, B: qd.Tensor, res: qd.Tensor, n, m, l, i_b):
     """
@@ -167,3 +181,16 @@ def func_sum_chunks(i_b: int, k: int, sums: FixedOrderSums):
     for i_chunk in range(sums.partials.shape[0]):
         value_sum += sums.partials[i_chunk, k, i_b]
     return value_sum
+
+
+@qd.func(requires_top_level=True)
+def func_axpy(dst: qd.template(), x: qd.template(), alpha: qd.template(), y: qd.template(), mask: qd.template()):
+    """
+    Compute dst = x + alpha * y for the items of each environment whose mask is set, alpha being per environment.
+
+    The items of environment i_b are the rows `[:, i_b]` of the fields, whose values may be scalars or vectors. `dst`
+    may be `x` or `y`.
+    """
+    for i, i_b in qd.ndrange(dst.shape[0], dst.shape[1]):
+        if mask[i_b]:
+            dst[i, i_b] = x[i, i_b] + alpha[i_b] * y[i, i_b]
