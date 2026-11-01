@@ -10,12 +10,12 @@ from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
 from genesis.engine.solvers.rigid.data import (
     ColliderState,
     DynInfo,
-    DynState,
     GJKInfo,
     GJKState,
     GJKStaticConfig,
     RigidInfo,
 )
+from genesis.options.solvers import RigidOptions
 
 from . import support_field
 from .constants import (
@@ -57,9 +57,9 @@ class GJK[LayoutT: Layout, CapabilityT: Capability](System):
     gjk_info: GJKInfo
     gjk_state: GJKState | None
 
-    def __init__(self, rigid_solver: "RigidSolver") -> None:
+    def __init__(self, rigid_solver: "RigidSolver", options: RigidOptions) -> None:
         # Resolved by the rigid solver
-        enable_contact_patch = rigid_solver._enable_contact_patch
+        enable_contact_patch = options.enable_contact_patch
         gjk_max_iterations = 50
         epa_max_iterations = 50
         # 6 * epa_max_iterations is the maximum number of faces in the polytope.

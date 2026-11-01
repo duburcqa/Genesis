@@ -24,7 +24,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd.misc import func_list_item, func_list_range_start
-from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, HibernationState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynState, HibernationState, RigidInfo
 
 from . import solver as constraint_solver
 

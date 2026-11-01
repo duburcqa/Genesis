@@ -28,6 +28,7 @@ from genesis.engine.solvers.rigid.rigid_solver import (
 )
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.states import SystemCheckpoint
+from genesis.options.solvers import RigidOptions
 from genesis.utils.data import DataKind
 from genesis.utils.misc import (
     get_gpu_core_count,
@@ -91,8 +92,9 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     collider_info: ColliderInfo
     collider_state: ColliderState
 
-    def __init__(self, rigid_solver: RigidSolver) -> None:
+    def __init__(self, rigid_solver: RigidSolver, options: RigidOptions) -> None:
         self._solver = rigid_solver
+        self._options = options
 
     def build(self) -> None:
         self._mc_perturbation = 1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 5e-3
@@ -260,7 +262,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
 
     def _init_static_config(self) -> None:
         # Identify the convex collision detection (ccd) algorithm
-        if self._solver._options.use_gjk_collision:
+        if self._options.use_gjk_collision:
             if self._solver.rigid_config.enable_mujoco_compatibility:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MJ_GJK
             else:
@@ -275,7 +277,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # func_clip_polygon), which the convex budget must hold or the extra witnesses of the patch are lost.
         if self._solver.rigid_config.requires_grad:
             n_contacts_per_convex_pair = 20
-        elif self._solver._enable_contact_patch:
+        elif self._options.enable_contact_patch:
             n_contacts_per_convex_pair = 8
         else:
             n_contacts_per_convex_pair = 5
@@ -284,7 +286,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # which keeps the buffer of ordinary convex pairs small. Fewer points let parts of an extended patch drop out
         # as the geometry moves, losing constraint directions and letting bodies slip.
         n_contacts_per_nonconvex_pair = 40
-        if self._solver._options.box_box_detection and sum(g.type == gs.GEOM_TYPE.BOX for g in self._solver.geoms) > 1:
+        if self._options.box_box_detection and sum(g.type == gs.GEOM_TYPE.BOX for g in self._solver.geoms) > 1:
             n_contacts_per_nonconvex_pair = max(n_contacts_per_nonconvex_pair, self._box_MAXCONPAIR)
 
         # Compute collision pairs and algorithm flags in a single pass
@@ -315,7 +317,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             pairs_link_idx = np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1)
             is_point_pair = np.isin(pairs_type, (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)).any(axis=1)
             is_multi_point_pair = ~is_point_pair & (
-                self._solver._options.enable_multi_contact | (pairs_type == gs.GEOM_TYPE.BOX).any(axis=1)
+                self._options.enable_multi_contact | (pairs_type == gs.GEOM_TYPE.BOX).any(axis=1)
             )
             _, _, links_pair_idx, _ = unique_rows(pairs_link_idx)
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
@@ -364,7 +366,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         max_candidate_contacts = n_nonconvex * cap_nonconvex + n_convex * cap_convex
         # The broad phase reports each possible pair at most once per environment
         max_collision_pairs_broad = min(
-            max_collision_pairs * self._solver._options.multiplier_collision_broad_phase, self._n_possible_pairs
+            max_collision_pairs * self._options.multiplier_collision_broad_phase, self._n_possible_pairs
         )
 
         # The constraint solver only sees the contacts surviving link-pair pruning, roughly the support polygon of each
@@ -375,7 +377,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         if (
             self.collider_config.has_prunable_contacts
             and not self._solver.requires_grad
-            and self._solver._options.contact_pruning_tolerance is not None
+            and self._options.contact_pruning_tolerance is not None
         ):
             geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
             pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
@@ -389,7 +391,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
 
         # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in
         # place, since the constraint solver reads it.
-        options = self._solver._options
+        options = self._options
         if options.max_contacts is None:
             options.max_contacts = max_contacts
         else:
@@ -424,7 +426,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 diff_normal_tolerance=self._diff_normal_tolerance,
                 diff_contact_eps_boundary=1e-2,
                 diff_contact_eps_distance=1e-2,
-                contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
+                contact_pruning_tolerance=self._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
         )
@@ -462,7 +464,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 broad_pairs=max_collision_pairs_broad,
                 candidate_contacts=max_candidate_contacts,
                 nonconvex_pair_contacts=self.collider_config.n_contacts_per_nonconvex_pair,
-                contact_slots=1 if self._solver._enable_contact_patch else 5,
+                contact_slots=1 if self._options.enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
             layout={ColliderState.contact_sort_key: True, "pruning": True},
@@ -472,7 +474,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 diff_contacts=not config.requires_grad,
                 work_queue=not (is_split or self.collider_config.has_terrain),
                 split_narrowphase=not is_split,
-                perturbed_slots=not (is_split and not self._solver._enable_contact_patch),
+                perturbed_slots=not (is_split and not self._options.enable_contact_patch),
                 pruning=not self.collider_config.has_prunable_contacts,
             ),
             requires_grad=config.requires_grad,
@@ -487,7 +489,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             gs.backend != gs.cpu
             and not self._solver.rigid_config.requires_grad
             and self.collider_config.has_prunable_contacts
-            and (self._solver._options.contact_pruning_tolerance or 0.0) > 0.0
+            and (self._options.contact_pruning_tolerance or 0.0) > 0.0
             and self._solver._B <= 0.5 * self.collider_config.gpu_cores
         )
 
@@ -702,7 +704,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             is_plane_b = valid_type_b == gs.GEOM_TYPE.PLANE
             is_plane_box = (is_plane_a & is_box_b) | (is_box_a & is_plane_b)
             specialized = is_plane_box
-            if self._solver._options.box_box_detection:
+            if self._options.box_box_detection:
                 specialized = specialized | (is_box_a & is_box_b)
             has_non_box_plane_convex_convex = bool(np.any(both_convex & ~specialized))
 
@@ -724,7 +726,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         else:
             has_non_box_plane_convex_convex = False
 
-        if self._solver._options.box_box_detection:
+        if self._options.box_box_detection:
             spec_types = [gs.GEOM_TYPE.TERRAIN, gs.GEOM_TYPE.BOX]
             has_convex_specialization = bool(
                 np.any(np.isin(valid_type_a, spec_types) | np.isin(valid_type_b, spec_types))
@@ -748,7 +750,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # detector is enabled) emit up to box_MAXCONPAIR contacts, so they join the nonconvex pairs in the large-cap
         # bucket rather than being sized as generic convex pairs.
         large_contact_mask = nonconvex_pair_mask
-        if self._solver._options.box_box_detection:
+        if self._options.box_box_detection:
             large_contact_mask = large_contact_mask | (
                 (valid_type_a == gs.GEOM_TYPE.BOX) & (valid_type_b == gs.GEOM_TYPE.BOX)
             )

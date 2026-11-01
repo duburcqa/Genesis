@@ -3,7 +3,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.rigid.data import ConstraintState, DynInfo, DynState, HibernationState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynState, HibernationState, RigidInfo
 from genesis.utils.misc import qd_to_torch
 
 from . import linesearch, solver
