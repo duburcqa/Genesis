@@ -386,16 +386,6 @@ def sdf_func_ravel_cell_idx(cell_idx, geom_idx, sdf_res, sdf_info: SDFInfo):
 
 
 @qd.func
-def sdf_func_grad_world(
-    geom_idx, batch_idx, pos_world, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, sdf_info: SDFInfo
-):
-    g_pos = dyn_state.geoms.pos[geom_idx, batch_idx]
-    g_quat = dyn_state.geoms.quat[geom_idx, batch_idx]
-
-    return sdf_func_grad_world_local(geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, sdf_info)
-
-
-@qd.func
 def sdf_func_grad(geom_idx, pos_sdf, geoms_info: GeomsInfo, rigid_info: RigidInfo, sdf_info: SDFInfo):
     """
     sdf grad at sdf frame coordinate.

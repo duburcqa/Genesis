@@ -279,28 +279,6 @@ def compute_support(
 
 
 @qd.func
-def func_geom_support(
-    i_g: int, direction: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo
-):
-    direction_in_init_frame = gu.qd_inv_transform_by_quat(direction, quat)
-
-    dot_max = gs.qd_float(-1e10)
-    v = qd.Vector.zero(gs.qd_float, 3)
-    vid = 0
-
-    for i_v in range(dyn_info.geoms.vert_start[i_g], dyn_info.geoms.vert_end[i_g]):
-        pos_local = dyn_info.verts.init_pos[i_v]
-        dot = pos_local.dot(direction_in_init_frame)
-        if dot > dot_max:
-            v = pos_local
-            dot_max = dot
-            vid = i_v
-    v_world = gu.qd_transform_by_trans_quat(v, pos, quat)
-
-    return v_world, vid
-
-
-@qd.func
 def mpr_find_pos(i_ga: int, i_gb: int, i_b: int, mpr_state: MPRState, mpr_info: MPRInfo, rigid_config: qd.template()):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 

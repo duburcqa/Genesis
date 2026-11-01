@@ -74,22 +74,6 @@ def update_qvel(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.tem
             )
 
 
-@qd.kernel(fastcache=True)
-def kernel_compute_mass_matrix(
-    envs_idx: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    decompose: qd.template(),
-):
-    func_compute_mass_matrix_masked(
-        envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, is_backward=False
-    )
-    if decompose:
-        func_factor_mass_masked(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
-
-
 # @@@@@@@@@ Composer starts here
 # decomposed kernels should happen in the block below. This block will be handled by composer and composed into a single kernel
 @qd.func
