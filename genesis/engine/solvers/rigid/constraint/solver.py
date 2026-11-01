@@ -1365,10 +1365,9 @@ def func_equality_joint(
     _sort_relevant_dofs_descending(n_con, i_b, con_n_dofs, constraint_state, rigid_config)
 
 
-@qd.func
-def func_add_equality_constraints(
+@qd.kernel(fastcache=True)
+def kernel_add_equality_constraints(
     dyn_state: DynState,
-    collider_state: ColliderState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -1396,19 +1395,6 @@ def func_add_equality_constraints(
                 func_equality_links(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
-@qd.kernel(fastcache=True)
-def kernel_add_equality_constraints(
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Run func_add_equality_constraints on its own, outside the substep graph that captures it."""
-    func_add_equality_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-
-
 @qd.func
 def _sort_contacts_and_build_islands(
     dyn_state: DynState,
@@ -1420,8 +1406,9 @@ def _sort_contacts_and_build_islands(
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
-    """Build the island partition of every env and order its live contacts (see add_inequality_constraints) in one
-    launch.
+    """Build the island partition of every env and order its live contacts in one launch.
+
+    See kernel_add_inequality_constraints.
 
     Where the cooperative kernels run, a block serves each env: the lanes build the partition together
     (func_build_islands_coop), then sort together (func_sort_contacts_coop); elsewhere one thread per env does both.
@@ -1572,8 +1559,8 @@ def func_append_factor_worklist(
         constraint_state.island.factor_worklist_i_island[i_slot] = i_island
 
 
-@qd.func
-def func_add_inequality_constraints(
+@qd.kernel(fastcache=True)
+def kernel_add_inequality_constraints(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     collider_state: ColliderState,
@@ -1605,30 +1592,6 @@ def func_add_inequality_constraints(
     if qd.static(rigid_config.enable_collision):
         add_collision_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
     add_limit_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-
-
-@qd.kernel(fastcache=True)
-def kernel_add_inequality_constraints(
-    dyn_state: DynState,
-    hibernation_state: HibernationState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    collider_config: qd.template(),
-):
-    """Run func_add_inequality_constraints on its own, outside the substep graph that captures it."""
-    func_add_inequality_constraints(
-        dyn_state,
-        hibernation_state,
-        collider_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        collider_config,
-    )
 
 
 @qd.func
@@ -5483,8 +5446,8 @@ def func_solve_init(
         rigid_config=rigid_config,
     )
 
-    # The island partition itself (links_island_idx / dof_id) is built earlier, in add_inequality_constraints, before
-    # the contact constraints are assembled; grouping the constraints by island needs the assembled jac, so it rides
+    # The island partition itself (links_island_idx / dof_id) is built earlier, in kernel_add_inequality_constraints,
+    # before the contact constraints are assembled; grouping the constraints by island needs the assembled jac, so it rides
     # this per-env loop, ahead of every per-island consumer below: by the lanes of the env's block where the
     # cooperative kernels run, serially otherwise.
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
@@ -5881,8 +5844,8 @@ def func_update_contact_force(
                 )
 
 
-@qd.func
-def func_resolve_post(
+@qd.kernel(fastcache=True)
+def kernel_resolve_post(
     dyn_state: DynState,
     hibernation_state: HibernationState,
     collider_state: ColliderState,
@@ -5954,32 +5917,6 @@ def kernel_manual_update_actuator_force_bw(
 ):
     """Reverse func_update_actuator_force."""
     func_update_actuator_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward=True)
-
-
-@qd.kernel(fastcache=True)
-def kernel_resolve_post(
-    dyn_state: DynState,
-    hibernation_state: HibernationState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    noslip: qd.template(),
-    errno: qd.Tensor,
-):
-    """Run func_resolve_post on its own, outside the substep graph that captures it (see kernel_substep_post)."""
-    func_resolve_post(
-        dyn_state,
-        hibernation_state,
-        collider_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        noslip,
-        errno,
-    )
 
 
 @qd.func

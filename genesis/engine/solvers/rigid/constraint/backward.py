@@ -278,9 +278,9 @@ def kernel_accumulate_constraint_solver_grads(
 # accumulates into its own differentiable inputs.
 #
 # n_con row layout: the forward adds constraints in the order equality -> frictionloss -> collision -> joint-limit
-# (see add_equality_constraints / add_inequality_constraints in solver.py). All three equality sub-types (JOINT,
-# CONNECT, WELD) are differentiated by kernel_manual_add_equality_constraints_bw. The manual reverses re-walk the
-# same forward loops deterministically to recover their own n_con:
+# (see kernel_add_equality_constraints / kernel_add_inequality_constraints in solver.py). All three equality
+# sub-types (JOINT, CONNECT, WELD) are differentiated by kernel_manual_add_equality_constraints_bw. The manual reverses
+# re-walk the same forward loops deterministically to recover their own n_con:
 #   n_eq   = constraint_state.n_constraints_equality[i_b]
 #   n_fric = constraint_state.n_constraints_frictionloss[i_b]
 #   equality     : seed counter at 0
@@ -457,7 +457,7 @@ def kernel_manual_add_collision_constraints_bw(
         n_hib = collider_state.n_contacts_hibernated[i_b]
         if i_col_ < collider_state.n_contacts[i_b] - n_hib:
             # The forward assembles the contact rows in logical (sorted) order of the live contacts: row group i_col_
-            # maps to physical contact contact_sort_idx[n_hib + i_col_] (see add_inequality_constraints).
+            # maps to physical contact contact_sort_idx[n_hib + i_col_] (see kernel_add_inequality_constraints).
             i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
             link_a = collider_state.contact_data.link_a[i_col, i_b]
             link_b = collider_state.contact_data.link_b[i_col, i_b]
@@ -758,7 +758,7 @@ def kernel_manual_add_equality_constraints_bw(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Manual reverse of `add_equality_constraints` (JOINT + CONNECT + WELD).
+    """Manual reverse of `kernel_add_equality_constraints` (JOINT + CONNECT + WELD).
 
     * JOINT   - constrains one scalar dof, optionally against another via a quartic polynomial (1 row).
     * CONNECT - 3 rows pinning `global_anchor1` to `global_anchor2` in world.

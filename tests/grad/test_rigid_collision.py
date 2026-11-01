@@ -436,7 +436,10 @@ def test_contact_detection_jacobian_matches_fd():
 def test_constraint_solver_backward_matches_fd():
     # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
     from genesis.engine.solvers.rigid.constraint.solver import func_solve_body, func_solve_init
-    from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics
+    from genesis.engine.solvers.rigid.abd.forward_dynamics import (
+        kernel_compute_smooth_qacc,
+        kernel_forward_dynamics_without_qacc,
+    )
 
     # fp64 is required: the parameter-side inputs (aref, efc_D, jac, mass) move the loss by far less than its own
     # fp32 resolution at any usable step size, so their finite-difference deltas drown at fp32
@@ -511,12 +514,16 @@ def test_constraint_solver_backward_matches_fd():
             constraint_solver._n_iterations,
         )
 
-    kernel_forward_dynamics(
+    kernel_forward_dynamics_without_qacc(
         rigid_solver.dyn_state,
         rigid_solver.hibernation_state,
         rigid_solver.dyn_info,
         rigid_solver.rigid_info,
         rigid_solver.rigid_config,
+        is_backward=False,
+    )
+    kernel_compute_smooth_qacc(
+        rigid_solver.dyn_state, rigid_solver.dyn_info, rigid_solver.rigid_info, rigid_solver.rigid_config
     )
     rigid_solver.constraints(**rigid_solver.get_substep_values(is_recording=False))
 

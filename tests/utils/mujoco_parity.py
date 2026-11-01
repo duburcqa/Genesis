@@ -10,7 +10,11 @@ import scipy.sparse.csgraph
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics, kernel_update_acc
+from genesis.engine.solvers.rigid.abd.forward_dynamics import (
+    kernel_compute_smooth_qacc,
+    kernel_forward_dynamics_without_qacc,
+    kernel_update_acc,
+)
 from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
@@ -199,9 +203,15 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     if constraint_solver is not None:
         constraint_solver.constraint_state.qfrc_constraint.fill(0.0)
     rigid = gs_sim.rigid_solver
-    kernel_forward_dynamics(
-        rigid.dyn_state, rigid.hibernation_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config
+    kernel_forward_dynamics_without_qacc(
+        rigid.dyn_state,
+        rigid.hibernation_state,
+        rigid.dyn_info,
+        rigid.rigid_info,
+        rigid.rigid_config,
+        is_backward=False,
     )
+    kernel_compute_smooth_qacc(rigid.dyn_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config)
     rigid.constraints(**rigid.get_substep_values(is_recording=False))
     kernel_update_acc(rigid.dyn_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config, is_backward=False)
 

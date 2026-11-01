@@ -1321,7 +1321,7 @@ def func_clamp_prune_contacts(
       flag OVERFLOW_CONTACTS in errno, which halts the simulation at the next errno check.
 
     Deterministic ordering of the kept contacts (independent of the racy atomic_add narrowphase layout) is applied
-    later in add_inequality_constraints, not here.
+    later in kernel_add_inequality_constraints, not here.
 
     The pruning logic groups contacts by canonical (min(link_a, link_b), max(link_a, link_b)), splits each bucket into
     patches of normals lying along one axis (see func_contact_group_by_normal) and, for each patch of >= 3 contacts
@@ -1553,7 +1553,7 @@ def func_clamp_prune_contacts_coop(
     Only dispatched when pruning is enabled, so it prunes unconditionally (no static gate). Same clamp + prune
     algorithm and same contract (mandatory clamp + identity-init contact_sort_idx + phase-3 compact) as
     func_clamp_prune_contacts. Deterministic ordering of the kept contacts is applied later in
-    add_inequality_constraints.
+    kernel_add_inequality_constraints.
     Difference from func_clamp_prune_contacts: a block of warps splits the per-env work:
       - PARALLEL over contacts, every thread: per-contact init and the phase-1 sort.
       - PARALLEL over contacts, the lanes of one warp: bucket and patch ends and the phase-3 compact.
