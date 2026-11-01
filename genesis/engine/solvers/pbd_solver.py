@@ -9,12 +9,11 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
+from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD
+from genesis.engine.solvers.base_solver import EDGES, VFACES, VVERTS
 from genesis.engine.solvers.particle_solver import (
-    PARTICLES,
-    VFACES,
-    VVERTS,
     Particles,
     ParticlesParams,
     ParticlesRender,
@@ -32,9 +31,6 @@ from genesis.utils.geom import (
 )
 
 from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_state, kernel_set_particles_state
-
-
-EDGES = Size("edges")
 
 
 class PBDParticles(Particles):

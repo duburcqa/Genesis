@@ -19,11 +19,9 @@ from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums, PCGScalars
 from genesis.utils.misc import broadcast_tensor, qd_to_torch, tensor_to_array
 
-from .base_solver import FRAMES, GravityMixin, MaterialDispatcher, Solver, TimeBasedMixin
+from .base_solver import FRAMES, VFACES, VVERTS, GravityMixin, MaterialDispatcher, Solver, TimeBasedMixin
 
 
-VVERTS = Size("vverts")
-VFACES = Size("vfaces")
 # Sizes of the FEM solver: the vertices and the elements, the frames of the element contributions of the explicit
 # solver (one per substep with gradients), the corners of the elements, and the surface triangles with their vertices
 # and elements, its states spanning the frames of a step (see FRAMES)

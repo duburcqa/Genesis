@@ -9,6 +9,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.materials import MPM
 from genesis.engine.pipeline import Inline, Stages, System
 from genesis.engine.state_change import StateChange, mutates
@@ -21,7 +22,6 @@ from genesis.utils.misc import qd_isfinite, qd_to_torch
 
 from .base_solver import FRAMES, MaterialDispatcher, func_flag_error
 from .particle_solver import (
-    PARTICLES,
     ParticleSolver,
     ParticlesRender,
     VVertsRender,

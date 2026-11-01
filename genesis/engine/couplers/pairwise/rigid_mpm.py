@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.entities.hybrid_entity import HybridEntity, HybridSoftPartInfo
+from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.mpm_solver import (
     CellSeparation,
@@ -21,7 +22,6 @@ from genesis.engine.solvers.mpm_solver import (
     MPMState,
     func_add_particle_vel,
 )
-from genesis.engine.solvers.particle_solver import PARTICLES
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, LinksState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver

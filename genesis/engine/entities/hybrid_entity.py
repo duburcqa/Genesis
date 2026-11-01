@@ -25,10 +25,9 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+from .particle_entity import PARTICLES
 
 
-# Sizes of the particle solvers: the particles, the slots of the hash grid and the support particles of a visual vertex
-PARTICLES = Size("particles")
 # The muscle groups of the soft part of a hybrid entity
 GROUPS = Size("groups")
 

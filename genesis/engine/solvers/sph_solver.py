@@ -5,8 +5,9 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
+from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.materials import SPH
-from genesis.engine.solvers.particle_solver import PARTICLES, Particles, ParticlesParams, ParticlesRender
+from genesis.engine.solvers.particle_solver import Particles, ParticlesParams, ParticlesRender
 from genesis.engine.states.solvers import SPHSolverState
 from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.geom import (

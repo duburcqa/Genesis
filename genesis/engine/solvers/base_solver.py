@@ -48,6 +48,10 @@ class SolverErrorCode(IntEnum):
 
 # The frames of a step the differentiable solvers keep
 FRAMES = Size("frames")
+# The visual vertices and faces, and the edges of the meshes, of the entities of several solvers
+VVERTS = Size("vverts")
+VFACES = Size("vfaces")
+EDGES = Size("edges")
 
 
 class TimeBasedMixin:

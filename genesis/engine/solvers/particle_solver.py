@@ -4,17 +4,15 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.state_change import StateChange, mutates
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.geom import SpatialHashGrid
 
-from .base_solver import GravityMixin, Solver, TimeBasedMixin
+from .base_solver import VVERTS, GravityMixin, Solver, TimeBasedMixin
 
 
-# Sizes of the particle solvers: the particles, the visual vertices and faces, and the supports of a visual vertex
-PARTICLES = Size("particles")
-VVERTS = Size("vverts")
-VFACES = Size("vfaces")
+# The supports of a visual vertex
 VVERT_SUPPORTS = Size("vvert_supports")
 
 

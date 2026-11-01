@@ -7,6 +7,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import EDGES, VFACES, VVERTS
 from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
 
 
@@ -956,12 +957,9 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
 # 'batch_dofs_info', 'batch_links_info' and 'batch_joints_info' in RigidOptions)
 ENTITIES = Size("entities")
 FACES = Size("faces")
-EDGES = Size("edges")
 FREE_VERTS = Size("free_verts")
 FIXED_VERTS = Size("fixed_verts")
-VVERTS = Size("vverts")
 CUSTOM_VVERTS = Size("custom_vverts")
-VFACES = Size("vfaces")
 VGEOMS = Size("vgeoms")
 CANDIDATE_EQUALITIES = Size("candidate_equalities")
 DOFS_INFO_ENVS = Size("dofs_info_envs")

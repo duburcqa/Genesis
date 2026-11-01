@@ -10,10 +10,13 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.utils.data import Size
 from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
 
+# The particles of the particle entities, which every per-particle array spans
+PARTICLES = Size("particles")
 # Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
 # vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
 VVERTS_DIST2_MAX_SIZE = 2**20
