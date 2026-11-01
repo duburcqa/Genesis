@@ -8,14 +8,13 @@ import types
 import typing
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
-from typing import Annotated, Any, ClassVar, NamedTuple
+from typing import Annotated, Any, ClassVar, NamedTuple, dataclass_transform
 
 import numpy as np
 import torch
 
 import pydantic
 from pydantic import TypeAdapter
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 
 import quadrants as qd
 from quadrants.lang import impl

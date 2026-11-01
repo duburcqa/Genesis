@@ -4,8 +4,6 @@ from typing import TYPE_CHECKING, NamedTuple, override
 import numpy as np
 import torch
 
-from typing_extensions import override
-
 import genesis as gs
 from genesis.engine.bvh import BVHState, BVHStaticConfig, get_bvh_data
 from genesis.ext.pyrender.camera import OrthographicCamera
