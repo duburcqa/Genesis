@@ -16,7 +16,7 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_inverse_kinematics_entity,
     kernel_set_ik_targets,
 )
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidData, RigidInfo, RigidSimStaticConfig
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, IKScratch, RigidData, RigidInfo, RigidSimStaticConfig
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SystemCheckpoint
 from genesis.options.morphs import Morph
@@ -179,6 +179,7 @@ class KinematicSolver(Solver):
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
         self.collider = None
+        self._ik_scratch: IKScratch | None = None
         self.constraint_solver = None
 
         self.qpos = None
@@ -1441,8 +1442,20 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_scratch = self.rigid_data.ik_scratch
-        ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
+        # The damped normal matrix is quadratic in the target cap, so the scratch is allocated by the first solve
+        if self._ik_scratch is None:
+            entities = self.entities
+            self._ik_scratch = IKScratch(
+                sizes=dict(
+                    envs=self._B,
+                    entity_qs=max([entity.n_qs for entity in entities], default=0),
+                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_links=max([entity.n_links for entity in entities], default=0),
+                    entity_joints=max([entity.n_joints for entity in entities], default=0),
+                    ik_targets=n_tgts,
+                )
+            )
+        ik_state, ik_fk, targets = self._ik_scratch.state, self._ik_scratch.fk, self._ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

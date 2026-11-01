@@ -1518,15 +1518,11 @@ class RigidData(Data):
     dyn_state: DynState
     kinematics_scratch: KinematicsScratch
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
-    # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so a scene that never
-    # solves inverse kinematics allocates none of it
-    ik_scratch: IKScratch = field(lazy=True)
 
     def __init__(self, solver, kinematic_only: bool):
         is_dynamic = not kinematic_only
         config, options = solver.rigid_config, solver._options
-        entities, n_targets = solver.entities, options.IK_max_targets
-        entity_dofs = max([entity.n_dofs for entity in entities], default=0)
+        entity_dofs = max([entity.n_dofs for entity in solver.entities], default=0)
         sizes = dict(
             envs=solver._B,
             qs=solver.n_qs_,
@@ -1545,10 +1541,6 @@ class RigidData(Data):
             joints_info_envs=solver._B if options.batch_joints_info else (),
             link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
             entity_dofs=entity_dofs,
-            entity_qs=max([entity.n_qs for entity in entities], default=0),
-            entity_links=max([entity.n_links for entity in entities], default=0),
-            entity_joints=max([entity.n_joints for entity in entities], default=0),
-            ik_targets=n_targets,
         )
         values = dict(EPS=gs.EPS)
         if is_dynamic:

@@ -235,7 +235,6 @@ class _FieldSpec(NamedTuple):
     labels: tuple[Label, ...] = ()
     grad: bool = False
     ndarray: bool = False
-    lazy: bool = False
     oversize_hint: str = ""
 
 
@@ -247,7 +246,6 @@ def field(
     labels: "Label | str | tuple[Label | str, ...]" = (),
     grad: bool = False,
     ndarray: bool = False,
-    lazy: bool = False,
     oversize_hint: str = "",
 ):
     """
@@ -259,13 +257,12 @@ def field(
     and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
     constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
     a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
-    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. A
-    `lazy` member is allocated when first read, from the sizes and the gradient requirement of its struct. An array too
-    large for a backend to address raises at allocation, with `oversize_hint` appended to the message, for instance the
-    options shrinking it.
+    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
+    array too large for a backend to address raises at allocation, with `oversize_hint` appended to the message, for
+    instance the options shrinking it.
     """
     labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
-    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy, oversize_hint)
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, oversize_hint)
     return dataclasses.field(metadata={_SPEC: spec})
 
 
@@ -301,7 +298,6 @@ class Data:
 
     kind: ClassVar["DataKind | None"] = None
     _shape: ClassVar[tuple | None] = None
-    _lazy: ClassVar[dict[str, type]] = {}
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
 
@@ -311,30 +307,7 @@ class Data:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._lazy, cls._values_models = dict(cls._lazy), {}
-        annotations = get_own_annotations(cls)
-        lazy_names = [
-            name
-            for name in annotations
-            if isinstance(cls.__dict__.get(name), dataclasses.Field) and cls.__dict__[name].metadata[_SPEC].lazy
-        ]
-        for name in lazy_names:
-            cls._lazy[name] = annotations.pop(name)
-
-            def get_lazy(self, name=name):
-                member = self.__dict__.get(f"_lazy_{name}")
-                if member is None:
-                    sizes, requires_grad = self._context
-                    member_cls = _resolve_type(type(self)._lazy[name], type(self))
-                    member_sizes = {key: size for key, size in sizes.items() if key in _size_names(member_cls)}
-                    member = member_cls(sizes=member_sizes, requires_grad=requires_grad)
-                    object.__setattr__(self, f"_lazy_{name}", member)
-                return member
-
-            setattr(cls, name, property(get_lazy))
-        # The lazy members are left out of the fields
-        if lazy_names:
-            cls.__annotations__ = annotations
+        cls._values_models = {}
         dataclasses.dataclass(init=False, eq=True, frozen=True)(cls)
         for data_field in dataclasses.fields(cls):
             # An instance shadows them with its arrays and members
@@ -485,8 +458,6 @@ class Data:
             is_bound = any([node.path[: len(path)] == path for path in binds])
             if node.member is not None and not is_bound:
                 structs[node.path] = object.__new__(node.member)
-        for struct in structs.values():
-            object.__setattr__(struct, "_context", (sizes.get((), {}), requires_grad))
         for node in nodes:
             holder = structs.get(node.path[:-1])
             if holder is None:
@@ -542,13 +513,12 @@ def _data_fields(cls: type) -> tuple[dataclasses.Field, ...]:
 
 
 def _size_names(cls: type) -> frozenset[str]:
-    """Return the names of the sizes of a struct tree, its lazy members included."""
+    """Return the names of the sizes of a struct tree."""
     if "_tree_size_names" not in cls.__dict__:
         size_names, dims, holders = set(), [], [cls]
         while holders:
             holder = holders.pop()
             dims += holder._shape or ()
-            holders += [_resolve_type(lazy_type, holder) for lazy_type in holder._lazy.values()]
             for data_field in _data_fields(holder):
                 if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
                     holders.append(data_field.type)
