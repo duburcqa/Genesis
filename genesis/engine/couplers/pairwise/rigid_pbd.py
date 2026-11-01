@@ -138,10 +138,7 @@ def kernel_detach_pbd_from_rigid_link(
 
 @qd.kernel(fastcache=True)
 def kernel_drive_pbd_particles_by_link(
-    clamped_inv_dt: float,
-    pbd_state: PBDState,
-    dyn_state: DynState,
-    rigid_pbd_info: RigidPBDInfo,
+    clamped_inv_dt: float, pbd_state: PBDState, dyn_state: DynState, rigid_pbd_info: RigidPBDInfo
 ):
     """
     Drive the position based dynamics (PBD) particles carried by a link toward the point of the link they follow.

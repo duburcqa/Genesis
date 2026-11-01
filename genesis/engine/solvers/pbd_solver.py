@@ -551,13 +551,7 @@ def func_s_corr(d_ij: qd.types.vector(3), dist_scale: float):
 # copy back of the sorted particles repeat those of the SPH solver.
 @qd.func
 def func_for_all_neighbors(
-    i_p: int,
-    i_b: int,
-    ret: qd.template(),
-    pbd_state: PBDState,
-    pbd_info: PBDInfo,
-    radius: float,
-    task: qd.template(),
+    i_p: int, i_b: int, ret: qd.template(), pbd_state: PBDState, pbd_info: PBDInfo, radius: float, task: qd.template()
 ):
     """
     Run a task on every sorted particle closer than a radius to a sorted particle, the particle itself excluded.
@@ -603,13 +597,7 @@ def kernel_reorder_particles(pbd_state: PBDState, pbd_info: PBDInfo):
 
 
 @qd.func
-def func_copy_particle(
-    i_p_src: int,
-    i_p_dst: int,
-    i_b: int,
-    particles_src: PBDParticles,
-    particles_dst: PBDParticles,
-):
+def func_copy_particle(i_p_src: int, i_p_dst: int, i_b: int, particles_src: PBDParticles, particles_dst: PBDParticles):
     """Copy the dynamic state of a particle onto another slot of the same environment."""
     particles_dst.free[i_p_dst, i_b] = particles_src.free[i_p_src, i_b]
     particles_dst.pos[i_p_dst, i_b] = particles_src.pos[i_p_src, i_b]

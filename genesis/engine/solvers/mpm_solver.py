@@ -232,11 +232,7 @@ def func_mpm_cell_velocity(
 
 @qd.kernel
 def kernel_p2g(
-    f: int,
-    mpm_state: MPMState,
-    mpm_info: MPMInfo,
-    mpm_static_config: qd.template(),
-    material_dispatcher: qd.template(),
+    f: int, mpm_state: MPMState, mpm_info: MPMInfo, mpm_static_config: qd.template(), material_dispatcher: qd.template()
 ):
     """
     Update the deformation of the active particles of a frame, then scatter their momentum and mass to the grid.
@@ -399,11 +395,7 @@ def func_mpm_grid_couplings(
 
 @qd.kernel
 def kernel_mpm_grid_op(
-    f: int,
-    t: float,
-    mpm_state: MPMState,
-    mpm_info: MPMInfo,
-    force_fields_dispatcher: qd.template(),
+    f: int, t: float, mpm_state: MPMState, mpm_info: MPMInfo, force_fields_dispatcher: qd.template()
 ):
     """
     Update the velocity of the cells of the material point method (MPM) grid holding mass.

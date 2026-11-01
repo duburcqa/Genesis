@@ -921,11 +921,7 @@ def func_compute_ele_J_F(f: int, i_e: int, i_b: int, fem_state: FEMState, fem_in
 
 @qd.func
 def func_compute_element_mapping_matrix(
-    i_e: int,
-    i_b: int,
-    vertex_constraints: FEMVertexConstraintsInfo,
-    fem_info: FEMInfo,
-    static_config: qd.template(),
+    i_e: int, i_b: int, vertex_constraints: FEMVertexConstraintsInfo, fem_info: FEMInfo, static_config: qd.template()
 ):
     """
     Return the 4x3 matrix mapping the positions of the vertices of an element to its deformation gradient.
@@ -1056,11 +1052,7 @@ def func_pcg_update_residual(pcg: FEMPCGVertices, pcg_scalars: PCGScalars, sums:
 
 @qd.kernel
 def kernel_compute_elements_force(
-    f: int,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    static_config: qd.template(),
-    material_dispatcher: qd.template(),
+    f: int, fem_state: FEMState, fem_info: FEMInfo, static_config: qd.template(), material_dispatcher: qd.template()
 ):
     """Compute the internal force of every element of the explicit solver, and its contribution to each vertex."""
     for i_e, i_b in qd.ndrange(fem_info.elements.el2v.shape[0], fem_state.vertices.pos.shape[2]):
@@ -1270,10 +1262,7 @@ def kernel_init_pcg_solve(fem_state: FEMState, fem_info: FEMInfo):
 
 @qd.kernel(fastcache=True)
 def kernel_one_pcg_iter(
-    vertex_constraints: FEMVertexConstraintsInfo,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    static_config: qd.template(),
+    vertex_constraints: FEMVertexConstraintsInfo, fem_state: FEMState, fem_info: FEMInfo, static_config: qd.template()
 ):
     """Run one iteration of the preconditioned conjugate gradient solve of the Newton step."""
     # A * p, and the terms of p^T A p
@@ -1604,10 +1593,7 @@ def kernel_apply_hard_constraints(f: int, vertex_constraints: FEMVertexConstrain
 @no_grad
 @qd.kernel(fastcache=True)
 def kernel_apply_soft_constraints(
-    f: int,
-    vertex_constraints: FEMVertexConstraintsInfo,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
+    f: int, vertex_constraints: FEMVertexConstraintsInfo, fem_state: FEMState, fem_info: FEMInfo
 ):
     """Pull the soft-constrained vertices of the next frame toward their target with a critically damped spring."""
     for i_v, i_b in qd.ndrange(vertex_constraints.is_constrained.shape[0], vertex_constraints.is_constrained.shape[1]):
@@ -1653,9 +1639,7 @@ def func_set_constraint_target(
 
 @qd.kernel(fastcache=True)
 def kernel_remove_specific_constraints(
-    verts_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    vertex_constraints: FEMVertexConstraintsInfo,
+    verts_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vertex_constraints: FEMVertexConstraintsInfo
 ):
     """Release some constrained vertices."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):

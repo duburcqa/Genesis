@@ -323,12 +323,7 @@ class SPHSolver(ParticleSolver):
 # copy back of the sorted particles repeat those of the PBD solver.
 @qd.func
 def func_for_all_neighbors(
-    i_p: int,
-    i_b: int,
-    ret: qd.template(),
-    sph_state: SPHState,
-    sph_info: SPHInfo,
-    task: qd.template(),
+    i_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo, task: qd.template()
 ):
     """
     Run a task on every sorted particle within the support radius of a sorted particle, the particle itself excluded.
@@ -369,13 +364,7 @@ def kernel_reorder_particles(sph_state: SPHState, sph_info: SPHInfo):
 
 
 @qd.func
-def func_copy_particle(
-    i_p_src: int,
-    i_p_dst: int,
-    i_b: int,
-    particles_src: SPHParticles,
-    particles_dst: SPHParticles,
-):
+def func_copy_particle(i_p_src: int, i_p_dst: int, i_b: int, particles_src: SPHParticles, particles_dst: SPHParticles):
     """Copy the dynamic state of a particle onto another slot of the same environment."""
     particles_dst.pos[i_p_dst, i_b] = particles_src.pos[i_p_src, i_b]
     particles_dst.vel[i_p_dst, i_b] = particles_src.vel[i_p_src, i_b]

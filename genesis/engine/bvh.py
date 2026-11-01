@@ -155,10 +155,7 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> StructS
     # A set switched off leaves every array unused, else the scratch of the sort and of the fit it runs alone
     unused = {None: True}
     if is_active:
-        unused = {
-            BVHState.sort: sort.unused,
-            BLOCK_SWEEP_FIT: fit_kind != BVH_FIT_KIND.BLOCK_SWEEP,
-        }
+        unused = {BVHState.sort: sort.unused, BLOCK_SWEEP_FIT: fit_kind != BVH_FIT_KIND.BLOCK_SWEEP}
     sizes = dict(bvh_trees=n_trees, bvh_leaves=n_leaves, sort=sort.sizes)
     return StructSpec(bvh_config, sizes, unused)
 
