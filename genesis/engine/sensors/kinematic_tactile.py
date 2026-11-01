@@ -265,7 +265,7 @@ def _func_kinematic_spring_damper(
     """
     Kinematic spring-damper force / torque in the sensor link frame from a single probe's contact query.
 
-    Shared by the GT and measured branches of ``_kernel_kinematic_taxel`` (they differ only in which dual-radius
+    Shared by the GT and measured branches of ``_kernel_kinematic_tactile`` (they differ only in which dual-radius
     query result is fed in). Returns ``(force_local, torque_local)``; both zero when ``max_penetration <= 0``.
     """
     force_local = qd.Vector.zero(gs.qd_float, 3)
@@ -299,7 +299,7 @@ def _func_kinematic_spring_damper(
 
 
 @qd.kernel(fastcache=True)
-def _kernel_kinematic_taxel(
+def _kernel_kinematic_tactile(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
     env_bvh_idx_a: qd.types.ndarray(),
@@ -330,14 +330,18 @@ def _kernel_kinematic_taxel(
     eps: float,
     is_raycast: qd.template(),
     is_split: qd.template(),
+    has_force: qd.template(),
     measured_equals_gt: int,
 ):
     """
-    Kinematic spring-damper force and torque per probe from the contact geometry and the relative motion.
+    Dual-radius penetration per probe, or with `has_force` the kinematic spring-damper force and torque it drives.
 
     The contact is queried through the SDF of the opposing geoms, or if `is_raycast` from the nearest candidate
-    triangle (see func_bvh_nearest_masked_triangle): the penetration is then ``pen = R - sd`` as in the SDF query, the
-    contact normal is the outward face normal of the triangle and the contact link the link owning its geom.
+    triangle (see func_bvh_nearest_masked_triangle): the penetration is then ``max(0, R - sd)`` with the signed distance
+    to the triangle, which keeps growing as the probe penetrates as in the SDF query rather than folding back at ``R``
+    like an unsigned closest-point distance. The contact normal is the outward face normal of the triangle and the
+    contact link the link owning its geom. The force and torque derive from the contact and the relative motion of the
+    links, the measured branch being recomputed only unless `measured_equals_gt`.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
@@ -346,17 +350,21 @@ def _kernel_kinematic_taxel(
         i_s = probe_sensor_idx[i_p]
         probe_idx_in_sensor = i_p - sensor_probe_start[i_s]
         cache_start = sensor_cache_start[i_s]
-        n_probes = n_probes_per_sensor[i_s]
         force_start = cache_start + probe_idx_in_sensor * 3
-        torque_start = cache_start + n_probes * 3 + probe_idx_in_sensor * 3
+        torque_start = cache_start + n_probes_per_sensor[i_s] * 3 + probe_idx_in_sensor * 3
+        cache_idx = cache_start + probe_idx_in_sensor
 
-        # Inactive filler probe (probe_radius == 0): reads zero force/torque, no contact query.
+        # Inactive filler probe (probe_radius == 0): reads zero depth, force and torque, without contact query
         if probe_radii[i_p] <= gs.qd_float(0.0):
-            for j in qd.static(range(3)):
-                output_gt[force_start + j, i_b] = gs.qd_float(0.0)
-                output_gt[torque_start + j, i_b] = gs.qd_float(0.0)
-                output_measured[force_start + j, i_b] = gs.qd_float(0.0)
-                output_measured[torque_start + j, i_b] = gs.qd_float(0.0)
+            if qd.static(has_force):
+                for j in qd.static(range(3)):
+                    output_gt[force_start + j, i_b] = gs.qd_float(0.0)
+                    output_gt[torque_start + j, i_b] = gs.qd_float(0.0)
+                    output_measured[force_start + j, i_b] = gs.qd_float(0.0)
+                    output_measured[torque_start + j, i_b] = gs.qd_float(0.0)
+            else:
+                output_gt[cache_idx, i_b] = gs.qd_float(0.0)
+                output_measured[cache_idx, i_b] = gs.qd_float(0.0)
             continue
 
         probe_pos_local = qd.Vector(
@@ -371,9 +379,10 @@ def _kernel_kinematic_taxel(
 
         probe_radius = probe_radii[i_p]
         probe_radius_noise = probe_radii_noise[i_p]
-        use_noised_radius = probe_radius_noise > eps
         probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise, eps) if use_noised_radius else probe_radius
+            func_noised_probe_radius(probe_radius, probe_radius_noise, eps)
+            if probe_radius_noise > eps
+            else probe_radius
         )
 
         max_penetration_gt = gs.qd_float(0.0)
@@ -405,7 +414,7 @@ def _kernel_kinematic_taxel(
             contact_link_m = contact_link_gt
             contact_normal_gt = contact_normal
             contact_normal_m = contact_normal
-        else:
+        elif qd.static(has_force):
             (
                 max_penetration_gt,
                 contact_link_gt,
@@ -427,138 +436,6 @@ def _kernel_kinematic_taxel(
                 sdf_info,
                 eps,
             )
-
-        force_local_gt, torque_local_gt = _func_kinematic_spring_damper(
-            i_b,
-            sensor_link_idx,
-            max_penetration_gt,
-            contact_link_gt,
-            contact_normal_gt,
-            probe_pos,
-            probe_pos_local,
-            link_quat,
-            normal_stiffness[i_s],
-            normal_damping[i_s],
-            normal_exponent[i_s],
-            shear_scalar[i_s],
-            twist_scalar[i_s],
-            dyn_state,
-        )
-
-        force_local_m = force_local_gt
-        torque_local_m = torque_local_gt
-        if measured_equals_gt == 0:
-            # The measured branch differs from GT: either some probe has a noised sensing radius or a non-unit
-            # per-(env, probe) gain. Gain scales the measured penetration only; force / torque then scale as
-            # ``gain ** normal_exponent`` since they derive from ``s = max_penetration_m ** normal_exponent``.
-            max_penetration_m = max_penetration_m * probe_gains[i_b, i_p]
-            force_local_m, torque_local_m = _func_kinematic_spring_damper(
-                i_b,
-                sensor_link_idx,
-                max_penetration_m,
-                contact_link_m,
-                contact_normal_m,
-                probe_pos,
-                probe_pos_local,
-                link_quat,
-                normal_stiffness[i_s],
-                normal_damping[i_s],
-                normal_exponent[i_s],
-                shear_scalar[i_s],
-                twist_scalar[i_s],
-                dyn_state,
-            )
-
-        for j in qd.static(range(3)):
-            output_gt[force_start + j, i_b] = force_local_gt[j]
-            output_gt[torque_start + j, i_b] = torque_local_gt[j]
-            output_measured[force_start + j, i_b] = force_local_m[j]
-            output_measured[torque_start + j, i_b] = torque_local_m[j]
-
-
-@qd.kernel(fastcache=True)
-def _kernel_contact_depth_probe(
-    probe_sensor_idx: qd.types.ndarray(),
-    links_idx: qd.types.ndarray(),
-    env_bvh_idx_a: qd.types.ndarray(),
-    env_bvh_idx_b: qd.types.ndarray(),
-    sensor_cache_start: qd.types.ndarray(),
-    sensor_probe_start: qd.types.ndarray(),
-    sensor_geoms_idx: qd.types.ndarray(),
-    probe_positions_local: qd.types.ndarray(),
-    probe_radii: qd.types.ndarray(),
-    probe_radii_noise: qd.types.ndarray(),
-    probe_gains: qd.types.ndarray(),
-    sensor_n_geoms: qd.types.ndarray(),
-    sensor_candidate_geom_mask: qd.types.ndarray(),
-    output_gt: qd.types.ndarray(),
-    output_measured: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_tree_state_a: BVHTreeState,
-    bvh_tree_state_b: BVHTreeState,
-    dyn_info: DynInfo,
-    sdf_info: SDFInfo,
-    eps: float,
-    is_raycast: qd.template(),
-    is_split: qd.template(),
-):
-    """
-    Dual-radius probe penetration through the SDF of the opposing geoms, or if `is_raycast` from the nearest triangle.
-
-    The raycast query penetrates by ``max(0, R - sd)`` with the signed distance to the nearest candidate triangle (see
-    func_bvh_nearest_masked_triangle). This matches the SDF query's ``pen = R - sd``: it keeps growing as the probe
-    penetrates, rather than folding back at ``R`` like an unsigned closest-point distance.
-    """
-    total_n_probes = probe_positions_local.shape[0]
-    n_batches = output_gt.shape[-1]
-
-    for i_p, i_b in qd.ndrange(total_n_probes, n_batches):
-        i_s = probe_sensor_idx[i_p]
-
-        # Inactive filler probe (probe_radius == 0): reads zero depth (which contact-probe interprets as no contact).
-        if probe_radii[i_p] <= gs.qd_float(0.0):
-            cache_idx = sensor_cache_start[i_s] + i_p - sensor_probe_start[i_s]
-            output_gt[cache_idx, i_b] = gs.qd_float(0.0)
-            output_measured[cache_idx, i_b] = gs.qd_float(0.0)
-            continue
-
-        probe_pos_local = qd.Vector(
-            [probe_positions_local[i_p, 0], probe_positions_local[i_p, 1], probe_positions_local[i_p, 2]]
-        )
-
-        sensor_link_idx = links_idx[i_s]
-        link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
-
-        probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
-
-        probe_radius = probe_radii[i_p]
-        probe_radius_noise = probe_radii_noise[i_p]
-        probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise, eps)
-            if probe_radius_noise > eps
-            else probe_radius
-        )
-
-        max_penetration_gt = gs.qd_float(0.0)
-        max_penetration_m = gs.qd_float(0.0)
-        if qd.static(is_raycast):
-            signed_dist, _normal, _i_g = func_bvh_nearest_masked_triangle(
-                i_b,
-                i_s,
-                env_bvh_idx_a,
-                env_bvh_idx_b,
-                probe_pos,
-                qd.max(probe_radius, probe_radius_m),
-                sensor_candidate_geom_mask,
-                dyn_state,
-                bvh_tree_state_a,
-                bvh_tree_state_b,
-                dyn_info,
-                is_split,
-            )
-            max_penetration_gt = qd.max(gs.qd_float(0.0), probe_radius - signed_dist)
-            max_penetration_m = qd.max(gs.qd_float(0.0), probe_radius_m - signed_dist)
         else:
             max_penetration_gt, max_penetration_m = _func_query_contact_depth_penetration(
                 i_b,
@@ -572,10 +449,58 @@ def _kernel_contact_depth_probe(
                 dyn_info,
                 sdf_info,
             )
-        max_penetration_m = max_penetration_m * probe_gains[i_b, i_p]  # gain on measured branch only
-        cache_idx = sensor_cache_start[i_s] + i_p - sensor_probe_start[i_s]
-        output_gt[cache_idx, i_b] = max_penetration_gt
-        output_measured[cache_idx, i_b] = max_penetration_m
+
+        if qd.static(has_force):
+            force_local_gt, torque_local_gt = _func_kinematic_spring_damper(
+                i_b,
+                sensor_link_idx,
+                max_penetration_gt,
+                contact_link_gt,
+                contact_normal_gt,
+                probe_pos,
+                probe_pos_local,
+                link_quat,
+                normal_stiffness[i_s],
+                normal_damping[i_s],
+                normal_exponent[i_s],
+                shear_scalar[i_s],
+                twist_scalar[i_s],
+                dyn_state,
+            )
+
+            force_local_m = force_local_gt
+            torque_local_m = torque_local_gt
+            if measured_equals_gt == 0:
+                # The measured branch differs from GT: either some probe has a noised sensing radius or a non-unit
+                # per-(env, probe) gain. Gain scales the measured penetration only; force / torque then scale as
+                # ``gain ** normal_exponent`` since they derive from ``s = max_penetration_m ** normal_exponent``.
+                max_penetration_m = max_penetration_m * probe_gains[i_b, i_p]
+                force_local_m, torque_local_m = _func_kinematic_spring_damper(
+                    i_b,
+                    sensor_link_idx,
+                    max_penetration_m,
+                    contact_link_m,
+                    contact_normal_m,
+                    probe_pos,
+                    probe_pos_local,
+                    link_quat,
+                    normal_stiffness[i_s],
+                    normal_damping[i_s],
+                    normal_exponent[i_s],
+                    shear_scalar[i_s],
+                    twist_scalar[i_s],
+                    dyn_state,
+                )
+
+            for j in qd.static(range(3)):
+                output_gt[force_start + j, i_b] = force_local_gt[j]
+                output_gt[torque_start + j, i_b] = torque_local_gt[j]
+                output_measured[force_start + j, i_b] = force_local_m[j]
+                output_measured[torque_start + j, i_b] = torque_local_m[j]
+        else:
+            output_gt[cache_idx, i_b] = max_penetration_gt
+            # Gain on measured branch only
+            output_measured[cache_idx, i_b] = max_penetration_m * probe_gains[i_b, i_p]
 
 
 # ============================ Raycast / BVH contact-depth path ============================
@@ -622,12 +547,90 @@ class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin
     own metadata.
     """
 
+    # Whether the sensor measures the force and torque of the contact of each probe rather than its depth alone
+    _has_force: bool = False
+
     def build(self):
         super().build()
         self._shared_metadata.append_filter(self._options.filter_link_idx)
 
+        # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor. Sized at
+        # build time; the per-step kernel writes into the same buffers without further allocation.
+        B = self._manager._sim._B
+        n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
+        self._shared_metadata.sensor_contacts_idx = torch.zeros(
+            (B, n_sensors_built, _MAX_CONTACTS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
+        )
+        self._shared_metadata.sensor_n_contacts = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
+        self._shared_metadata.sensor_geoms_idx = torch.zeros(
+            (B, n_sensors_built, _MAX_GEOMS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
+        )
+        self._shared_metadata.sensor_n_geoms = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
+
     @classmethod
-    def _prefilter_contacts(cls, shared_metadata: "ContactDepthProbeMetadata | KinematicTaxelMetadata"):
+    def _get_cache_dtype(cls) -> torch.dtype:
+        return gs.tc_float
+
+    @classmethod
+    def _update_current_timestep_data(
+        cls,
+        shared_context: RaycastContext,
+        shared_metadata: "KinematicTactileMetadata",
+        current_ground_truth_data_T: torch.Tensor,
+        ground_truth_data_timeline: "TensorRingBuffer | None",
+        measured_data_timeline: "TensorRingBuffer",
+    ):
+        solver = shared_metadata.solver
+        measured, measured_cols_b = get_measured_bufs(
+            shared_metadata, current_ground_truth_data_T, measured_data_timeline
+        )
+        # The measured branch is provably identical to GT (and the kernel can skip recomputing it) when no probe
+        # has a noised sensing radius and no probe has a non-unit measured-branch gain.
+        measured_equals_gt = int(
+            not shared_metadata.has_any_probe_radius_noise and not shared_metadata.has_any_probe_gain
+        )
+        cls._prefilter_contacts(shared_metadata)
+        entry_a, entry_b = shared_metadata.collision_bvh_contexts[0], shared_metadata.collision_bvh_contexts[-1]
+        _kernel_kinematic_tactile(
+            shared_metadata.probe_sensor_idx,
+            shared_metadata.links_idx,
+            entry_a.env_bvh_idx,
+            entry_b.env_bvh_idx,
+            shared_metadata.sensor_cache_start,
+            shared_metadata.sensor_probe_start,
+            shared_metadata.sensor_geoms_idx,
+            shared_metadata.probe_positions,
+            shared_metadata.probe_radii,
+            shared_metadata.probe_radii_noise,
+            shared_metadata.probe_gains,
+            shared_metadata.normal_stiffness,
+            shared_metadata.normal_damping,
+            shared_metadata.normal_exponent,
+            shared_metadata.shear_scalar,
+            shared_metadata.twist_scalar,
+            shared_metadata.n_probes_per_sensor,
+            shared_metadata.sensor_n_geoms,
+            shared_metadata.sensor_candidate_geom_mask,
+            current_ground_truth_data_T,
+            measured_cols_b,
+            solver.dyn_state,
+            entry_a.bvh_state.tree,
+            entry_b.bvh_state.tree,
+            solver.dyn_info,
+            solver.rigid_info,
+            shared_metadata.sdf_info,
+            eps=gs.EPS,
+            is_raycast=shared_metadata.is_raycast,
+            is_split=entry_b is not entry_a,
+            has_force=cls._has_force,
+            measured_equals_gt=measured_equals_gt,
+        )
+        if ground_truth_data_timeline is not None:
+            ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
+        measured.copy_(measured_cols_b.T)
+
+    @classmethod
+    def _prefilter_contacts(cls, shared_metadata: "KinematicTactileMetadata"):
         """Collect the contacts of each sensor link that the contact-depth query of the class reads.
 
         The SDF query reads the deduplicated opposing geoms of the contacts, the raycast query the candidate-geom mask
@@ -665,7 +668,7 @@ class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin
 
 
 @dataclass
-class ContactDepthProbeMetadata(
+class KinematicTactileMetadata(
     ViscoelasticHysteresisMetadataMixin,
     ProbeSensorMetadataMixin,
     ContactFilterMetadataMixin,
@@ -674,6 +677,17 @@ class ContactDepthProbeMetadata(
     RigidSensorMetadataMixin,
     SimpleSensorMetadata,
 ):
+    """The metadata of the contact-depth probe family, the spring-damper parameters empty for depth probes."""
+
+    normal_stiffness: torch.Tensor = make_tensor_field((0,))
+    normal_damping: torch.Tensor = make_tensor_field((0,))
+    normal_exponent: torch.Tensor = make_tensor_field((0,))
+    shear_scalar: torch.Tensor = make_tensor_field((0,))
+    twist_scalar: torch.Tensor = make_tensor_field((0,))
+
+
+@dataclass
+class ContactDepthProbeMetadata(KinematicTactileMetadata):
     pass
 
 
@@ -687,70 +701,8 @@ class ContactDepthProbeSensor(
     Returns contact depth in meters per probe.
     """
 
-    def build(self):
-        super().build()
-        # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor.
-        B = self._manager._sim._B
-        n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
-        self._shared_metadata.sensor_contacts_idx = torch.zeros(
-            (B, n_sensors_built, _MAX_CONTACTS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
-        )
-        self._shared_metadata.sensor_n_contacts = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
-        self._shared_metadata.sensor_geoms_idx = torch.zeros(
-            (B, n_sensors_built, _MAX_GEOMS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
-        )
-        self._shared_metadata.sensor_n_geoms = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
-
     def _get_return_format(self) -> tuple[int, ...]:
         return self._probe_layout_shape
-
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
-        return gs.tc_float
-
-    @classmethod
-    def _update_current_timestep_data(
-        cls,
-        shared_context: RaycastContext,
-        shared_metadata: ContactDepthProbeMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer",
-    ):
-        solver = shared_metadata.solver
-        measured, measured_cols_b = get_measured_bufs(
-            shared_metadata, current_ground_truth_data_T, measured_data_timeline
-        )
-        cls._prefilter_contacts(shared_metadata)
-        entry_a, entry_b = shared_metadata.collision_bvh_contexts[0], shared_metadata.collision_bvh_contexts[-1]
-        _kernel_contact_depth_probe(
-            shared_metadata.probe_sensor_idx,
-            shared_metadata.links_idx,
-            entry_a.env_bvh_idx,
-            entry_b.env_bvh_idx,
-            shared_metadata.sensor_cache_start,
-            shared_metadata.sensor_probe_start,
-            shared_metadata.sensor_geoms_idx,
-            shared_metadata.probe_positions,
-            shared_metadata.probe_radii,
-            shared_metadata.probe_radii_noise,
-            shared_metadata.probe_gains,
-            shared_metadata.sensor_n_geoms,
-            shared_metadata.sensor_candidate_geom_mask,
-            current_ground_truth_data_T,
-            measured_cols_b,
-            solver.dyn_state,
-            entry_a.bvh_state.tree,
-            entry_b.bvh_state.tree,
-            solver.dyn_info,
-            shared_metadata.sdf_info,
-            eps=gs.EPS,
-            is_raycast=shared_metadata.is_raycast,
-            is_split=entry_b is not entry_a,
-        )
-        if ground_truth_data_timeline is not None:
-            ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
-        measured.copy_(measured_cols_b.T)
 
     def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
         def mask(batch_envs_idx):
@@ -857,21 +809,8 @@ class KinematicTaxelReturnType(NamedTuple):
 
 
 @dataclass
-class KinematicTaxelMetadata(
-    ViscoelasticHysteresisMetadataMixin,
-    SpatialCrosstalkMetadataMixin,
-    ProbeSensorMetadataMixin,
-    ContactFilterMetadataMixin,
-    ContactPrefilterMetadataMixin,
-    ContactDepthQueryMetadataMixin,
-    RigidSensorMetadataMixin,
-    SimpleSensorMetadata,
-):
-    normal_stiffness: torch.Tensor = make_tensor_field((0,))
-    normal_damping: torch.Tensor = make_tensor_field((0,))
-    normal_exponent: torch.Tensor = make_tensor_field((0,))
-    shear_scalar: torch.Tensor = make_tensor_field((0,))
-    twist_scalar: torch.Tensor = make_tensor_field((0,))
+class KinematicTaxelMetadata(SpatialCrosstalkMetadataMixin, KinematicTactileMetadata):
+    pass
 
 
 class KinematicTaxelSensor(
@@ -886,6 +825,7 @@ class KinematicTaxelSensor(
     # Two channel groups: force xyz followed by torque xyz (probe-major within each group). See
     # ``ProbeSensorMixin._taxel_channel_groups`` for how this drives dead-taxel cache-col -> probe mapping.
     _taxel_channel_groups: int = 2
+    _has_force = True
 
     def __init__(
         self, options: KinematicTaxelOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"
@@ -916,83 +856,9 @@ class KinematicTaxelSensor(
         if self._options.is_crosstalk_enabled and self._use_grid_crosstalk:
             self._register_crosstalk()
 
-        # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor.
-        # Sized at build time; the per-step kernel writes into the same buffers without further allocation.
-        B = self._manager._sim._B
-        n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
-        self._shared_metadata.sensor_contacts_idx = torch.zeros(
-            (B, n_sensors_built, _MAX_CONTACTS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
-        )
-        self._shared_metadata.sensor_n_contacts = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
-        self._shared_metadata.sensor_geoms_idx = torch.zeros(
-            (B, n_sensors_built, _MAX_GEOMS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
-        )
-        self._shared_metadata.sensor_n_geoms = torch.zeros((B, n_sensors_built), dtype=gs.tc_int, device=gs.device)
-
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
         shape = (*self._probe_layout_shape, 3)
         return shape, shape
-
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
-        return gs.tc_float
-
-    @classmethod
-    def _update_current_timestep_data(
-        cls,
-        shared_context: RaycastContext,
-        shared_metadata: KinematicTaxelMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer",
-    ):
-        solver = shared_metadata.solver
-        measured, measured_cols_b = get_measured_bufs(
-            shared_metadata, current_ground_truth_data_T, measured_data_timeline
-        )
-        # The measured branch is provably identical to GT (and the kernel can skip recomputing it) when no probe
-        # has a noised sensing radius and no probe has a non-unit measured-branch gain.
-        measured_equals_gt = int(
-            not shared_metadata.has_any_probe_radius_noise and not shared_metadata.has_any_probe_gain
-        )
-        cls._prefilter_contacts(shared_metadata)
-        entry_a, entry_b = shared_metadata.collision_bvh_contexts[0], shared_metadata.collision_bvh_contexts[-1]
-        _kernel_kinematic_taxel(
-            shared_metadata.probe_sensor_idx,
-            shared_metadata.links_idx,
-            entry_a.env_bvh_idx,
-            entry_b.env_bvh_idx,
-            shared_metadata.sensor_cache_start,
-            shared_metadata.sensor_probe_start,
-            shared_metadata.sensor_geoms_idx,
-            shared_metadata.probe_positions,
-            shared_metadata.probe_radii,
-            shared_metadata.probe_radii_noise,
-            shared_metadata.probe_gains,
-            shared_metadata.normal_stiffness,
-            shared_metadata.normal_damping,
-            shared_metadata.normal_exponent,
-            shared_metadata.shear_scalar,
-            shared_metadata.twist_scalar,
-            shared_metadata.n_probes_per_sensor,
-            shared_metadata.sensor_n_geoms,
-            shared_metadata.sensor_candidate_geom_mask,
-            current_ground_truth_data_T,
-            measured_cols_b,
-            solver.dyn_state,
-            entry_a.bvh_state.tree,
-            entry_b.bvh_state.tree,
-            solver.dyn_info,
-            solver.rigid_info,
-            shared_metadata.sdf_info,
-            eps=gs.EPS,
-            is_raycast=shared_metadata.is_raycast,
-            is_split=entry_b is not entry_a,
-            measured_equals_gt=measured_equals_gt,
-        )
-        if ground_truth_data_timeline is not None:
-            ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
-        measured.copy_(measured_cols_b.T)
 
     def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
         def mask(batch_envs_idx):
