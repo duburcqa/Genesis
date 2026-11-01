@@ -23,7 +23,7 @@ from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
 from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch, qd_zero_grad
 
-from .particle_solver import ParticleSolver, kernel_add_vverts
+from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_scalar
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -452,9 +452,6 @@ class MPMSolver(ParticleSolver, Coupling):
 
         # options
         self._grid_density = options.grid_density
-        self._particle_size = options.particle_size
-        self._upper_bound = np.array(options.upper_bound)
-        self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
@@ -508,8 +505,6 @@ class MPMSolver(ParticleSolver, Coupling):
         super().build()
 
         # particles and entities
-        self._B = self._sim._B
-        self._n_particles = self.n_particles
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
 
@@ -558,6 +553,11 @@ class MPMSolver(ParticleSolver, Coupling):
             ),
             unused={info_arrays: not self.is_active},
         )
+        self._particles = self.mpm_state.particles
+        self._particles_params = self.mpm_info.particles
+        self._vverts_support = self.mpm_info.vverts
+        self.particles_render = self.mpm_state.particles_render
+        self.vverts_render = self.mpm_state.vverts_render
         self.mpm_static_config = MPMStaticConfig(is_svd_needed=is_svd_needed, requires_grad=self._sim.requires_grad)
         self.material_dispatcher = MPMMaterialDispatcher(self._materials)
         self._build_gravity(self.mpm_info.gravity)
@@ -587,10 +587,6 @@ class MPMSolver(ParticleSolver, Coupling):
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_active(self):
-        return self.n_particles > 0
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -721,9 +717,6 @@ class MPMSolver(ParticleSolver, Coupling):
         ]
         return MPMSolverState(self._scene, pos, vel, C, F, Jp, actu, active)
 
-    def update_render_fields(self):
-        kernel_update_render_fields(self.sim.cur_substep_local, self.mpm_state, self.mpm_info)
-
     @gs.assert_built
     @mutates()
     def set_particles_actu(self, actus, particles_idx=None, envs_idx=None, *, n_groups=1):
@@ -751,7 +744,7 @@ class MPMSolver(ParticleSolver, Coupling):
         actus, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True
         )
-        kernel_get_particles_actu(particles_idx, envs_idx, actus, self.mpm_state)
+        kernel_get_particles_scalar(particles_idx, envs_idx, actus, self.mpm_state.particles.actu, has_frames=True)
         return actus[0] if self._scene.n_envs == 0 else actus
 
     @mutates(StateChange.MODEL)
@@ -760,14 +753,14 @@ class MPMSolver(ParticleSolver, Coupling):
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             muscle_group, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        kernel_set_particles_muscle_group(particles_idx, muscle_group, self.mpm_info)
+        kernel_set_particles_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
 
     def get_particles_muscle_group(self, particles_idx=None):
         """Get the muscle group of some particles (see 'set_particles_muscle_group')."""
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        kernel_get_particles_muscle_group(particles_idx, muscle_group, self.mpm_info)
+        kernel_get_particles_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
         return muscle_group
 
     @mutates(StateChange.MODEL)
@@ -784,36 +777,24 @@ class MPMSolver(ParticleSolver, Coupling):
         free, particles_idx, _ = self._sanitize_io_variables(
             free, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        kernel_set_particles_free(particles_idx, free, self.mpm_info)
+        kernel_set_particles_info(particles_idx, free, self.mpm_info.particles.is_free)
 
     def get_particles_free(self, particles_idx=None):
         """Get whether some particles move freely (see 'set_particles_free')."""
         free, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        kernel_get_particles_free(particles_idx, free, self.mpm_info)
+        kernel_get_particles_info(particles_idx, free, self.mpm_info.particles.is_free)
         return free
 
-    def _kernel_set_particles_pos(self, particles_idx, envs_idx, poss):
-        kernel_set_particles_pos(particles_idx, envs_idx, poss, self.mpm_state, self.mpm_info)
+    def get_particles_mass(self, particles_idx=None, envs_idx=None):
+        # The particles hold their mass scaled up with their volume (see MPMInfo)
+        return super().get_particles_mass(particles_idx, envs_idx) / self._particle_volume_scale
 
-    def _kernel_get_particles_pos(self, particles_idx, envs_idx, poss):
-        kernel_get_particles_pos(particles_idx, envs_idx, poss, self.mpm_state)
-
-    def _kernel_set_particles_vel(self, particles_idx, envs_idx, vels):
-        kernel_set_particles_vel(particles_idx, envs_idx, vels, self.mpm_state)
-
-    def _kernel_get_particles_vel(self, particles_idx, envs_idx, vels):
-        kernel_get_particles_vel(particles_idx, envs_idx, vels, self.mpm_state)
-
-    def _kernel_set_particles_active(self, particles_idx, envs_idx, actives):
-        kernel_set_particles_active(particles_idx, envs_idx, actives, self.mpm_state)
-
-    def _kernel_get_particles_active(self, particles_idx, envs_idx, actives):
-        kernel_get_particles_active(particles_idx, envs_idx, actives, self.mpm_state)
-
-    def _kernel_get_particles_mass(self, particles_idx, envs_idx, masses):
-        kernel_get_particles_mass(particles_idx, envs_idx, masses, self.mpm_info)
+    def _reset_particles(self, particles_idx, envs_idx, pos_changed: bool):
+        # Particles set at a new position are undeformed
+        if pos_changed:
+            kernel_reset_particles_deformation(particles_idx, envs_idx, self.mpm_state, self.mpm_info)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- particle constraints ------------------------------
@@ -872,12 +853,6 @@ class MPMSolver(ParticleSolver, Coupling):
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_particles(self):
-        if self.is_built:
-            return self._n_particles
-        return sum(entity.n_particles for entity in self._entities)
-
-    @property
     def n_vvert_supports(self):
         """
         Number of particles supporting each visual vertex.
@@ -901,22 +876,6 @@ class MPMSolver(ParticleSolver, Coupling):
         return self._grid_density
 
     @property
-    def particle_size(self):
-        return self._particle_size
-
-    @property
-    def particle_radius(self):
-        return self._particle_size / 2.0
-
-    @property
-    def upper_bound(self):
-        return self._upper_bound
-
-    @property
-    def lower_bound(self):
-        return self._lower_bound
-
-    @property
     def dx(self):
         return self._dx
 
@@ -935,10 +894,6 @@ class MPMSolver(ParticleSolver, Coupling):
     @property
     def particle_volume_scale(self):
         return self._particle_volume_scale
-
-    @property
-    def is_built(self):
-        return self._scene._is_built
 
     @property
     def lower_bound_cell(self):
@@ -1118,29 +1073,6 @@ def kernel_set_state(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_render_fields(f: int, mpm_state: MPMState, mpm_info: MPMInfo):
-    """Copy the particles of a frame to their rendered state, and skin the visual vertices on them."""
-    for i_p, i_b in qd.ndrange(mpm_state.particles.pos.shape[1], mpm_state.particles.pos.shape[2]):
-        if mpm_state.particles.is_active[f, i_p, i_b]:
-            mpm_state.particles_render.pos[i_p, i_b] = mpm_state.particles.pos[f, i_p, i_b]
-            mpm_state.particles_render.vel[i_p, i_b] = mpm_state.particles.vel[f, i_p, i_b]
-        else:
-            mpm_state.particles_render.pos[i_p, i_b] = gu.qd_nowhere()
-        mpm_state.particles_render.is_active[i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
-
-    for i_v, i_b in qd.ndrange(mpm_state.vverts_render.pos.shape[0], mpm_state.vverts_render.pos.shape[1]):
-        support_idxs = mpm_info.vverts.support_idxs[i_v]
-        support_weights = mpm_info.vverts.support_weights[i_v]
-        vvert_pos = qd.Vector.zero(gs.qd_float, 3)
-        for j in qd.static(range(support_idxs.n)):
-            i_p = support_idxs[j]
-            vvert_pos += mpm_state.particles.pos[f, i_p, i_b] * support_weights[j]
-        mpm_state.vverts_render.pos[i_v, i_b] = vvert_pos
-        i_p_first = support_idxs[0]
-        mpm_state.vverts_render.is_active[i_v, i_b] = mpm_state.particles_render.is_active[i_p_first, i_b]
-
-
-@qd.kernel(fastcache=True)
 def kernel_add_particles(
     f: int,
     particle_start: int,
@@ -1179,105 +1111,18 @@ def kernel_add_particles(
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_particles_pos(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    poss: qd.types.ndarray(),
-    mpm_state: MPMState,
-    mpm_info: MPMInfo,
+def kernel_reset_particles_deformation(
+    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), mpm_state: MPMState, mpm_info: MPMInfo
 ):
-    """Set the position of some particles between two steps, at rest and undeformed."""
+    """Make some particles undeformed between two steps, as they are once added."""
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index'). Between two steps, the
-        # state sits in frame 0 (see 'Solver.has_frames').
+        # See 'kernel_set_particles_pos' in particle_solver.py
         if i_p >= 0:
-            for i in qd.static(range(3)):
-                mpm_state.particles.pos[0, i_p, i_b][i] = poss[i_b_, i_p_, i]
-
-            # Reset these attributes whenever overwriting particle positions manually
-            mpm_state.particles.vel[0, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
             mpm_state.particles.F[0, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
             mpm_state.particles.C[0, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
             mpm_state.particles.Jp[0, i_p, i_b] = mpm_info.particles.default_Jp[i_p]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_pos(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    poss: qd.types.ndarray(),
-    mpm_state: MPMState,
-):
-    """Get the position of some particles between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        for i in qd.static(range(3)):
-            poss[i_b_, i_p_, i] = mpm_state.particles.pos[0, i_p, i_b][i]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_vel(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    vels: qd.types.ndarray(),
-    mpm_state: MPMState,
-):
-    """Set the velocity of some particles between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos'
-        if i_p >= 0:
-            for i in qd.static(range(3)):
-                mpm_state.particles.vel[0, i_p, i_b][i] = vels[i_b_, i_p_, i]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_vel(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    vels: qd.types.ndarray(),
-    mpm_state: MPMState,
-):
-    """Get the velocity of some particles between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        for i in qd.static(range(3)):
-            vels[i_b_, i_p_, i] = mpm_state.particles.vel[0, i_p, i_b][i]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_active(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    actives: qd.types.ndarray(),
-    mpm_state: MPMState,
-):
-    """Set whether some particles take part in the simulation between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos'
-        if i_p >= 0:
-            mpm_state.particles.is_active[0, i_p, i_b] = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_active(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    actives: qd.types.ndarray(),
-    mpm_state: MPMState,
-):
-    """Get whether some particles take part in the simulation between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        actives[i_b_, i_p_] = mpm_state.particles.is_active[0, i_p, i_b]
 
 
 @qd.kernel(fastcache=True)
@@ -1292,46 +1137,32 @@ def kernel_set_particles_actu(
     for i_p_, i_mg, i_b_ in qd.ndrange(particles_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos'
+        # See 'kernel_set_particles_pos' in particle_solver.py
         if i_p >= 0:
             if mpm_info.particles.muscle_group[i_p] == i_mg:
                 mpm_state.particles.actu[0, i_p, i_b] = actus[i_b_, i_p_, i_mg]
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_particles_actu(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    actus: qd.types.ndarray(),
-    mpm_state: MPMState,
+def kernel_set_particles_info(
+    particles_idx: qd.types.ndarray(), values: qd.types.ndarray(), particles_values: qd.Tensor
 ):
-    """Get the actuation of some particles between two steps."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        actus[i_b_, i_p_] = mpm_state.particles.actu[0, i_p, i_b]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_muscle_group(
-    particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), mpm_info: MPMInfo
-):
-    """Set the muscle group of some particles."""
+    """Set a scalar parameter of some particles, such as their muscle group, shared by every environment."""
     for i_p_ in range(particles_idx.shape[0]):
         i_p = particles_idx[i_p_]
-        # See 'kernel_set_particles_pos'
+        # See 'kernel_set_particles_pos' in particle_solver.py
         if i_p >= 0:
-            mpm_info.particles.muscle_group[i_p] = muscle_group[i_p_]
+            particles_values[i_p] = values[i_p_]
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_particles_muscle_group(
-    particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), mpm_info: MPMInfo
+def kernel_get_particles_info(
+    particles_idx: qd.types.ndarray(), values: qd.types.ndarray(), particles_values: qd.Tensor
 ):
-    """Get the muscle group of some particles."""
+    """Get a scalar parameter of some particles (see 'kernel_set_particles_info')."""
     for i_p_ in range(particles_idx.shape[0]):
         i_p = particles_idx[i_p_]
-        muscle_group[i_p_] = mpm_info.particles.muscle_group[i_p]
+        values[i_p_] = particles_values[i_p]
 
 
 @qd.kernel(fastcache=True)
@@ -1341,41 +1172,10 @@ def kernel_set_particles_muscle_direction(
     """Set the direction of the muscle fibers of some particles."""
     for i_p_ in range(particles_idx.shape[0]):
         i_p = particles_idx[i_p_]
-        # See 'kernel_set_particles_pos'
+        # See 'kernel_set_particles_pos' in particle_solver.py
         if i_p >= 0:
             for i in qd.static(range(3)):
                 mpm_info.particles.muscle_direction[i_p][i] = muscle_direction[i_p_, i]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_free(particles_idx: qd.types.ndarray(), free: qd.types.ndarray(), mpm_info: MPMInfo):
-    """Set whether some particles move freely or act as boundary conditions of the grid."""
-    for i_p_ in range(particles_idx.shape[0]):
-        i_p = particles_idx[i_p_]
-        # See 'kernel_set_particles_pos'
-        if i_p >= 0:
-            mpm_info.particles.is_free[i_p] = free[i_p_]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_free(particles_idx: qd.types.ndarray(), free: qd.types.ndarray(), mpm_info: MPMInfo):
-    """Get whether some particles move freely."""
-    for i_p_ in range(particles_idx.shape[0]):
-        i_p = particles_idx[i_p_]
-        free[i_p_] = mpm_info.particles.is_free[i_p]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_mass(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    masses: qd.types.ndarray(),
-    mpm_info: MPMInfo,
-):
-    """Get the physical mass of some particles, the volume scale divided out."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        masses[i_b_, i_p_] = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
 
 
 @qd.func

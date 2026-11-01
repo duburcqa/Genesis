@@ -20,12 +20,7 @@ from genesis.utils.geom import (
 )
 from genesis.utils.misc import qd_to_numpy
 
-from .particle_solver import (
-    ParticleSolver,
-    kernel_set_particles_pos,
-    kernel_set_particles_vel,
-    kernel_update_particles_render,
-)
+from .particle_solver import ParticleSolver, kernel_get_particles_state, kernel_set_particles_state
 
 
 class SPHParticles(Particles):
@@ -107,7 +102,6 @@ class SPHSolver(ParticleSolver):
         super().__init__(scene, sim, options)
 
         # options
-        self._particle_size = options.particle_size
         self._support_radius = options._support_radius
         self._pressure_solver = options.pressure_solver
 
@@ -116,9 +110,6 @@ class SPHSolver(ParticleSolver):
         self._df_max_error_den = options.max_density_error_percent
         self._df_max_div_iters = options.max_divergence_solver_iterations
         self._df_max_den_iters = options.max_density_solver_iterations
-
-        self._upper_bound = np.array(options.upper_bound)
-        self._lower_bound = np.array(options.lower_bound)
 
         self._particle_volume = 0.8 * self._particle_size**3  # 0.8 is an empirical value
 
@@ -139,11 +130,6 @@ class SPHSolver(ParticleSolver):
 
     def build(self):
         super().build()
-
-        self._B = self._sim._B
-
-        # particles and entities
-        self._n_particles = self.n_particles
 
         # See PBDSolver.build
         if self.is_active:
@@ -170,6 +156,7 @@ class SPHSolver(ParticleSolver):
         )
         self._particles = self.sph_state.particles
         self._particles_params = self.sph_info.particles
+        self.particles_render = self.sph_state.particles_render
 
         if self.is_active:
             for entity in self.entities:
@@ -193,10 +180,6 @@ class SPHSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_active(self):
-        return self.n_particles > 0
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -308,28 +291,26 @@ class SPHSolver(ParticleSolver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            kernel_set_state(state.pos, state.vel, state.active, self.sph_state)
+            particles = self.sph_state.particles
+            kernel_set_particles_state(
+                state.pos, state.vel, state.active, particles.pos, particles.vel, particles.is_active
+            )
 
     def get_state(self, f):
         if self.is_active:
             state = SPHSolverState(self.scene)
-            kernel_get_state(state.pos, state.vel, state.active, self.sph_state)
+            particles = self.sph_state.particles
+            kernel_get_particles_state(
+                state.pos, state.vel, state.active, particles.pos, particles.vel, particles.is_active
+            )
         else:
             state = None
         return state
 
-    def update_render_fields(self):
-        kernel_update_particles_render(self.sph_state.particles, self.sph_state.particles_render)
-
-    # The acceleration of the particles carries over to the first velocity update of the next substep of
-    # divergence-free smoothed particle hydrodynamics (DFSPH), so setting their position or velocity drops the
-    # acceleration of their former state
-    def _kernel_set_particles_pos(self, particles_idx, envs_idx, poss):
-        kernel_set_particles_pos(particles_idx, envs_idx, poss, self.sph_state.particles)
-        kernel_clear_particles_acc(particles_idx, envs_idx, self.sph_state)
-
-    def _kernel_set_particles_vel(self, particles_idx, envs_idx, vels):
-        kernel_set_particles_vel(particles_idx, envs_idx, vels, self.sph_state.particles)
+    def _reset_particles(self, particles_idx, envs_idx, pos_changed: bool):
+        # The acceleration of the particles carries over to the first velocity update of the next substep of
+        # divergence-free smoothed particle hydrodynamics (DFSPH), so setting their position or velocity drops the
+        # acceleration of their former state
         kernel_clear_particles_acc(particles_idx, envs_idx, self.sph_state)
 
     # ------------------------------------------------------------------------------------
@@ -337,23 +318,8 @@ class SPHSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_particles(self):
-        if self.is_built:
-            return self._n_particles
-        else:
-            return sum([entity.n_particles for entity in self._entities])
-
-    @property
     def particle_volume(self):
         return self._particle_volume
-
-    @property
-    def particle_size(self):
-        return self._particle_size
-
-    @property
-    def particle_radius(self):
-        return self._particle_size / 2.0
 
     @property
     def support_radius(self):
@@ -366,14 +332,6 @@ class SPHSolver(ParticleSolver):
     @property
     def hash_grid_cell_size(self):
         return self._hash_grid_cell_size
-
-    @property
-    def upper_bound(self):
-        return self._upper_bound
-
-    @property
-    def lower_bound(self):
-        return self._lower_bound
 
 
 # ------------------------------------------------------------------------------------
@@ -798,23 +756,6 @@ def kernel_pressure_solve_iteration(sph_state: SPHState, sph_info: SPHInfo, solv
             if qd.static(solve_density):
                 rho0 = sph_state.particles_info_reordered.rho[i_p, i_b]
                 sph_state.particles_reordered.p[i_p, i_b] = sph_state.particles_reordered.p[i_p, i_b] - k_i * rho0
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: SPHState):
-    for i_p, i_b in qd.ndrange(sph_state.particles.pos.shape[0], sph_state.particles.pos.shape[1]):
-        sph_state.particles.pos[i_p, i_b] = qd.Vector([pos[i_b, i_p, 0], pos[i_b, i_p, 1], pos[i_b, i_p, 2]])
-        sph_state.particles.vel[i_p, i_b] = qd.Vector([vel[i_b, i_p, 0], vel[i_b, i_p, 1], vel[i_b, i_p, 2]])
-        sph_state.particles.is_active[i_p, i_b] = active[i_b, i_p]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), active: qd.types.ndarray(), sph_state: SPHState):
-    for i_p, i_b in qd.ndrange(sph_state.particles.pos.shape[0], sph_state.particles.pos.shape[1]):
-        for k in qd.static(range(3)):
-            pos[i_b, i_p, k] = sph_state.particles.pos[i_p, i_b][k]
-            vel[i_b, i_p, k] = sph_state.particles.vel[i_p, i_b][k]
-        active[i_b, i_p] = sph_state.particles.is_active[i_p, i_b]
 
 
 @qd.kernel(fastcache=True)

@@ -13,13 +13,14 @@ from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD
 from genesis.engine.solvers.particle_solver import (
     PARTICLES,
+    VFACES,
+    VVERTS,
     Particles,
     ParticlesParams,
     ParticlesRender,
     VVertsRender,
     VVertsSupport,
 )
-from genesis.engine.solvers.rigid.data import VFACES, VVERTS
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
@@ -30,7 +31,7 @@ from genesis.utils.geom import (
     func_hash_pos_to_grid,
 )
 
-from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_update_particles_render
+from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_state, kernel_set_particles_state
 
 
 EDGES = Size("edges")
@@ -166,9 +167,6 @@ class PBDSolver(ParticleSolver):
         super().__init__(scene, sim, options)
 
         # options
-        self._upper_bound = np.array(options.upper_bound)
-        self._lower_bound = np.array(options.lower_bound)
-        self._particle_size = options.particle_size
         self._max_stretch_solver_iterations = options.max_stretch_solver_iterations
         self._max_bending_solver_iterations = options.max_bending_solver_iterations
         self._max_volume_solver_iterations = options.max_volume_solver_iterations
@@ -187,8 +185,6 @@ class PBDSolver(ParticleSolver):
     def build(self):
         super().build()
 
-        self._B = self._sim._B
-        self._n_particles = self.n_particles
         self._n_fluid_particles = self.n_fluid_particles
         self._n_edges = self.n_edges
         self._n_inner_edges = self.n_inner_edges
@@ -224,6 +220,9 @@ class PBDSolver(ParticleSolver):
         )
         self._particles = self.pbd_state.particles
         self._particles_params = self.pbd_info.particles
+        self._vverts_support = self.pbd_info.vverts
+        self.particles_render = self.pbd_state.particles_render
+        self.vverts_render = self.pbd_state.vverts_render
 
         if self.is_active:
             for entity in self._entities:
@@ -307,10 +306,6 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_active(self):
-        return self.n_particles > 0
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -430,19 +425,17 @@ class PBDSolver(ParticleSolver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            kernel_set_state(state.pos, state.vel, state.free, self.pbd_state)
+            particles = self.pbd_state.particles
+            kernel_set_particles_state(state.pos, state.vel, state.free, particles.pos, particles.vel, particles.free)
 
     def get_state(self, f):
         if self.is_active:
             state = PBDSolverState(self.scene)
-            kernel_get_state(state.pos, state.vel, state.free, self.pbd_state)
+            particles = self.pbd_state.particles
+            kernel_get_particles_state(state.pos, state.vel, state.free, particles.pos, particles.vel, particles.free)
         else:
             state = None
         return state
-
-    def update_render_fields(self):
-        kernel_update_particles_render(self.pbd_state.particles, self.pbd_state.particles_render)
-        kernel_update_vverts_render(self.pbd_state, self.pbd_info)
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
@@ -508,12 +501,6 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_particles(self):
-        if self.is_built:
-            return self._n_particles
-        return sum([entity.n_particles for entity in self._entities])
-
-    @property
     def n_fluid_particles(self):
         if self.is_built:
             return self._n_fluid_particles
@@ -557,28 +544,12 @@ class PBDSolver(ParticleSolver):
         return sum(entity.n_vfaces for entity in self._entities)
 
     @property
-    def particle_size(self):
-        return self._particle_size
-
-    @property
-    def particle_radius(self):
-        return self._particle_size / 2.0
-
-    @property
     def hash_grid_res(self):
         return self._hash_grid_res
 
     @property
     def hash_grid_cell_size(self):
         return self._hash_grid_cell_size
-
-    @property
-    def upper_bound(self):
-        return self._upper_bound
-
-    @property
-    def lower_bound(self):
-        return self._lower_bound
 
 
 # ------------------------------------------------------------------------------------
@@ -1159,38 +1130,6 @@ def kernel_copy_from_reordered(pbd_state: PBDState):
         if pbd_state.particles.is_active[i_p, i_b]:
             i_r = pbd_state.particles.reordered_idx[i_p, i_b]
             func_copy_particle(i_r, i_p, i_b, pbd_state.particles_reordered, pbd_state.particles)
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), free: qd.types.ndarray(), pbd_state: PBDState):
-    for i_p, i_b in qd.ndrange(pbd_state.particles.pos.shape[0], pbd_state.particles.pos.shape[1]):
-        pbd_state.particles.pos[i_p, i_b] = qd.Vector([pos[i_b, i_p, 0], pos[i_b, i_p, 1], pos[i_b, i_p, 2]])
-        pbd_state.particles.vel[i_p, i_b] = qd.Vector([vel[i_b, i_p, 0], vel[i_b, i_p, 1], vel[i_b, i_p, 2]])
-        pbd_state.particles.free[i_p, i_b] = free[i_b, i_p]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_state(pos: qd.types.ndarray(), vel: qd.types.ndarray(), free: qd.types.ndarray(), pbd_state: PBDState):
-    for i_p, i_b in qd.ndrange(pbd_state.particles.pos.shape[0], pbd_state.particles.pos.shape[1]):
-        for k in qd.static(range(3)):
-            pos[i_b, i_p, k] = pbd_state.particles.pos[i_p, i_b][k]
-            vel[i_b, i_p, k] = pbd_state.particles.vel[i_p, i_b][k]
-        free[i_b, i_p] = pbd_state.particles.free[i_p, i_b]
-
-
-@qd.kernel(fastcache=True)
-def kernel_update_vverts_render(pbd_state: PBDState, pbd_info: PBDInfo):
-    """Update the visual vertices as drawn from the particles supporting them, once the particles are."""
-    for i_vv, i_b in qd.ndrange(pbd_state.vverts_render.pos.shape[0], pbd_state.vverts_render.pos.shape[1]):
-        support_idxs = pbd_info.vverts.support_idxs[i_vv]
-        support_weights = pbd_info.vverts.support_weights[i_vv]
-        vvert_pos = qd.Vector.zero(gs.qd_float, 3)
-        for k in qd.static(range(support_idxs.n)):
-            i_p = support_idxs[k]
-            vvert_pos += pbd_state.particles.pos[i_p, i_b] * support_weights[k]
-        pbd_state.vverts_render.pos[i_vv, i_b] = vvert_pos
-        i_p_first = support_idxs[0]
-        pbd_state.vverts_render.is_active[i_vv, i_b] = pbd_state.particles_render.is_active[i_p_first, i_b]
 
 
 @qd.kernel(fastcache=True)
