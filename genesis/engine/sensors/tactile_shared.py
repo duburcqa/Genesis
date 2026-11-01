@@ -10,8 +10,11 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.bvh import BVHTreeState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
+from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 from genesis.utils.sdf import SDF, SDFInfo
 
 if TYPE_CHECKING:
@@ -190,6 +193,125 @@ def func_aabb_intersects_aabb(amin, amax, bmin, bmax):  # -> bool
         and amin[2] <= bmax[2]
         and amax[2] >= bmin[2]
     )
+
+
+@qd.func
+def func_bvh_tree_nearest_masked_triangle(
+    i_t: int,
+    i_b: int,
+    i_s: int,
+    point: qd.types.vector(3),
+    max_dist: float,
+    geoms_mask: qd.types.ndarray(),
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
+):
+    """
+    Find the triangle nearest to a point among the geoms a sensor selects, in one tree of a collision BVH set.
+
+    Tree i_t covers the collision faces of env i_b, and geoms_mask[i_b, i_s, i_g] selects the geoms of sensor i_s. The
+    search is culled at max_dist, a triangle any farther counting as absent.
+
+    Returns
+    -------
+    signed_dist : float
+        Distance to the nearest triangle, negative when the point is inside the surface (the point lies behind the
+        outward face normal of the triangle), max_dist if no triangle lies closer.
+    normal : qd.math.vec3
+        Outward unit normal of the nearest triangle, zero if none.
+    i_g : int
+        Geom of the nearest triangle, -1 if none.
+    """
+    # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
+    n_triangles = bvh_tree_state.leaves_idx.shape[1]
+    best_dist_sq = max_dist * max_dist
+    best_signed = max_dist
+    best_normal = qd.Vector.zero(gs.qd_float, 3)
+    best_geom = -1
+
+    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
+    STACK_SIZE = qd.static(64)
+    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
+    node_stack[0] = 0
+    stack_idx = 1
+
+    while stack_idx > 0:
+        stack_idx -= 1
+        node_idx = node_stack[stack_idx]
+
+        if not func_sphere_intersects_aabb(
+            point, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
+        ):
+            continue
+
+        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
+        if i_left == -1:
+            i_f = bvh_tree_state.leaves_idx[i_t, node_idx - (n_triangles - 1)]
+            i_g = dyn_info.faces.geom_idx[i_f]
+            if not geoms_mask[i_b, i_s, i_g]:
+                continue
+
+            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
+            v0 = tri[:, 0]
+            v1 = tri[:, 1]
+            v2 = tri[:, 2]
+            closest = closest_point_on_triangle(point, v0, v1, v2)
+            diff = point - closest
+            d_sq = diff.dot(diff)
+            if d_sq < best_dist_sq:
+                d = qd.sqrt(d_sq)
+                fn = triangle_face_normal(v0, v1, v2)
+                # The point is outside if (point - closest) aligns with the outward face normal.
+                sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
+                best_signed = d * sign_v
+                best_dist_sq = d_sq
+                best_normal = fn
+                best_geom = i_g
+        else:
+            if stack_idx < STACK_SIZE - 2:
+                node_stack[stack_idx] = i_left
+                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
+                stack_idx += 2
+
+    return best_signed, best_normal, best_geom
+
+
+@qd.func
+def func_bvh_nearest_masked_triangle(
+    i_b: int,
+    i_s: int,
+    env_bvh_idx_a: qd.types.ndarray(),
+    env_bvh_idx_b: qd.types.ndarray(),
+    point: qd.types.vector(3),
+    max_dist: float,
+    geoms_mask: qd.types.ndarray(),
+    dyn_state: DynState,
+    bvh_tree_state_a: BVHTreeState,
+    bvh_tree_state_b: BVHTreeState,
+    dyn_info: DynInfo,
+    is_split: qd.template(),
+):
+    """
+    Find the triangle nearest to a point among the geoms a sensor selects, over the collision BVH sets of a solver.
+
+    env_bvh_idx routes env i_b to the tree it reads in each set. The collision faces are partitioned over two sets if
+    `is_split` (see RaycastContext.activate). Each set answers for its own nearest triangle, and the one of smaller
+    distance magnitude is the globally nearest one: a farther triangle the point is inside of may out-penetrate a nearer
+    one it is outside of, so the answer is taken wholesale. See func_bvh_tree_nearest_masked_triangle for the returns.
+    """
+    signed_dist, normal, i_g = func_bvh_tree_nearest_masked_triangle(
+        env_bvh_idx_a[i_b], i_b, i_s, point, max_dist, geoms_mask, dyn_state, bvh_tree_state_a, dyn_info
+    )
+    if qd.static(is_split):
+        signed_dist_b, normal_b, i_g_b = func_bvh_tree_nearest_masked_triangle(
+            env_bvh_idx_b[i_b], i_b, i_s, point, max_dist, geoms_mask, dyn_state, bvh_tree_state_b, dyn_info
+        )
+        if qd.abs(signed_dist_b) < qd.abs(signed_dist):
+            signed_dist = signed_dist_b
+            normal = normal_b
+            i_g = i_g_b
+    return signed_dist, normal, i_g
 
 
 @dataclass(eq=True, kw_only=False, frozen=True)

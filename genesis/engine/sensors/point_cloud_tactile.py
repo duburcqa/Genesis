@@ -19,7 +19,6 @@ from genesis.options.sensors import (
 from genesis.utils.array_class import BVHTreeState, ColliderInfo, DynInfo, DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
-from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
@@ -46,6 +45,7 @@ from .tactile_shared import (
     ViscoelasticHysteresisMixin,
     build_static_chunk_bvh,
     func_aabb_intersects_aabb,
+    func_bvh_nearest_masked_triangle,
     func_sphere_intersects_aabb,
     func_vec3_at,
     get_mesh_geom_chunks,
@@ -1075,82 +1075,6 @@ def _dilate_kernel_builder(meta_entry: GridFFTMeta, fft_n: tuple[int, int]) -> t
     )
 
 
-@qd.func
-def _func_elastomer_min_signed_dist_bvh(
-    i_t: int,
-    i_b: int,
-    i_s: int,
-    probe_world: qd.types.vector(3),
-    track_geom_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-    max_query_dist: float,
-) -> float:
-    """
-    BVH-based signed distance from ``probe_world`` to the nearest triangle of any geom flagged for this sensor in
-    ``track_geom_mask`` (shape ``(B, n_sensors, n_geoms)``).
-
-    Sign is positive when the probe is outside the surface (closest-triangle face-normal points away from probe),
-    negative when inside. Mirrors the return contract of ``_func_elastomer_min_sdf_over_active_geoms`` so callers
-    consume ``max(0, -signed)`` identically.
-
-    Uses ``max_query_dist`` as the BVH cull radius: probes farther than that from every candidate triangle are
-    treated as fully outside (returns ``+max_query_dist``), which downstream maps to depth = 0.
-    """
-    # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-    best_dist = max_query_dist
-    best_dist_sq = best_dist * best_dist
-    best_signed = max_query_dist
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-
-        if not func_sphere_intersects_aabb(
-            probe_world, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
-        ):
-            continue
-
-        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-        if i_left == -1:
-            sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
-            i_g = dyn_info.faces.geom_idx[i_f]
-            if not track_geom_mask[i_b, i_s, i_g]:
-                continue
-
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
-            v0 = tri[:, 0]
-            v1 = tri[:, 1]
-            v2 = tri[:, 2]
-            closest = closest_point_on_triangle(probe_world, v0, v1, v2)
-            diff = probe_world - closest
-            d_sq = diff.dot(diff)
-            if d_sq < best_dist_sq:
-                d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2)
-                # Sign: probe outside if (probe - closest) aligns with outward face normal.
-                sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
-                best_signed = d * sign_v
-                best_dist = d
-                best_dist_sq = d_sq
-        else:
-            if stack_idx < STACK_SIZE - 2:
-                node_stack[stack_idx] = i_left
-                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                stack_idx += 2
-
-    return best_signed
-
-
 @qd.kernel(fastcache=True)
 def _kernel_elastomer_probe_depth_bvh(
     probe_sensor_idx: qd.types.ndarray(),
@@ -1189,34 +1113,21 @@ def _kernel_elastomer_probe_depth_bvh(
         probe_local = func_vec3_at(i_p, probe_positions_local)
         probe_world = link_pos + gu.qd_transform_by_quat(probe_local, link_quat)
 
-        signed = _func_elastomer_min_signed_dist_bvh(
-            env_bvh_idx_a[i_b],
+        signed_dist, _normal, _i_g = func_bvh_nearest_masked_triangle(
             i_b,
             i_s,
+            env_bvh_idx_a,
+            env_bvh_idx_b,
             probe_world,
+            max_query_dist,
             track_geom_mask,
             dyn_state,
             bvh_tree_state_a,
+            bvh_tree_state_b,
             dyn_info,
-            max_query_dist,
+            is_split,
         )
-        if is_split:
-            # The collision faces are partitioned over two trees (see RaycastContext.activate); |signed| is the
-            # distance the query minimizes, so the smaller magnitude is the globally nearest triangle's answer.
-            signed_b = _func_elastomer_min_signed_dist_bvh(
-                env_bvh_idx_b[i_b],
-                i_b,
-                i_s,
-                probe_world,
-                track_geom_mask,
-                dyn_state,
-                bvh_tree_state_b,
-                dyn_info,
-                max_query_dist,
-            )
-            if qd.abs(signed_b) < qd.abs(signed):
-                signed = signed_b
-        probe_depth_buf[i_b, i_p] = qd.max(gs.qd_float(0.0), -signed)
+        probe_depth_buf[i_b, i_p] = qd.max(gs.qd_float(0.0), -signed_dist)
 
 
 @qd.kernel(fastcache=True)
@@ -1536,7 +1447,7 @@ def _kernel_elastomer_surface_state_via_global_bvh(
     Raycast variant of ``_kernel_elastomer_surface_state_bvh``.
 
     Same outer (env, chunk) traversal over the point-cloud BVH per tracked link, but the inner signed-distance query
-    at each PC point uses ``_func_elastomer_min_signed_dist_bvh`` over the rigid solver's collision BVH entries
+    at each PC point uses ``func_bvh_nearest_masked_triangle`` over the rigid solver's collision BVH entries
     (folded when split, gated by ``elastomer_candidate_geom_mask``) instead of the analytic SDF. Output contract matches the SDF variant so the
     dilate / shear pipeline downstream is unchanged.
     """
@@ -1626,32 +1537,20 @@ def _kernel_elastomer_surface_state_via_global_bvh(
                     for k in qd.static(range(3)):
                         surface_pos_sensor_buf[i_b, i_o, k] = point_sensor[k]
 
-                    min_sdf = _func_elastomer_min_signed_dist_bvh(
-                        env_bvh_idx_a[i_b],
+                    min_sdf, _normal, _i_g = func_bvh_nearest_masked_triangle(
                         i_b,
                         i_s,
+                        env_bvh_idx_a,
+                        env_bvh_idx_b,
                         point_world,
+                        max_query_dist,
                         elastomer_candidate_geom_mask,
                         dyn_state,
                         global_bvh_tree_a,
+                        global_bvh_tree_b,
                         dyn_info,
-                        max_query_dist,
+                        is_split,
                     )
-                    if is_split:
-                        # See _kernel_elastomer_probe_depth_bvh for the two-tree fold.
-                        min_sdf_b = _func_elastomer_min_signed_dist_bvh(
-                            env_bvh_idx_b[i_b],
-                            i_b,
-                            i_s,
-                            point_world,
-                            elastomer_candidate_geom_mask,
-                            dyn_state,
-                            global_bvh_tree_b,
-                            dyn_info,
-                            max_query_dist,
-                        )
-                        if qd.abs(min_sdf_b) < qd.abs(min_sdf):
-                            min_sdf = min_sdf_b
 
                     surface_depth_buf[i_b, i_o] = qd.max(gs.qd_float(0.0), -min_sdf)
 

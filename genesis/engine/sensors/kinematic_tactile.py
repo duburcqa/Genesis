@@ -18,7 +18,6 @@ from genesis.options.sensors import (
     KinematicTaxel as KinematicTaxelOptions,
 )
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
-from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
@@ -39,7 +38,7 @@ from .tactile_shared import (
     SpatialCrosstalkMixin,
     ViscoelasticHysteresisMetadataMixin,
     ViscoelasticHysteresisMixin,
-    func_sphere_intersects_aabb,
+    func_bvh_nearest_masked_triangle,
 )
 
 if TYPE_CHECKING:
@@ -541,167 +540,6 @@ def _kernel_build_sensor_candidate_geom_mask(
                 sensor_candidate_geom_mask[i_b, i_s, collider_state.contact_data.geom_a[i_c, i_b]] = True
 
 
-@qd.func
-def _func_query_contact_depth_penetration_bvh(
-    i_t: int,
-    i_b: int,
-    i_s: int,
-    probe_pos: qd.types.vector(3),
-    probe_radius_gt: float,
-    probe_radius_m: float,
-    sensor_candidate_geom_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-):
-    """
-    BVH-based dual-radius probe penetration.
-
-    Finds the signed distance to the nearest candidate triangle (sign from the closest triangle's face normal:
-    negative when the probe is inside the surface, like ``_func_elastomer_min_signed_dist_bvh``) and returns
-    ``max(0, R - sd)`` per radius. This matches the SDF path's ``pen = R - sd`` -- in particular it keeps growing as
-    the probe penetrates, rather than folding back at ``R`` like an unsigned closest-point distance. Mirrors
-    ``_func_query_contact_depth_penetration``'s return, with the nearest triangle's signed distance appended so a
-    split-tree caller can select the globally nearest answer (see the kernels' fold).
-    """
-    # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-    radius_query = qd.max(probe_radius_gt, probe_radius_m)
-    best_dist_sq = radius_query * radius_query
-    best_signed = radius_query
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-
-        if not func_sphere_intersects_aabb(
-            probe_pos, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
-        ):
-            continue
-
-        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-        if i_left == -1:
-            sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
-            i_g = dyn_info.faces.geom_idx[i_f]
-            if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
-                continue
-
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
-            v0 = tri[:, 0]
-            v1 = tri[:, 1]
-            v2 = tri[:, 2]
-
-            closest = closest_point_on_triangle(probe_pos, v0, v1, v2)
-            diff = probe_pos - closest
-            d_sq = diff.dot(diff)
-            if d_sq < best_dist_sq:
-                d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2)
-                sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
-                best_signed = d * sign_v
-                best_dist_sq = d_sq
-        else:
-            if stack_idx < STACK_SIZE - 2:
-                node_stack[stack_idx] = i_left
-                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                stack_idx += 2
-
-    max_pen_gt = qd.max(gs.qd_float(0.0), probe_radius_gt - best_signed)
-    max_pen_m = qd.max(gs.qd_float(0.0), probe_radius_m - best_signed)
-    return max_pen_gt, max_pen_m, best_signed
-
-
-@qd.func
-def _func_query_contact_depth_bvh(
-    i_t: int,
-    i_b: int,
-    i_s: int,
-    probe_pos: qd.types.vector(3),
-    probe_radius_gt: float,
-    probe_radius_m: float,
-    sensor_candidate_geom_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-):
-    """
-    BVH-based dual-radius probe query with contact normal and link, mirroring ``_func_query_contact_depth``'s return.
-
-    Finds the nearest candidate triangle and its signed distance (sign from the face normal; negative when the probe
-    is inside the surface), yielding ``pen = R - sd`` to match the SDF path. The returned contact normal is the
-    nearest triangle's outward face normal, which the spring-damper model uses as the surface normal. The signed
-    distance is appended so a split-tree caller can select the globally nearest answer (see the kernels' fold).
-    """
-    # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-    radius_query = qd.max(probe_radius_gt, probe_radius_m)
-    best_dist_sq = radius_query * radius_query
-    best_signed = radius_query
-    contact_link = gs.qd_int(-1)
-    contact_normal = qd.Vector.zero(gs.qd_float, 3)
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-
-        if not func_sphere_intersects_aabb(
-            probe_pos, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
-        ):
-            continue
-
-        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-        if i_left == -1:
-            sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
-            i_g = dyn_info.faces.geom_idx[i_f]
-            if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
-                continue
-
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info, is_visual=False)
-            v0 = tri[:, 0]
-            v1 = tri[:, 1]
-            v2 = tri[:, 2]
-
-            closest = closest_point_on_triangle(probe_pos, v0, v1, v2)
-            diff = probe_pos - closest
-            d_sq = diff.dot(diff)
-            if d_sq < best_dist_sq:
-                d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2)
-                sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
-                best_signed = d * sign_v
-                best_dist_sq = d_sq
-                contact_link = dyn_info.geoms.link_idx[i_g]
-                contact_normal = fn
-        else:
-            if stack_idx < STACK_SIZE - 2:
-                node_stack[stack_idx] = i_left
-                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                stack_idx += 2
-
-    # Penetration only; the link / normal are meaningful only for the branch that actually reports contact.
-    max_pen_gt = qd.max(gs.qd_float(0.0), probe_radius_gt - best_signed)
-    max_pen_m = qd.max(gs.qd_float(0.0), probe_radius_m - best_signed)
-    contact_link_gt = contact_link if max_pen_gt > gs.qd_float(0.0) else gs.qd_int(-1)
-    contact_link_m = contact_link if max_pen_m > gs.qd_float(0.0) else gs.qd_int(-1)
-    contact_normal_gt = contact_normal if max_pen_gt > gs.qd_float(0.0) else qd.Vector.zero(gs.qd_float, 3)
-    contact_normal_m = contact_normal if max_pen_m > gs.qd_float(0.0) else qd.Vector.zero(gs.qd_float, 3)
-    return max_pen_gt, contact_link_gt, contact_normal_gt, max_pen_m, contact_link_m, contact_normal_m, best_signed
-
-
 @qd.kernel(fastcache=True)
 def _kernel_contact_depth_probe_bvh(
     probe_sensor_idx: qd.types.ndarray(),
@@ -724,6 +562,12 @@ def _kernel_contact_depth_probe_bvh(
     eps: float,
     is_split: qd.template(),
 ):
+    """
+    Dual-radius probe penetration from the signed distance to the nearest candidate triangle, ``max(0, R - sd)``.
+
+    This matches the SDF path's ``pen = R - sd``: it keeps growing as the probe penetrates, rather than folding back at
+    ``R`` like an unsigned closest-point distance.
+    """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
 
@@ -754,39 +598,22 @@ def _kernel_contact_depth_probe_bvh(
             else probe_radius
         )
 
-        max_penetration_gt, max_penetration_m, signed_dist = _func_query_contact_depth_penetration_bvh(
-            env_bvh_idx_a[i_b],
+        signed_dist, _normal, _i_g = func_bvh_nearest_masked_triangle(
             i_b,
             i_s,
+            env_bvh_idx_a,
+            env_bvh_idx_b,
             probe_pos,
-            probe_radius,
-            probe_radius_m,
+            qd.max(probe_radius, probe_radius_m),
             sensor_candidate_geom_mask,
             dyn_state,
             bvh_tree_state_a,
+            bvh_tree_state_b,
             dyn_info,
+            is_split,
         )
-        if is_split:
-            # The collision faces are partitioned over two trees (see RaycastContext.activate). Each query answers
-            # for its own nearest triangle, and penetration alone cannot decide between them - a farther inside
-            # triangle out-penetrates a nearer outside one - so the globally nearest answer is the one with the
-            # smaller signed-distance magnitude, taken wholesale.
-            max_penetration_gt_b, max_penetration_m_b, signed_dist_b = _func_query_contact_depth_penetration_bvh(
-                env_bvh_idx_b[i_b],
-                i_b,
-                i_s,
-                probe_pos,
-                probe_radius,
-                probe_radius_m,
-                sensor_candidate_geom_mask,
-                dyn_state,
-                bvh_tree_state_b,
-                dyn_info,
-            )
-            if qd.abs(signed_dist_b) < qd.abs(signed_dist):
-                max_penetration_gt = max_penetration_gt_b
-                max_penetration_m = max_penetration_m_b
-        max_penetration_m = max_penetration_m * probe_gains[i_b, i_p]
+        max_penetration_gt = qd.max(gs.qd_float(0.0), probe_radius - signed_dist)
+        max_penetration_m = qd.max(gs.qd_float(0.0), probe_radius_m - signed_dist) * probe_gains[i_b, i_p]
         cache_idx = sensor_cache_start[i_s] + i_p - sensor_probe_start[i_s]
         output_gt[cache_idx, i_b] = max_penetration_gt
         output_measured[cache_idx, i_b] = max_penetration_m
@@ -821,6 +648,12 @@ def _kernel_kinematic_taxel_bvh(
     eps: float,
     is_split: qd.template(),
 ):
+    """
+    Kinematic spring-damper force and torque per probe from the nearest candidate triangle.
+
+    The penetration is ``pen = R - sd`` as in the SDF path, the contact normal is the outward face normal of the nearest
+    triangle and the contact link the link owning its geom.
+    """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
 
@@ -857,56 +690,26 @@ def _kernel_kinematic_taxel_bvh(
             func_noised_probe_radius(probe_radius, probe_radius_noise, eps) if use_noised_radius else probe_radius
         )
 
-        (
-            max_penetration_gt,
-            contact_link_gt,
-            contact_normal_gt,
-            max_penetration_m,
-            contact_link_m,
-            contact_normal_m,
-            signed_dist,
-        ) = _func_query_contact_depth_bvh(
-            env_bvh_idx_a[i_b],
+        signed_dist, contact_normal, i_g = func_bvh_nearest_masked_triangle(
             i_b,
             i_s,
+            env_bvh_idx_a,
+            env_bvh_idx_b,
             probe_pos,
-            probe_radius,
-            probe_radius_m,
+            qd.max(probe_radius, probe_radius_m),
             sensor_candidate_geom_mask,
             dyn_state,
             bvh_tree_state_a,
+            bvh_tree_state_b,
             dyn_info,
+            is_split,
         )
-        if is_split:
-            # See _kernel_contact_depth_probe_bvh for the two-tree fold: the globally nearest answer is the one
-            # with the smaller signed-distance magnitude, taken wholesale so link and normal stay consistent.
-            (
-                max_penetration_gt_b,
-                contact_link_gt_b,
-                contact_normal_gt_b,
-                max_penetration_m_b,
-                contact_link_m_b,
-                contact_normal_m_b,
-                signed_dist_b,
-            ) = _func_query_contact_depth_bvh(
-                env_bvh_idx_b[i_b],
-                i_b,
-                i_s,
-                probe_pos,
-                probe_radius,
-                probe_radius_m,
-                sensor_candidate_geom_mask,
-                dyn_state,
-                bvh_tree_state_b,
-                dyn_info,
-            )
-            if qd.abs(signed_dist_b) < qd.abs(signed_dist):
-                max_penetration_gt = max_penetration_gt_b
-                contact_link_gt = contact_link_gt_b
-                contact_normal_gt = contact_normal_gt_b
-                max_penetration_m = max_penetration_m_b
-                contact_link_m = contact_link_m_b
-                contact_normal_m = contact_normal_m_b
+        max_penetration_gt = qd.max(gs.qd_float(0.0), probe_radius - signed_dist)
+        max_penetration_m = qd.max(gs.qd_float(0.0), probe_radius_m - signed_dist)
+        # The spring-damper reads the contact link and normal only for a positive penetration, which a hit implies
+        contact_link = -1
+        if i_g >= 0:
+            contact_link = dyn_info.geoms.link_idx[i_g]
 
         gained_pen_m = max_penetration_m * probe_gains[i_b, i_p]
 
@@ -914,8 +717,8 @@ def _kernel_kinematic_taxel_bvh(
             i_b,
             sensor_link_idx,
             max_penetration_gt,
-            contact_link_gt,
-            contact_normal_gt,
+            contact_link,
+            contact_normal,
             probe_pos,
             probe_pos_local,
             link_quat,
@@ -939,8 +742,8 @@ def _kernel_kinematic_taxel_bvh(
                 i_b,
                 sensor_link_idx,
                 gained_pen_m,
-                contact_link_m,
-                contact_normal_m,
+                contact_link,
+                contact_normal,
                 probe_pos,
                 probe_pos_local,
                 link_quat,
