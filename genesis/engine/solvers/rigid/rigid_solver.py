@@ -82,7 +82,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_held_by_links,
 )
-from .abd.diff import func_integrate_dq_entity, kernel_copy_next_to_curr_clear_coupling
+from .abd.diff import kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
     kernel_compute_smooth_qacc,
     kernel_forward_dynamics_without_qacc,
@@ -1108,7 +1108,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 np.concatenate([geom.init_faces + geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.concatenate([geom.init_edges + geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.concatenate([geom.init_normals for geom in geoms], dtype=gs.np_float),
-                np.concatenate([geom.init_center_pos for geom in geoms], dtype=gs.np_float),
                 np.concatenate(
                     [np.full(geom.n_verts, geom.is_fixed and not geom.entity._batch_fixed_verts) for geom in geoms],
                     dtype=gs.np_bool,
@@ -1193,7 +1192,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 np.array([geom.vert_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.face_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.edge_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.verts_state_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.init_pos for geom in geoms], dtype=gs.np_float),
                 np.array(geoms_center, dtype=gs.np_float),
                 np.array([geom.init_quat for geom in geoms], dtype=gs.np_float),
@@ -1211,7 +1209,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 np.array([geom.coup_friction for geom in geoms], dtype=gs.np_float),
                 np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
-                np.array([geom.metadata.get("decomposed", False) for geom in geoms], dtype=gs.np_bool),
                 np.array(geoms_is_hollow, dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
@@ -1230,7 +1227,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 np.array([entity.geom_start for entity in entities], dtype=gs.np_int),
                 np.array([entity.geom_end for entity in entities], dtype=gs.np_int),
                 np.array([entity.gravity_compensation for entity in entities], dtype=gs.np_float),
-                np.array([entity.is_local_collision_mask for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
                 self.rigid_config,
@@ -1295,9 +1291,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             is_backward=False,
             noslip=self._options.noslip_iterations > 0,
         )
-
-    def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
-        func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
 
     @mutates()
     def apply_links_external_wrench(

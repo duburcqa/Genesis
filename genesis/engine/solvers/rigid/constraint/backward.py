@@ -19,7 +19,7 @@ def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInf
         constraint_state.bw_Ap[i_d, i_b] = 0.0
 
     # Mp: Block multiplication
-    n_entities = dyn_info.entities.n_links.shape[0]
+    n_entities = dyn_info.entities.link_start.shape[0]
     for i_e in range(n_entities):
         for i_d1 in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
             acc = gs.qd_float(0.0)
@@ -198,8 +198,6 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
             # y = D \odot w
             y = constraint_state.efc_D[i_c, i_b] * w
             constraint_state.bw_Ju[i_c, i_b] = Ju
-            constraint_state.bw_w[i_c, i_b] = w
-            constraint_state.bw_y[i_c, i_b] = y
 
             is_active = constraint_state.active[i_c, i_b] != 0
             # aref: Ju \odot D, D: -Ju \odot w, the gradient of efc_force adding to Ju

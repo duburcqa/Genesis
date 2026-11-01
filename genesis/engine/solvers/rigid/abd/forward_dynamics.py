@@ -74,61 +74,6 @@ def update_qvel(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.tem
             )
 
 
-@qd.kernel(fastcache=True)
-def kernel_compute_mass_matrix(
-    envs_idx: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    decompose: qd.template(),
-):
-    func_compute_mass_matrix_masked(
-        envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, is_backward=False
-    )
-    if decompose:
-        func_factor_mass_masked(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
-
-
-@qd.func
-def func_forward_dynamics(
-    dyn_state: DynState,
-    hibernation_state: HibernationState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
-):
-    func_torque_and_passive_force(dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config, is_backward)
-    func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
-    func_compute_mass_matrix_and_link_force(
-        dyn_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        qd.static(rigid_config.integrator == gs.integrator.approximate_implicitfast),
-        is_backward,
-    )
-    # The fused solve needs the forces, and the force passes never read the factor, so it runs after them
-    if qd.static(not rigid_config.enable_fused_smooth_acc_solve):
-        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
-    func_bias_force(dyn_state, dyn_info, rigid_config)
-    if qd.static(rigid_config.enable_fused_smooth_acc_solve):
-        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
-    func_compute_qacc(dyn_state, rigid_info, rigid_config)
-
-
-@qd.kernel(fastcache=True)
-def kernel_forward_dynamics(
-    dyn_state: DynState,
-    hibernation_state: HibernationState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    func_forward_dynamics(dyn_state, hibernation_state, dyn_info, rigid_info, rigid_config, is_backward=False)
-
-
 @reversed_with(is_backward=True)
 @qd.kernel(fastcache=True)
 def kernel_update_acc(

@@ -10,11 +10,6 @@ import scipy.sparse.csgraph
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.abd.forward_dynamics import (
-    kernel_compute_smooth_qacc,
-    kernel_forward_dynamics_without_qacc,
-    kernel_update_acc,
-)
 from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.constraint import ConstraintSolver
 from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
@@ -192,23 +187,16 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     if qvel is not None:
         gs_sim.rigid_solver.set_dofs_velocity(qvel)
 
-    # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
-    # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
-    constraint_solver = gs_sim.get_system(ConstraintSolver)
-    if constraint_solver is not None:
-        constraint_solver.constraint_state.qfrc_constraint.fill(0.0)
-    rigid = gs_sim.rigid_solver
-    kernel_forward_dynamics_without_qacc(
-        rigid.dyn_state,
-        rigid.hibernation_state,
-        rigid.dyn_info,
-        rigid.rigid_info,
-        rigid.rigid_config,
-        is_backward=False,
-    )
-    kernel_compute_smooth_qacc(rigid.dyn_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config)
-    rigid.constraints(**rigid.get_substep_values(is_recording=False))
-    kernel_update_acc(rigid.dyn_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config, is_backward=False)
+    # The consistency checks compare pre-step derived quantities (bias forces, smooth and constrained accelerations),
+    # which a substep computes before integrating, mirroring the mj_forward call below. The initial state is then put
+    # back, keeping the contacts the substep detected at that same state.
+    rigid_solver = gs_sim.rigid_solver
+    qpos, dofs_vel = rigid_solver.get_qpos(), rigid_solver.get_dofs_velocity()
+    rigid_solver.substep_pre_coupling(0)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(gs_sim.get_system(Collider), "clear", lambda envs_idx=None: None)
+        rigid_solver.set_qpos(qpos)
+    rigid_solver.set_dofs_velocity(dofs_vel)
 
     if gs_sim.scene.visualizer:
         gs_sim.scene.visualizer.update()
