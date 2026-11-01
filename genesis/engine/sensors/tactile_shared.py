@@ -645,6 +645,11 @@ class ContactDepthQueryMetadataMixin:
     # The signed distance fields (SDF) of the rigid geoms, which every query but the raycast one reads (see SDF)
     sdf_info: "SDFInfo | None" = None
 
+    @property
+    def is_raycast(self) -> bool:
+        """Whether the sensors of the class query the contact depth by raycasting rather than through the SDF."""
+        return self.contact_depth_query == "raycast"
+
 
 def resolve_contact_depth_query(metadata: ContactDepthQueryMetadataMixin, mode: str | None, sensor_name: str) -> None:
     """
@@ -685,7 +690,7 @@ class ContactDepthQuerySensorMixin:
     def build(self):
         super().build()
         resolve_contact_depth_query(self._shared_metadata, self._options.contact_depth_query, type(self).__name__)
-        if self._shared_metadata.contact_depth_query == "raycast":
+        if self._shared_metadata.is_raycast:
             self._shared_context.activate()  # builds the BVH lazily, only on raycast opt-in
         else:
             self._shared_metadata.sdf_info = self._manager._sim.get_system(SDF).sdf_info
