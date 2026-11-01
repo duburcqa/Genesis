@@ -166,14 +166,7 @@ def sdf_kernel_init_geom_fields(
 
 
 @qd.func
-def sdf_func_world(
-    geom_idx,
-    batch_idx,
-    pos_world,
-    geoms_state: GeomsState,
-    geoms_info: GeomsInfo,
-    sdf_info: SDFInfo,
-):
+def sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state: GeomsState, geoms_info: GeomsInfo, sdf_info: SDFInfo):
     """
     sdf value from world coordinate
     """
@@ -211,7 +204,11 @@ def sdf_func_world_local(
     else:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
-        sd = sdf_func_sdf(geom_idx, pos_sdf, sdf_info)
+        # The stored distances are in the mesh frame already
+        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
+            sd = sdf_func_proxy_sdf(geom_idx, pos_sdf, sdf_info)
+        else:
+            sd = sdf_func_true_sdf(geom_idx, pos_sdf, sdf_info)
 
     return sd
 
@@ -319,20 +316,6 @@ def sdf_func_ray_exit_distance(
 
 
 @qd.func
-def sdf_func_sdf(geom_idx, pos_sdf, sdf_info: SDFInfo):
-    """
-    sdf value at sdf frame coordinate.
-    Note that the stored sdf magnitude is already w.r.t world/mesh frame.
-    """
-    signed_dist = gs.qd_float(0.0)
-    if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
-        signed_dist = sdf_func_proxy_sdf(geom_idx, pos_sdf, sdf_info)
-    else:
-        signed_dist = sdf_func_true_sdf(geom_idx, pos_sdf, sdf_info)
-    return signed_dist
-
-
-@qd.func
 def sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info: SDFInfo):
     res = sdf_info.geoms_info.sdf_res[geom_idx]
     return (pos_sdf >= res - 1).any() or (pos_sdf <= 0).any()
@@ -392,21 +375,6 @@ def sdf_func_grad_world(
     g_quat = dyn_state.geoms.quat[geom_idx, batch_idx]
 
     return sdf_func_grad_world_local(geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, sdf_info)
-
-
-@qd.func
-def sdf_func_grad(geom_idx, pos_sdf, geoms_info: GeomsInfo, rigid_info: RigidInfo, sdf_info: SDFInfo):
-    """
-    sdf grad at sdf frame coordinate.
-
-    Note that the stored sdf magnitude is already w.r.t world/mesh frame.
-    """
-    grad_sdf = qd.Vector.zero(gs.qd_float, 3)
-    if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
-        grad_sdf = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, sdf_info)
-    else:
-        grad_sdf = sdf_func_true_grad(geom_idx, pos_sdf, geoms_info, sdf_info)
-    return grad_sdf
 
 
 @qd.func
@@ -574,21 +542,18 @@ def sdf_func_grad_world_local(
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
         # No rotation between the mesh and the SDF frames, so the gradient in the SDF frame holds in the mesh frame
-        grad_sdf = sdf_func_grad(geom_idx, pos_sdf, geoms_info, rigid_info, sdf_info)
+        grad_sdf = qd.Vector.zero(gs.qd_float, 3)
+        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
+            grad_sdf = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, sdf_info)
+        else:
+            grad_sdf = sdf_func_true_grad(geom_idx, pos_sdf, geoms_info, sdf_info)
         grad_world = gu.qd_transform_by_quat(grad_sdf, geom_quat)
 
     return grad_world
 
 
 @qd.func
-def sdf_func_find_closest_vert(
-    geom_idx,
-    i_b,
-    pos_world,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    sdf_info: SDFInfo,
-):
+def sdf_func_find_closest_vert(geom_idx, i_b, pos_world, dyn_state: DynState, dyn_info: DynInfo, sdf_info: SDFInfo):
     """
     Returns vert of geom that's closest to pos_world
     """
