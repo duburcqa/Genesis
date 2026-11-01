@@ -777,10 +777,8 @@ def test_box_contact_true_penetration(show_viewer, tol):
 
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sdf_narrowphase(show_viewer):
-    # The narrowphases detecting the convex and the non-convex pairs by the signed distance field of the geoms, requested
-    # in place of the default ones. Every entity is posed resting on a flat surface sunk by a known depth, the convex
-    # pairs on a box primitive or a plane, the non-convex ones on a ring, so that the contacts of one detection follow
-    # analytically, then settles there.
+    # Every entity rests on a flat support sunk by a known depth, the convex pairs on a box or a plane and the non-convex
+    # ones on a ring, so that the contacts of one detection follow analytically
     DEPTH = 2e-3
 
     scene = gs.Scene(
@@ -816,11 +814,53 @@ def test_sdf_narrowphase(show_viewer):
     # its number of contacts: one for a sphere, the corners of a cube face, both ends of a cylinder lying down
     entities_support = []
     for morph, support_z, half_extent, n_contacts in (
-        (gs.morphs.Sphere(pos=(0.0, -0.08, 0.15), radius=0.05), 0.1, 0.05, 1),
-        (gs.morphs.Box(pos=(0.0, 0.08, 0.13), size=(0.06, 0.06, 0.06)), 0.1, 0.03, 4),
-        (gs.morphs.Sphere(pos=(1.1, 0.0, 0.13), radius=0.03), 0.1, 0.03, 1),
-        (gs.morphs.Box(pos=(0.9, 0.0, 0.12), size=(0.04, 0.04, 0.04)), 0.1, 0.02, 4),
-        (gs.morphs.Cylinder(pos=(2.0, 0.0, 0.03), euler=(90.0, 0.0, 0.0), radius=0.03, height=0.1), 0.0, 0.03, 2),
+        (
+            gs.morphs.Sphere(
+                pos=(0.0, -0.08, 0.15),
+                radius=0.05,
+            ),
+            0.1,
+            0.05,
+            1,
+        ),
+        (
+            gs.morphs.Box(
+                pos=(0.0, 0.08, 0.13),
+                size=(0.06, 0.06, 0.06),
+            ),
+            0.1,
+            0.03,
+            4,
+        ),
+        (
+            gs.morphs.Sphere(
+                pos=(1.1, 0.0, 0.13),
+                radius=0.03,
+            ),
+            0.1,
+            0.03,
+            1,
+        ),
+        (
+            gs.morphs.Box(
+                pos=(0.9, 0.0, 0.12),
+                size=(0.04, 0.04, 0.04),
+            ),
+            0.1,
+            0.02,
+            4,
+        ),
+        (
+            gs.morphs.Cylinder(
+                pos=(2.0, 0.0, 0.03),
+                euler=(90.0, 0.0, 0.0),
+                radius=0.03,
+                height=0.1,
+            ),
+            0.0,
+            0.03,
+            2,
+        ),
     ):
         entity = scene.add_entity(
             morph=morph,
@@ -832,7 +872,7 @@ def test_sdf_narrowphase(show_viewer):
     scene.build(n_envs=2)
 
     collider = scene.sim.get_system(Collider)
-    for entity, support_z, half_extent, _ in entities_support:
+    for entity, *_ in entities_support:
         entity.set_pos(entity.get_pos() - torch.tensor((0.0, 0.0, DEPTH), device=gs.device))
     collider.clear()
     collider.detection()
@@ -842,15 +882,14 @@ def test_sdf_narrowphase(show_viewer):
         assert_equal(is_contact_valid.sum(axis=-1), n_contacts)
         # The normal points from geom B to geom A, and the position lies midway between the surfaces
         is_entity_a = np.isin(tensor_to_array(contacts["geom_a"]), [geom.idx for geom in entity.geoms])
-        normals = tensor_to_array(contacts["normal"])
+        normals_z = np.where(is_entity_a, 1.0, -1.0)[is_contact_valid]
         assert_allclose(
-            normals[is_contact_valid],
-            np.where(is_entity_a, 1.0, -1.0)[is_contact_valid, None] * (0.0, 0.0, 1.0),
-            atol=1e-3,
+            tensor_to_array(contacts["normal"])[is_contact_valid], normals_z[:, None] * (0.0, 0.0, 1.0), atol=1e-3
         )
         assert_allclose(tensor_to_array(contacts["penetration"])[is_contact_valid], DEPTH, atol=1e-4)
-        positions_z = tensor_to_array(contacts["position"])[..., 2]
-        assert_allclose(positions_z[is_contact_valid], support_z - 0.5 * DEPTH, atol=1e-4)
+        assert_allclose(
+            tensor_to_array(contacts["position"])[is_contact_valid][:, 2], support_z - 0.5 * DEPTH, atol=1e-4
+        )
 
     for _ in range(30):
         scene.step()

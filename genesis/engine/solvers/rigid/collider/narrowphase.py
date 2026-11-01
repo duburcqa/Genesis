@@ -1422,8 +1422,8 @@ def func_contact_sdf(
     A sphere A whose center lies where the SDF of B is exact is detected exactly against it. Otherwise, a pair of convex
     geoms is detected both ways, the vertices of each against the SDF of the other, and keeps the deeper contact, a
     plane taking part through its SDF alone. Any other pair is detected by the vertices of A against the SDF of B, the
-    caller placing at A the geom whose vertices penetrate. Returns whether the geoms collide, the normal pointing from B to A, the penetration and the midpoint
-    between the surfaces.
+    caller placing at A the geom whose vertices penetrate. Returns whether the geoms collide, the normal pointing from B
+    to A, the penetration and the midpoint between the surfaces.
     """
     is_col = False
     penetration = gs.qd_float(0.0)
@@ -1500,9 +1500,9 @@ def func_add_contacts_sdf(
     """
     Add the contacts of a pair of geoms detected by their signed distance field (SDF) (see func_contact_sdf).
 
-    With multi-contact enabled, the pair is detected again with A and B rotated in opposite directions about the first
-    contact about two axes tangent to its normal, both ways, each contact found being mapped back onto the unperturbed geoms.
-    A sphere A touches B at a single point, so it is detected once.
+    With multi-contact enabled, the pair is detected again with A and B rotated in opposite directions around the first
+    contact, both ways about each of two axes tangent to its normal, every contact found being mapped back onto the
+    unperturbed geoms. A sphere A touches B at a single point, so it is detected once.
     """
     EPS = rigid_info.EPS[None]
     n_detections = qd.static(5 if rigid_config.enable_multi_contact else 1)

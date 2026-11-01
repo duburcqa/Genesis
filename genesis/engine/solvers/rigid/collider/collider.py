@@ -1229,10 +1229,9 @@ class ConvexConvexSDF(ConvexConvexFirstContact, ConvexConvex[PerEnv], ConvexConv
     Detect the contacts of the convex pairs of ConvexConvex by the signed distance field (SDF) of the geoms, in place of
     the convex narrowphases of both layouts, which it supersedes once requested (see 'Simulator.get_system').
 
-    A pair takes the deepest vertex of either geom in the SDF of the other, found by descending that SDF over the edge
-    graph of the geom, a sphere being detected exactly against the SDF of the other geom (see
-    func_narrow_phase_convex_vs_convex_sdf). The contacts carry no input for the differentiable reverse of the convex
-    narrowphase.
+    A pair touches at the deepest vertex of either geom in the SDF of the other, found by descending that SDF over the
+    edge graph of the geom, a sphere touching at the exact point wherever the SDF of the other geom is exact (see
+    func_contact_sdf). The contacts carry no input for the differentiable reverse of the convex narrowphase.
     """
 
     is_differentiable = False
