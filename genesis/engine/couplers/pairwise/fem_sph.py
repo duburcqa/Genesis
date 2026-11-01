@@ -4,7 +4,7 @@ from typing import Annotated
 
 import quadrants as qd
 
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.sph_solver import SPHSolver, SPHState
 from genesis.options.solvers import LegacyCouplerOptions
@@ -55,7 +55,6 @@ def func_fem_sph(
     return new_vel
 
 
-@register_system
 class FEMSPH(SurfaceCoupling):
     """
     Set the normal velocity of the surface vertices of the FEM entities to that of the SPH particles around them.

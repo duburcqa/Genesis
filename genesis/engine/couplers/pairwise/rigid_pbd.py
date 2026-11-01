@@ -6,7 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.particle_solver import PARTICLES, func_set_particle_pos, func_set_particle_vel
 from genesis.engine.solvers.pbd_solver import PBDInfo, PBDSolver, PBDState
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force
@@ -165,7 +165,6 @@ def kernel_drive_pbd_particles_by_link(
             )
 
 
-@register_system
 class RigidPBD(Coupling):
     """
     Push the position based dynamics (PBD) particles out of the coupled rigid geoms, and carry some along with links.

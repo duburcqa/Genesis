@@ -9,7 +9,7 @@ import numpy as np
 
 import quadrants as qd
 
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.mpm_solver import GridCoupling, MPMInfo, MPMSolver
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.pbd_solver import PBDSolver, PBDState
@@ -124,7 +124,6 @@ def func_mpm_pbd(
     )
 
 
-@register_system
 class MPMSPH(GridCoupling):
     """
     Exchange momentum between the cells of the material point method grid and the smoothed particles in them.
@@ -144,7 +143,6 @@ class MPMSPH(GridCoupling):
         )
 
 
-@register_system
 class MPMPBD(GridCoupling):
     """
     Exchange momentum between the cells of the material point method grid and the free PBD particles in them.

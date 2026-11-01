@@ -2,7 +2,7 @@
 
 from quadrants.lang._quadrants_callable import QuadrantsCallable
 
-from genesis.engine.pipeline import Inline, Stages, System, register_system
+from genesis.engine.pipeline import Inline, Stages, System
 from genesis.engine.solvers.fem_solver import (
     FEMSolver,
     func_fem_surface_couplings,
@@ -13,7 +13,6 @@ from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 
 
-@register_system
 class FEMSurface(Coupling):
     """
     Couple the surface of the finite element method (FEM) entities with the other solvers, then impose the floor on it.

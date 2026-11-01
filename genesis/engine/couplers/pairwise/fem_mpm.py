@@ -5,7 +5,7 @@ from typing import Annotated
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.fem_solver import FEMInfo
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
@@ -74,7 +74,6 @@ def func_fem_mpm(
     return new_vel
 
 
-@register_system
 class FEMMPM(SurfaceCoupling):
     """
     Exchange momentum between the surface vertices of the FEM entities and the cells of the MPM grid near their surface.

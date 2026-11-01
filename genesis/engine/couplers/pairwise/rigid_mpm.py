@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.entities.hybrid_entity import HybridEntity, HybridSoftPartInfo
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.mpm_solver import (
     CellSeparation,
     CellVelocity,
@@ -178,7 +178,6 @@ def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), rigid_mpm_cpic:
         rigid_mpm_cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
-@register_system
 class RigidMPM(GridCoupling):
     """Collide the cells of the material point method (MPM) grid holding mass with the coupled rigid geoms."""
 
@@ -194,7 +193,6 @@ class RigidMPM(GridCoupling):
         pass
 
 
-@register_system
 class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
     """
     Separate the particles and the cells of the material point method (MPM) grid that a thin coupled rigid geom splits.
@@ -293,7 +291,6 @@ def kernel_update_soft_part_mpm(
             func_add_particle_vel(f + 1, i_p, i_b, vel_d * soft_dv_coef, mpm_state)
 
 
-@register_system
 class RigidMPMHybrid(Integration):
     """
     Drive the particles of the soft part of the hybrid entities toward the links of their rigid part, after the grid
@@ -345,7 +342,6 @@ class RigidMPMAttachmentInfo(Data, kind=DataKind.INFO, shape=(PARTICLES, ENVS)):
     link_local_pos: qd.Tensor = field((float, 3))
 
 
-@register_system
 class RigidMPMAttachment(Integration):
     """
     Pull material point method (MPM) particles toward points of rigid links with critically damped springs.

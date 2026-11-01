@@ -5,7 +5,7 @@ from typing import Annotated
 import quadrants as qd
 
 import genesis.utils.sdf as sdf
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.particle_solver import func_set_particle_vel
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force, func_collide_in_rigid_geom
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
@@ -112,7 +112,6 @@ def kernel_sph_rigid(
                     func_set_particle_vel(i_p, i_b, vel, sph_state.particles_reordered.vel)
 
 
-@register_system
 class RigidSPH(Coupling):
     """Collide the smoothed particle hydrodynamics particles with the coupled rigid geoms, which their pressure pushes."""
 

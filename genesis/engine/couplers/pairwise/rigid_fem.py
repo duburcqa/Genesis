@@ -7,7 +7,7 @@ import torch
 
 import quadrants as qd
 
-from genesis.engine.pipeline import Enabled, register_system
+from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.fem_solver import FEMSolver
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
@@ -19,7 +19,6 @@ from .fem_surface import FEMSurface, SurfaceCoupling
 from .rigid_contact import func_collide_with_rigid
 
 
-@register_system
 class RigidFEMAttachment(Coupling):
     """
     Move the targets of the finite element method (FEM) vertices following a rigid link with the link.
@@ -68,7 +67,6 @@ def func_fem_rigid(
     )
 
 
-@register_system
 class RigidFEM(SurfaceCoupling):
     """
     Collide the surface vertices of the finite element method (FEM) entities with the coupled rigid geoms.
