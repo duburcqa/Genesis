@@ -53,7 +53,8 @@ class Subscriber:
 
     A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
     construction by whether a callback is given:
-      - eager (callback given): each matching change immediately calls callback(change, envs_idx);
+      - eager (callback given): each matching change immediately calls callback(change, envs_idx, links_idx), with the
+        global indices of the links it can affect, None for an unbounded reach (see mutates);
       - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
         that rebuilds a cache on its next update rather than on every set_pos.
 
@@ -65,7 +66,7 @@ class Subscriber:
     def __init__(
         self,
         to: frozenset[StateChange],
-        callback: Callable[[StateChange, object], None] | None = None,
+        callback: Callable[[StateChange, object, np.ndarray | None], None] | None = None,
         links_filter: "np.typing.ArrayLike | None" = None,
     ):
         self.to = to
@@ -176,7 +177,7 @@ def mutates(
                     if subscriber.callback is None:
                         subscriber._pending.add(changed)
                     else:
-                        subscriber.callback(changed, envs_idx)
+                        subscriber.callback(changed, envs_idx, links_idx)
             return result
 
         @functools.wraps(method)

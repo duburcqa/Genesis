@@ -238,7 +238,9 @@ class RigidMPMCPIC(Preparation, CellSeparation, CellVelocity):
         )
         # The thin rigid geoms the particles saw belong to the trajectory they leave
         mpm_solver.subscribe(
-            Subscriber(frozenset((StateChange.GEOMETRY,)), callback=lambda _, envs_idx: self.reset(envs_idx))
+            Subscriber(
+                frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx, links_idx: self.reset(envs_idx)
+            )
         )
 
     def reset(self, envs_idx=None) -> None:

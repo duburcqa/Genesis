@@ -63,7 +63,9 @@ class TrackedNodeList:
         self._invalidated_envs_mask = np.zeros(len(context.rendered_envs_idx), dtype=np.bool_)
         self._invalidated_step = -1
         if invalidated_by:
-            subscriber = Subscriber(to=invalidated_by, callback=lambda change, envs_idx: self.invalidate(envs_idx))
+            subscriber = Subscriber(
+                to=invalidated_by, callback=lambda change, envs_idx, links_idx: self.invalidate(envs_idx)
+            )
             for solver in solvers:
                 solver.subscribe(subscriber)
 

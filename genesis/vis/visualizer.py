@@ -204,7 +204,7 @@ class Visualizer(RBC):
                 solver.subscribe(
                     Subscriber(
                         to=frozenset((StateChange.GEOMETRY,)),
-                        callback=lambda change, envs_idx, solver=solver: self.sync(frozenset((solver,))),
+                        callback=lambda change, envs_idx, links_idx, solver=solver: self.sync(frozenset((solver,))),
                     )
                 )
 

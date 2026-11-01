@@ -504,7 +504,7 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     eager_events = []
     eager = Subscriber(
         to=frozenset({StateChange.GEOMETRY}),
-        callback=lambda change, envs_idx: eager_events.append((change, envs_idx)),
+        callback=lambda change, envs_idx, links_idx: eager_events.append((change, envs_idx, links_idx)),
     )
     solver.subscribe(eager)
     # Lazy mode: matching changes accumulate on the Subscriber handle until cleared.
@@ -520,6 +520,7 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     assert len(eager_events) == 1
     assert eager_events[0][0] is StateChange.GEOMETRY
     assert eager_events[0][1] is None
+    assert_equal(eager_events[0][2], [cube.base_link_idx])
     # Lazy accumulated the category; the DYNAMICS subscriber saw nothing; eager retains nothing.
     assert lazy.pending == frozenset({StateChange.GEOMETRY})
     assert dynamics.pending == frozenset()

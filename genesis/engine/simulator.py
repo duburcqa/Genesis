@@ -262,7 +262,12 @@ class Simulator(RBC):
         # stays outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
-                solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
+                solver.subscribe(
+                    Subscriber(
+                        frozenset((StateChange.MODEL,)),
+                        callback=lambda change, envs_idx, links_idx: self._rollout_graph.invalidate(change, envs_idx),
+                    )
+                )
 
         # On CPU, the flags of the solvers are merged straight from their numpy views (see 'merge_errno'), and whether
         # any env is flagged spares the calls of 'check_errno' at every step but those that raise
