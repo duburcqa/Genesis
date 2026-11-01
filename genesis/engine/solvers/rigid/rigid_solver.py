@@ -773,7 +773,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.errno = self.rigid_data.errno
         self.hibernation_state = HibernationState(
             sizes=dict(envs=self._B, links=self.n_links_, dofs=self.n_dofs_, trees=self.n_trees_),
-            env_first=dict(cooperative_rows=self.rigid_config.constraint_layout_batch_first),
+            layout=dict(cooperative_rows=self.rigid_config.constraint_layout_batch_first),
             unused=dict(hibernation=not self._use_hibernation),
         )
         if self._use_hibernation:

@@ -191,13 +191,13 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
                 noslip_lanes=32 if config.enable_cooperative_noslip else 1,
                 tile_classes=n_tile_classes,
             ),
-            env_first=dict(
-                cooperative_rows=config.constraint_layout_batch_first,
-                jacobian_rows=config.enable_cooperative_constraint_kernels or is_serialized,
-                serial_rows=is_serialized,
-            ),
             # The noslip columns hold the environments (see noslip_MinvJT), stored first along with the rows
-            layout={ConstraintState.noslip_MinvJT: (1, 0) if config.constraint_layout_batch_first else None},
+            layout={
+                "cooperative_rows": config.constraint_layout_batch_first,
+                "jacobian_rows": config.enable_cooperative_constraint_kernels or is_serialized,
+                "serial_rows": is_serialized,
+                ConstraintState.noslip_MinvJT: (1, 0) if config.constraint_layout_batch_first else None,
+            },
             unused=dict(
                 newton=config.solver_type != gs.constraint_solver.Newton,
                 cone_incremental=not (config.enable_elliptic_friction and config.backend == gs.cpu),

@@ -265,9 +265,9 @@ class Data:
 
     The constructor allocates every array of the tree. `sizes` maps each size (see Size) to its value and `values` each
     constant to its value, either one also keyed by a field (see FieldRef) for the arrays of that field alone.
-    `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
-    `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
-    environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
+    `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `layout` and `unused` map
+    a selection of arrays (a label, a field reference, a tuple of them, or None for all) to the order the dimensions
+    are stored in (a permutation, or whether the environment dimension comes first), and whether the array is a 0-d
     placeholder no kernel reads.
     """
 
@@ -293,8 +293,7 @@ class Data:
         *,
         sizes: Mapping[str, Any] | None = None,
         values: Mapping[str, Any] | None = None,
-        env_first: Mapping[Any, bool] | bool | None = None,
-        layout: "Mapping[Any, tuple[int, ...] | None] | tuple[int, ...] | None" = None,
+        layout: "Mapping[Any, tuple[int, ...] | bool | None] | tuple[int, ...] | bool | None" = None,
         unused: Mapping[Any, bool] | bool | None = None,
         requires_grad: bool = False,
         _binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
@@ -341,7 +340,7 @@ class Data:
             if unknown := sorted(entries.keys() - _size_names(cls)):
                 raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
         properties = {leaf.path: {} for leaf in leaves}
-        for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
+        for table_name, table in (("layout", layout), ("unused", unused)):
             # The entries of the table with the path of the member they apply to, a member taking a nested table that
             # selects within it as in its own constructor, and a plain value applying to every array
             entries = []
@@ -381,8 +380,6 @@ class Data:
                             raise TypeError(f"{name}() '{table_name}' selects {'.'.join(leaf.path)} twice.")
                         if depth < depth_prev:
                             continue
-                    if table_name == "layout" and "env_first" in properties[leaf.path]:
-                        raise TypeError(f"{name}() sets both 'env_first' and 'layout' of {'.'.join(leaf.path)}.")
                     selected_depths[leaf.path] = depth
                     properties[leaf.path][table_name] = value
 
@@ -646,12 +643,12 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
             raise TypeError(f"{struct_name}.{'.'.join(leaf.path)}: {err}") from None
         axes.append(dim)
     layout = properties.get("layout")
-    if properties.get("env_first") is not None:
+    if isinstance(layout, bool):
         if ENVS not in axes:
-            raise TypeError(f"'env_first' selects {'.'.join(leaf.path)}, which spans no environment dimension.")
+            raise TypeError(f"'layout' moves the environments of {'.'.join(leaf.path)}, which spans none.")
         order = [i for i, dim in enumerate(axes) if dim != ENVS]
         i_env = axes.index(ENVS)
-        order = [i_env, *order] if properties["env_first"] else [*order, i_env]
+        order = [i_env, *order] if layout else [*order, i_env]
         layout = tuple(order) if order != list(range(len(axes))) else None
     # A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal
     # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.

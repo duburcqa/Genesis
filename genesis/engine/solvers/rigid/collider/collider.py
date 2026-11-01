@@ -471,7 +471,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 contact_slots=1 if self._solver._enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
-            env_first={ColliderState.contact_sort_key: True, "pruning": True},
+            layout={ColliderState.contact_sort_key: True, "pruning": True},
             unused=dict(
                 box_box=not config.box_box_detection,
                 contact_cache=not self.collider_config.has_non_box_plane_convex_convex,
