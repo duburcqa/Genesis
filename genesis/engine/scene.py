@@ -1710,7 +1710,7 @@ class Scene(RBC):
     def __getstate__(self) -> SceneCheckpoint:
         """Return the SceneCheckpoint of this built scene, for '__setstate__' to restore.
 
-        The description travels by reference and the arrays as copies made where they live (see 'Solver.__getstate__'),
+        The description travels by reference and the arrays as copies made where they live (see 'System.__getstate__'),
         so a save and a restore within one process cost one copy on the device. Pickling a scene reads this record,
         and unpickling creates and builds the scene, then restores the record. What a description leaves out is left
         out of a copy the same way, and reported as 'export' reports it.

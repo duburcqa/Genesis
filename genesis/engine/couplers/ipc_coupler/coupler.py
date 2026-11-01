@@ -103,7 +103,7 @@ class IPCCoupler(RBC, Coupler, Coupling):
     including rigid bodies (as ABD objects) and FEM bodies in a unified contact framework.
     """
 
-    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    # Whether the coupler supports a scene with `requires_grad` (see 'System.is_differentiable')
     is_differentiable = False
     # IPC computes the dynamics of the FEM entities itself
     is_simulating_fem = True

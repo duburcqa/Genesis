@@ -583,7 +583,7 @@ class Simulator(RBC):
         The frame the current substep starts from, among those the solvers hold.
 
         The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
-        frames of one substep (see 'Solver.has_frames').
+        frames of one substep (see 'System.has_frames').
         """
         return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
 

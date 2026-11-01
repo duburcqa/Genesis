@@ -496,7 +496,7 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
     Drake reference: https://drake.mit.edu/release_notes/v1.5.0.html
     """
 
-    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    # Whether the coupler supports a scene with `requires_grad` (see 'System.is_differentiable')
     is_differentiable = False
 
     # SAP solves the constraints of the rigid entities itself, its own contacts included, on the velocities their
