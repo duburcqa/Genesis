@@ -176,11 +176,14 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             },
         )
 
-        # The contacts and their forces were found at the previous pose, so a change of the geometry clears them, the
-        # sleepers alone keeping theirs (see 'clear'). The checkpoint of the collider is restored after that of the
-        # rigid solver, whose restore changes the geometry, so the contacts it holds are the ones that remain.
+        # The contacts and their forces were found at the previous pose, so a change of the geometry moving a link
+        # clears them, the sleepers alone keeping theirs (see 'clear'), while a change of the visual geometry alone
+        # reaches no link of the filter. The checkpoint of the collider is restored after that of the rigid solver,
+        # whose restore changes the geometry, so the contacts it holds are the ones that remain.
         self._fixed_links_idx = np.array([link.idx for link in rigid_solver.links if link.is_fixed], dtype=gs.np_int)
-        rigid_solver.subscribe(Subscriber(frozenset((StateChange.GEOMETRY,)), callback=self._clear_moved))
+        rigid_solver.subscribe(
+            Subscriber(frozenset((StateChange.GEOMETRY,)), callback=self._clear_moved, links_filter=slice(None))
+        )
         self.detection.add(self._clear_contacts_readout)
 
     @property
@@ -207,12 +210,11 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     def _clear_moved(self, change: StateChange, envs_idx, links_idx: np.ndarray | None) -> None:
         """Clear the contacts of the envs whose geometry changed, waking the sleepers on moved fixed links first.
 
-        A fixed link never sleeps, so the links resting on it would stay asleep where it was otherwise.
+        A fixed link never sleeps, so the links resting on it would stay asleep where it was otherwise. A change of
+        unbounded reach resets or restores the state of every link, sleepers included, which leaves none to wake.
         """
-        if self._solver.rigid_config.use_hibernation:
-            fixed_links_idx = self._fixed_links_idx
-            if links_idx is not None:
-                fixed_links_idx = np.intersect1d(links_idx, fixed_links_idx)
+        if self._solver.rigid_config.use_hibernation and links_idx is not None:
+            fixed_links_idx = np.intersect1d(links_idx, self._fixed_links_idx)
             if fixed_links_idx.size:
                 kernel_wake_up_entities_resting_on_links(
                     fixed_links_idx,

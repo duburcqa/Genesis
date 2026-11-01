@@ -1298,7 +1298,7 @@ class KinematicSolver(Solver):
             return
         kernel_update_vverts_for_vgeoms(vgeoms_idx, self.dyn_state, self.dyn_info, self.rigid_config)
 
-    @mutates(StateChange.GEOMETRY)
+    @mutates(StateChange.GEOMETRY, links=MutatedLinks.NONE)
     def set_vverts(self, custom_vvert_start, custom_vvert_end, vgeoms_idx, vverts, envs_idx=None):
         """Write the slice [custom_vvert_start:custom_vvert_end] of vverts_state.pos.
 

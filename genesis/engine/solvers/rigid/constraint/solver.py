@@ -240,11 +240,13 @@ class ConstraintSolver(RigidConstraints, RigidConstraintsBackward):
             },
         )
         # The warm start and the rows of the constraints were found at the previous pose, so a change of the geometry
-        # drops them, which the readout of the equality constraints shows until the next solve. The checkpoint of the
-        # constraint solver is restored after that of the rigid solver (see 'Collider.build').
+        # moving a link drops them, which the readout of the equality constraints shows until the next solve. See
+        # 'Collider.build' for the filter and the order of the restore.
         solver.subscribe(
             Subscriber(
-                frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx, links_idx: self.reset(envs_idx)
+                frozenset((StateChange.GEOMETRY,)),
+                callback=lambda change, envs_idx, links_idx: self.reset(envs_idx),
+                links_filter=slice(None),
             )
         )
 

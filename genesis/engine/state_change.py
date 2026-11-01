@@ -40,12 +40,14 @@ class MutatedLinks(enum.Enum):
 
     ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration. A
     configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom (fixed
-    links move only through explicit base-pose setters, whose reach is their link selection). A method whose reach is an
-    explicit link selection instead declares the name of its links-index argument.
+    links move only through explicit base-pose setters, whose reach is their link selection). NONE: no link, for a
+    change of the visual geometry alone. A method whose reach is an explicit link selection instead declares the name of
+    its links-index argument.
     """
 
     ALL = enum.auto()
     ARTICULATED = enum.auto()
+    NONE = enum.auto()
 
 
 class Subscriber:
@@ -124,11 +126,15 @@ def mutates(
                 return self._articulated_links_idx
             if links is MutatedLinks.ALL:
                 return None
-            links_idx = bound_arguments.get(links)
-            if links_idx is None or self._links_parent_idx is None:
-                # The setter substitutes its own default selection (potentially reaching any link), or the solver
-                # exposes no kinematic structure to close the reach over: stay unbounded.
+            if links is MutatedLinks.NONE:
+                return np.arange(0)
+            if self._links_parent_idx is None:
+                # The solver exposes no kinematic structure to close the reach over: stay unbounded
                 return None
+            links_idx = bound_arguments.get(links)
+            if links_idx is None:
+                # The selection a setter takes by default, every base link, reaches every link through their subtrees
+                return np.arange(self._links_parent_idx.shape[0])
             # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor). The
             # reach set lives host-side, where the subscriber filters compare.
             links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
