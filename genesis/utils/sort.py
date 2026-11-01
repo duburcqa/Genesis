@@ -21,10 +21,7 @@ from genesis.utils.misc import get_gpu_core_count
 
 
 class SEGMENT_SORT_KIND(IntEnum):
-    """The sort ordering the keys of a segment sort.
-
-    See genesis.utils.sort.
-    """
+    """The sort ordering the keys of a segment sort."""
 
     # The device-wide radix sort of quadrants over every key of the set (GPU, large segments)
     DEVICE_RADIX = 0
@@ -35,10 +32,7 @@ class SEGMENT_SORT_KIND(IntEnum):
 
 
 class SegmentSortStaticConfig(StaticConfig):
-    """The compile-time shape of a sort of 64-bit keys per segment.
-
-    See genesis.utils.sort.
-    """
+    """The compile-time shape of a sort of 64-bit keys per segment."""
 
     # The bits a sort must order, a multiple of 16 up to 64
     end_bit: int
@@ -65,8 +59,7 @@ SEGMENT_RADIX_SORT = Label("segment_radix_sort")
 class SegmentSortBuffer(Data, kind=DataKind.SCRATCH, shape=(SORT_KEYS,)):
     """The keys of a sort per segment, their values, the segment bounds and the scratch of the sort.
 
-    See genesis.utils.sort. The first n_keys keys are sorted, segment i_s holding the keys from segments_start[i_s] to
-    segments_start[i_s + 1].
+    The first n_keys keys are sorted, segment i_s holding the keys from segments_start[i_s] to segments_start[i_s + 1].
     """
 
     keys: qd.Tensor = field(qd.u64)
