@@ -851,6 +851,14 @@ def _create(cls: type[System], args: dict[str, Any]) -> System:
     return system
 
 
+def _get_superseding(cls: type[System]) -> type[System]:
+    """Return the registered subclass superseding a System class, the class itself if none, two of them conflicting."""
+    subclasses = [other for other in _SYSTEM_CLASSES if other is not cls and issubclass(other, cls)]
+    if len(subclasses) > 1:
+        gs.raise_exception(f"{[other.__name__ for other in subclasses]} all supersede {cls.__name__}.")
+    return subclasses[0] if subclasses else cls
+
+
 def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
     """
     Create a System requested before the Systems of a scene are assembled, and the Systems it depends on that are
@@ -860,23 +868,20 @@ def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
     System being created the same way, and an optional dependency no value fits takes None. A condition on an option is
     honored, the request refused when it does not hold, while a condition on a System, which decides when the pipeline
     offers the System on its own, is bypassed. The Systems are then given to 'assemble_systems', which builds them once
-    their dependencies are built, any other System depending on their class using them.
+    their dependencies are built, any other System depending on their class using them. A class a registered subclass
+    supersedes is created as that subclass.
     """
+    cls = _get_superseding(cls)
     created: list[System] = []
     args = {}
     for dependency in _get_dependencies(cls):
         candidates = [value for value in [*values, *created] if isinstance(value, dependency.classes)]
         candidates = list({id(value): value for value in candidates}.values())
         if len(candidates) > 1:
-            raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
+            gs.raise_exception(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
         system_classes = [c for c in dependency.classes if issubclass(c, System)]
         if not candidates and system_classes and not dependency.is_optional:
-            # A missing System is created from its class, or from the registered subclass superseding it
-            system_cls = system_classes[0]
-            subclasses = [
-                other for other in _SYSTEM_CLASSES if other is not system_cls and issubclass(other, system_cls)
-            ]
-            created += create_system((subclasses or system_classes)[0], [*values, *created])
+            created += create_system(system_classes[0], [*values, *created])
             candidates = [created[-1]]
         is_holding = all(
             [
@@ -890,7 +895,7 @@ def create_system(cls: type[System], values: Sequence[object]) -> list[System]:
                 reason = (
                     "a condition on it does not hold" if candidates else "it has no value before the scene is built"
                 )
-                raise TypeError(f"{cls.__name__} cannot be created: '{dependency.name}' {reason}.")
+                gs.raise_exception(f"{cls.__name__} cannot be created: '{dependency.name}' {reason}.")
             args[dependency.name] = None
             continue
         args[dependency.name] = candidates[0]
@@ -1010,16 +1015,11 @@ def assemble_systems(
         if all([dependency is not other for other in systems])
     }
     # A registered subclass supersedes its registered base, which the pipeline then never creates on its own, as does a
-    # System of the scene of a subclass. Two registered subclasses of a registered base conflict.
-    for cls in _SYSTEM_CLASSES:
-        subclasses = [other for other in _SYSTEM_CLASSES if other is not cls and issubclass(other, cls)]
-        if len(subclasses) > 1:
-            raise TypeError(f"{[other.__name__ for other in subclasses]} all supersede {cls.__name__}.")
+    # System of the scene of a subclass
     classes_pending = [
         cls
         for cls in _SYSTEM_CLASSES
-        if all([not isinstance(system, cls) for system in systems])
-        and all([other is cls or not issubclass(other, cls) for other in _SYSTEM_CLASSES])
+        if _get_superseding(cls) is cls and all([not isinstance(system, cls) for system in systems])
     ]
     dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
@@ -1145,6 +1145,7 @@ def _route_roles(systems: Sequence[System]) -> None:
     """Add the stage of every role of every System to its slot, or to the slot another System relocates it to."""
     # The stages the owner of a slot adds to it are moved or dropped by a System relocating the slot, before the roles
     # fill it
+    sources_relocated: list[Phase] = []
     for system in systems:
         for slot, target in system.relocations.items():
             if not isinstance(slot, Phase):
@@ -1153,6 +1154,9 @@ def _route_roles(systems: Sequence[System]) -> None:
             if owner is None:
                 continue
             source = _get_declared(owner, slot.name)
+            if any([source is other for other in sources_relocated]):
+                raise TypeError(f"{type(system).__name__} relocates {slot.owner.__name__}.{slot.name} once more.")
+            sources_relocated.append(source)
             if target is not None:
                 _get_declared(_get_owner(systems, system, target.owner), target.name).items += source.items
             source.items.clear()
@@ -1168,10 +1172,14 @@ def _route_roles(systems: Sequence[System]) -> None:
             relocations[role_of] = (slot, system)
     for system in systems:
         for role in _get_roles(type(system)):
-            role_ofs = [
-                role_of for role_of in relocations if role_of.role is role and isinstance(system, role_of.system)
+            slots = [
+                slot
+                for role_of, (slot, _) in relocations.items()
+                if role_of.role is role and isinstance(system, role_of.system)
             ]
-            slot = relocations[role_ofs[0]][0] if role_ofs else role.slot
+            if any([slot != slots[0] for slot in slots]):
+                raise TypeError(f"The relocations of {role.__name__} of {type(system).__name__} disagree: {slots}.")
+            slot = slots[0] if slots else role.slot
             if slot is None:
                 continue
             slot = _SlotRef(slot.owner, slot.name) if isinstance(slot, (Phase, Inline)) else slot

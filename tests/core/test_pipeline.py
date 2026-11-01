@@ -135,7 +135,10 @@ def test_system_superseded_by_subclass(monkeypatch):
     assert type(custom) is Custom and user.base is custom
     systems = assemble_systems([custom, user], [])
     assert len(systems) == 2
+    (custom,) = create_system(Base, [])
+    assert type(custom) is Custom
+    assert {type(system) for system in assemble_systems([custom], [])} == {Custom, User}
 
     monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Base, Custom, Other])
-    with pytest.raises(TypeError, match="all supersede Base"):
+    with pytest.raises(gs.GenesisException, match="all supersede Base"):
         assemble_systems([], [])

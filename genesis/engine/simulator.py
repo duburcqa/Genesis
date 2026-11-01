@@ -383,9 +383,11 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        systems = {type(system).__name__: system for system in self.checkpointed_systems}
-        for name, record in state.systems.items():
-            systems[name].__setstate__(record)
+        # The Systems are restored in their order, since restoring the state of a solver resets the Systems working on it
+        for system in self.checkpointed_systems:
+            record = state.systems.get(type(system).__name__)
+            if record is not None:
+                system.__setstate__(record)
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -642,7 +644,9 @@ class Simulator(RBC):
         on that are missing (see 'create_system'). The Systems are built with the scene, and every System depending on
         their class uses them.
         """
-        if opt_in and not self._scene.is_built:
+        if opt_in:
+            if self._scene.is_built:
+                gs.raise_exception(f"{cls.__name__} is requested once the scene is built.")
             if not any([isinstance(system, cls) for system in self._requested_systems]):
                 options = [self._coupler_options, *[solver._options for solver in self._solvers]]
                 values = [*self._solvers, self._coupler, *options, *self._requested_systems]
