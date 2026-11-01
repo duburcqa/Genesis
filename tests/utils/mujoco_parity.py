@@ -195,7 +195,9 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
 
     # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
     # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
-    gs_sim.rigid_solver.dyn_state.dofs.qf_constraint.fill(0.0)
+    constraint_solver = gs_sim.get_system(ConstraintSolver)
+    if constraint_solver is not None:
+        constraint_solver.constraint_state.qfrc_constraint.fill(0.0)
     rigid = gs_sim.rigid_solver
     kernel_forward_dynamics(
         rigid.dyn_state, rigid.hibernation_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config
@@ -720,9 +722,10 @@ def check_mujoco_data_consistency(
                 # Must relax tolerance because of compounding of errors.
                 assert_allclose(gs_improvement, mj_improvement, tol=tol * 1e2)
 
-    gs_qfrc_constraint = gs_sim.rigid_solver.constraint_solver.qfrc_constraint.to_numpy()[:, 0]
-    mj_qfrc_constraint = mj_sim.data.qfrc_constraint
-    assert_allclose(gs_qfrc_constraint[gs_dofs_idx], mj_qfrc_constraint[mj_dofs_idx], atol=efc_atol, rtol=tol)
+    if gs_constraint_solver is not None:
+        gs_qfrc_constraint = gs_constraint_solver.constraint_state.qfrc_constraint.to_numpy()[:, 0]
+        mj_qfrc_constraint = mj_sim.data.qfrc_constraint
+        assert_allclose(gs_qfrc_constraint[gs_dofs_idx], mj_qfrc_constraint[mj_dofs_idx], atol=efc_atol, rtol=tol)
 
     gs_qfrc_all = gs_sim.rigid_solver.dyn_state.dofs.force.to_numpy()[:, 0]
     mj_qfrc_all = mj_sim.data.qfrc_smooth + mj_sim.data.qfrc_constraint

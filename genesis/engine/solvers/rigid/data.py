@@ -1001,7 +1001,6 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     acc_smooth: qd.Tensor = field(float, grad=True)
     acc_smooth_bw: qd.Tensor = field(float, shape=(2, DOFS, ENVS), labels=BACKWARD, grad=True)
     qf_smooth: qd.Tensor = field(float, grad=True)
-    qf_constraint: qd.Tensor = field(float, grad=True)
     # The effort at the actuator output of each dof over the last step: the applied force minus the armature-inertia
     # load, plus the frictionloss and passive efforts (see 'RigidSolver.get_dofs_actuator_force')
     qf_actuator: qd.Tensor = field(float, grad=True)
