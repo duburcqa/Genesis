@@ -412,7 +412,7 @@ class PBDSolver(ParticleSolver):
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
         kernel_set_particles_free(particles_idx, envs_idx, self.pbd_state, free=True)
-        # Imported here to break the import cycle between the couplings and the solvers they couple
+        # Imported here, see 'fix_particles_to_link'
         from genesis.engine.couplers.pairwise import RigidPBD
 
         rigid_pbd = self._sim.get_system(RigidPBD)

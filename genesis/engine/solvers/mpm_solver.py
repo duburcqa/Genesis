@@ -431,6 +431,7 @@ def kernel_mpm_grid_op(
 class MPMSolver(ParticleSolver, Coupling):
     material_cls = MPM.Base
     has_frames = True
+    is_differentiable = True
 
     # The extension points of the transfers between the particles and the grid, and of the update of the grid, filled
     # by the Systems playing CellSeparation, GridCoupling and CellVelocity
@@ -679,12 +680,6 @@ class MPMSolver(ParticleSolver, Coupling):
         kernel_copy_frame(source, target, self.mpm_state)
 
     # ------------------------------------------------------------------------------------
-    # ------------------------------------ gradient --------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    is_differentiable = True
-
-    # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
@@ -835,7 +830,7 @@ class MPMSolver(ParticleSolver, Coupling):
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        # Imported here to break the import cycle between the couplings and the solvers they couple
+        # Imported here, see 'set_particle_constraints'
         from genesis.engine.couplers.pairwise import RigidMPMAttachment
 
         attachment = self._sim.get_system(RigidMPMAttachment)
