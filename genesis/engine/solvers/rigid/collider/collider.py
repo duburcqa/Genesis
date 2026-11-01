@@ -186,16 +186,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         )
         self.detection.add(self._clear_contacts_readout)
 
-    @property
-    def detect_contacts(self) -> tuple[Callable, ...]:
-        """The detection of the contacts, which a scene disabling the collisions skips."""
-        return (self.detection,) if self._solver.rigid_config.enable_collision else ()
-
-    @property
-    def detect_contacts_backward(self) -> tuple[Callable, ...]:
-        """The reversal of the narrow phase, which a scene disabling the collisions skips."""
-        return (self.backward_narrowphase,) if self._solver.rigid_config.enable_collision else ()
-
     def load_checkpoint(self, checkpoint: SystemCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
         # The restore of the rigid solver, which precedes this one, clears the contacts and their forces (see 'build'),

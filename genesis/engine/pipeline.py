@@ -113,8 +113,9 @@ class System:
     # from then on since the arrays are never reallocated, which spares walking the structs at every step
     _boundary_items: BoundaryItems | None = None
     # The slots the roles of other Systems, or the stages their owner adds to a slot, move to while this System exists,
-    # None dropping them (see RoleOf)
-    relocations: ClassVar[dict["RoleOf | Phase", "_SlotRef | Phase | None"]] = {}
+    # None dropping them (see RoleOf). A property when the System decides them in its build, such as a System dropping
+    # the roles filling its own slots that its options switch off.
+    relocations: dict["RoleOf | Phase", "_SlotRef | Phase | None"] = {}
     # The Systems and the structs its constructor depends on, whose Data its stages bind, the structs read-only
     _dependencies: "tuple[System, ...]" = ()
     _data_dependencies: ClassVar[dict[str, Data]] = {}
@@ -1117,7 +1118,7 @@ def _route_roles(systems: Sequence[System]) -> None:
     # The stages the owner of a slot adds to it are moved or dropped by a System relocating the slot, before the roles
     # fill it
     for system in systems:
-        for slot, target in type(system).relocations.items():
+        for slot, target in system.relocations.items():
             if not isinstance(slot, Phase):
                 continue
             owner = _get_owner(systems, system, slot.owner)
@@ -1129,7 +1130,7 @@ def _route_roles(systems: Sequence[System]) -> None:
             source.items.clear()
     relocations: dict[RoleOf, tuple[_SlotRef | Phase | None, System]] = {}
     for system in systems:
-        for role_of, slot in type(system).relocations.items():
+        for role_of, slot in system.relocations.items():
             if not isinstance(role_of, RoleOf):
                 continue
             if role_of in relocations:

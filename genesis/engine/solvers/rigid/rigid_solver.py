@@ -11,7 +11,7 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
-from genesis.engine.pipeline import Phase, Stages, System
+from genesis.engine.pipeline import Phase, RoleOf, Stages, System
 from genesis.engine.solvers.rigid.data import (
     HibernationState,
     RigidErrorCode,
@@ -1426,6 +1426,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
 
     # The integration runs at the end of the substep, unless another System relocates it (see 'integration')
     substep_post_coupling = ()
+
+    @property
+    def relocations(self) -> dict[RoleOf, None]:
+        """The roles filling the slots of the collision detection, which a scene disabling the collisions drops.
+
+        The System detecting the contacts still exists and detects them on demand, its detection leaving the step alone.
+        """
+        if self._enable_collision:
+            return {}
+        return {RoleOf(System, RigidCollisionDetection): None, RoleOf(System, RigidCollisionDetectionBackward): None}
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -3197,14 +3207,14 @@ class RigidCollisionDetection(System):
     """A System detecting the contacts of the rigid geoms in every substep, before the constraints are solved."""
 
     slot = RigidSolver.constraints.detection
-    detect_contacts: Stages
+    detection: Stages
 
 
 class RigidCollisionDetectionBackward(System):
     """A System reversing its detection of the contacts of the rigid geoms, once the solve of the constraints is."""
 
     slot = RigidSolver.constraints_backward.detection
-    detect_contacts_backward: Stages
+    backward_narrowphase: Stages
 
 
 class RigidConstraints(System):
