@@ -11,17 +11,24 @@ from genesis.engine.boundaries import CubeBoundary, CubeBoundaryBox, func_impose
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.pipeline import Inline, Stages, System
-from genesis.engine.solvers.base_solver import FRAMES, func_flag_error
-from genesis.engine.solvers.particle_solver import PARTICLES, ParticlesRender, VVertsRender, VVertsSupport
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.engine.step import Coupling
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field
-from genesis.utils.misc import make_static_tuple, qd_isfinite, qd_to_torch
+from genesis.utils.misc import qd_isfinite, qd_to_torch
 
-from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_scalar
+from .base_solver import FRAMES, MaterialDispatcher, func_flag_error
+from .particle_solver import (
+    PARTICLES,
+    ParticleSolver,
+    ParticlesRender,
+    VVertsRender,
+    VVertsSupport,
+    kernel_add_vverts,
+    kernel_get_particles_scalar,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -142,16 +149,8 @@ class MPMStaticConfig(StaticConfig):
 
 
 @qd.data_oriented
-class MPMMaterialDispatcher:
-    """
-    Dispatcher of the particles to the update of the deformation and the stress of their material.
-
-    The kernels take it as a template, which compiles one branch per distinct material of the scene, the index of a
-    material being its position in `materials`.
-    """
-
-    def __init__(self, materials: "list[MPM.Base]"):
-        self.materials = make_static_tuple(materials)
+class MPMMaterialDispatcher(MaterialDispatcher):
+    """Dispatcher of the particles to the update of the deformation and the stress of their material."""
 
     @qd.func
     def update_F_S_Jp(
@@ -578,7 +577,7 @@ class MPMSolver(ParticleSolver, Coupling):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "MPMEntity":
-        self.add_material(material)
+        MPMMaterialDispatcher.register(self._materials, material)
 
         # create entity
         entity = MPMEntity(
@@ -597,16 +596,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self._entities.append(entity)
 
         return entity
-
-    def add_material(self, material):
-        # A material equal to one already registered shares its index, and so the kernels it compiles into
-        for material_i in self._materials:
-            if material == material_i:
-                material.idx = material_i.idx
-                break
-        else:
-            material.idx = len(self._materials)
-            self._materials.append(material)
 
     def add_vverts(self, *args):
         """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""

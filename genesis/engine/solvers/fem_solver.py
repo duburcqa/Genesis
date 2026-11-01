@@ -7,11 +7,9 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.linalg as lu
-from genesis.engine.boundaries import FloorBoundary, func_impose_floor_boundary
-from genesis.engine.boundaries.boundaries import FloorBoundaryPlane
+from genesis.engine.boundaries import FloorBoundary, FloorBoundaryPlane, func_impose_floor_boundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
-from genesis.engine.solvers.base_solver import FRAMES
 from genesis.engine.solvers.rigid.data import DynState, LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
@@ -19,9 +17,9 @@ from genesis.grad.bridge import no_grad
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums, PCGScalars
-from genesis.utils.misc import broadcast_tensor, make_static_tuple, qd_to_torch, tensor_to_array
+from genesis.utils.misc import broadcast_tensor, qd_to_torch, tensor_to_array
 
-from .base_solver import GravityMixin, Solver, TimeBasedMixin
+from .base_solver import FRAMES, GravityMixin, MaterialDispatcher, Solver, TimeBasedMixin
 
 
 VVERTS = Size("vverts")
@@ -51,7 +49,7 @@ class FEMElements(Data, kind=DataKind.CONSTANT, shape=(ELEMENTS,)):
 
     `el2v` holds the four vertices of an element, `B` the inverse of its rest shape matrix, `V` its rest volume and
     `mu`, `lam` its Lame parameters. The masses and volumes `*_scaled` are scaled up by `vol_scale` (see FEMInfo).
-    `material_idx` is the index of the material (see FEMMaterialDispatcher in fem_solver.py).
+    `material_idx` is the index of the material (see FEMMaterialDispatcher).
     """
 
     el2v: qd.Tensor = field((int, 4))
@@ -253,16 +251,8 @@ class FEMStaticConfig(StaticConfig):
 
 
 @qd.data_oriented
-class FEMMaterialDispatcher:
-    """
-    Dispatcher of the elements to the constitutive model of their material.
-
-    The kernels take it as a template, which compiles one branch per distinct material of the scene, the index of a
-    material being its position in `materials`.
-    """
-
-    def __init__(self, materials: "list[FEM.Base]"):
-        self.materials = make_static_tuple(materials)
+class FEMMaterialDispatcher(MaterialDispatcher):
+    """Dispatcher of the elements to the constitutive model of their material."""
 
     @qd.func
     def update_stress(
@@ -544,14 +534,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "FEMEntity":
-        # A material equal to one already registered shares its index, and so the kernels it compiles into
-        for material_registered in self._materials:
-            if material == material_registered:
-                material.idx = material_registered.idx
-                break
-        else:
-            material.idx = len(self._materials)
-            self._materials.append(material)
+        FEMMaterialDispatcher.register(self._materials, material)
 
         # create entity
         entity = FEMEntity(

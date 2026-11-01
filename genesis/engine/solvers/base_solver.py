@@ -576,6 +576,32 @@ class Solver(RBC, Dynamics, Integration):
         return repr_str
 
 
+@qd.data_oriented
+class MaterialDispatcher:
+    """
+    Dispatcher of the items of a solver to the functions of their material.
+
+    The kernels take it as a template, which compiles one branch per distinct material of the scene, the index of a
+    material being its position in `materials` (see 'register').
+    """
+
+    def __init__(self, materials: list[Material]):
+        self.materials = make_static_tuple(materials)
+
+    @staticmethod
+    def register(materials: list[Material], material: Material) -> None:
+        """Give a material its index in a list of materials, appending it unless it equals one of them.
+
+        A material equal to one already registered shares its index, and so the kernels it compiles into.
+        """
+        for material_registered in materials:
+            if material == material_registered:
+                material.idx = material_registered.idx
+                return
+        material.idx = len(materials)
+        materials.append(material)
+
+
 @qd.kernel
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
     # The qd.Tensor annotation accepts both backends the buffer may be allocated with, a field or an ndarray (see V in
