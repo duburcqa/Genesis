@@ -12,7 +12,6 @@ import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
-from genesis.constants import IntEnum
 from genesis.engine.bvh import (
     BVHLeaves,
     BVHQueryFilter,
@@ -63,7 +62,7 @@ from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.linalg import SUM_MAX_CHUNKS, FixedOrderSums
-from genesis.utils.misc import qd_to_numpy, qd_to_torch
+from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 from genesis.utils.sort import SegmentSortBuffer, SegmentSortStaticConfig, func_sort_segments, get_segment_sort_data
 
 if TYPE_CHECKING:
@@ -496,49 +495,26 @@ RIGID_FLOOR_VERT_STIFFNESS = 1.0e6
 HYDROELASTIC_EPS = 1e-10
 
 
-class FEMFloorContactType(IntEnum):
+def compute_pressure_field(
+    verts: np.ndarray, surface_verts: np.ndarray, surface_faces: np.ndarray, modulus: float
+) -> np.ndarray:
     """
-    Enum for FEM floor contact types.
+    Return the pressure field of a volume mesh at its vertices for hydroelastic contact, its distance to the surface.
+
+    The field grows linearly with the distance of a vertex to the surface mesh `surface_verts`, `surface_faces`, from
+    zero on the surface to `modulus` at the deepest vertex. See
+    https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
     """
-
-    # No contact
-    NONE = 0
-    # Tetrahedral contact
-    TET = 1
-    # Vertex contact
-    VERT = 2
-
-
-class RigidFloorContactType(IntEnum):
-    """
-    Enum for rigid floor contact types.
-    """
-
-    # No contact
-    NONE = 0
-    # Vertex contact
-    VERT = 1
-    # Tetrahedral contact
-    TET = 2
-
-
-class RigidRigidContactType(IntEnum):
-    """
-    Enum for rigid-rigid contact types.
-    """
-
-    # No contact
-    NONE = 0
-    # Tetrahedral contact
-    TET = 1
-
-
-class ContactMode(IntEnum):
-    """The friction regime of a semi-analytic primal (SAP) contact: sticking, sliding or separating."""
-
-    STICK = 0
-    SLIDE = 1
-    NO_CONTACT = 2
+    # The unsigned query returns bitwise identical distances for identical inputs, whereas the signed ones differ in
+    # their last bits from one call to the next, which makes the whole simulation irreproducible
+    distance, *_ = igl.signed_distance(verts, surface_verts, surface_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED)
+    distance_max = np.max(distance)
+    if distance_max < gs.EPS:
+        gs.raise_exception(
+            f"Pressure field max distance is too small: {distance_max}. "
+            "This might be due to a mesh having no internal vertices."
+        )
+    return distance / distance_max * modulus
 
 
 class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstraints):
@@ -579,39 +555,8 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
             gs.raise_exception(
                 "SAPCoupler does not support 32bits precision. Please specify precision='64' when initializing Genesis."
             )
-        if options.fem_floor_contact_type == "tet":
-            self._fem_floor_contact_type = FEMFloorContactType.TET
-        elif options.fem_floor_contact_type == "vert":
-            self._fem_floor_contact_type = FEMFloorContactType.VERT
-        elif options.fem_floor_contact_type == "none":
-            self._fem_floor_contact_type = FEMFloorContactType.NONE
-        else:
-            gs.raise_exception(
-                f"Invalid FEM floor contact type: {options.fem_floor_contact_type}. "
-                "Must be one of 'tet', 'vert', or 'none'."
-            )
-        self._enable_fem_self_tet_contact = options.enable_fem_self_tet_contact
-        if options.rigid_floor_contact_type == "vert":
-            self._rigid_floor_contact_type = RigidFloorContactType.VERT
-        elif options.rigid_floor_contact_type == "tet":
-            self._rigid_floor_contact_type = RigidFloorContactType.TET
-        elif options.rigid_floor_contact_type == "none":
-            self._rigid_floor_contact_type = RigidFloorContactType.NONE
-        else:
-            gs.raise_exception(
-                f"Invalid rigid floor contact type: {options.rigid_floor_contact_type}. "
-                "Must be one of 'vert', 'tet', or 'none'."
-            )
-        self._enable_rigid_fem_contact = options.enable_rigid_fem_contact
-
-        if options.rigid_rigid_contact_type == "tet":
-            self._rigid_rigid_contact_type = RigidRigidContactType.TET
-        elif options.rigid_rigid_contact_type == "none":
-            self._rigid_rigid_contact_type = RigidRigidContactType.NONE
-        else:
-            gs.raise_exception(
-                f"Invalid rigid-rigid contact type: {options.rigid_rigid_contact_type}. Must be one of 'tet' or 'none'."
-            )
+        if options.rigid_rigid_contact_type == "vert":
+            gs.raise_exception("Invalid rigid-rigid contact type: 'vert'. Must be one of 'tet' or 'none'.")
 
         self.contact_handlers: list[SAPContactHandler] = []
         # The static configs of the trees of SAPState
@@ -633,15 +578,6 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
         B = self.sim._B
         fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
 
-        # The contacts of an inactive solver are switched off, so that every flag below states an active handler
-        if not fem_solver.is_active:
-            self._fem_floor_contact_type = FEMFloorContactType.NONE
-            self._enable_fem_self_tet_contact = False
-        if not rigid_solver.is_active:
-            self._rigid_floor_contact_type = RigidFloorContactType.NONE
-            self._rigid_rigid_contact_type = RigidRigidContactType.NONE
-        self._enable_rigid_fem_contact &= rigid_solver.is_active and fem_solver.is_active
-
         for equality in rigid_solver.equalities:
             if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
                 gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
@@ -650,50 +586,75 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
                 "SAPCoupler requires FEM to use implicit solver. Please set `use_implicit_solver=True` in FEM options."
             )
 
-        self._is_fem_hydroelastic = (
-            self._fem_floor_contact_type == FEMFloorContactType.TET
-            or self._enable_fem_self_tet_contact
-            or self._enable_rigid_fem_contact
-        )
-        self._is_rigid_hydroelastic = (
-            self._rigid_floor_contact_type == RigidFloorContactType.TET
-            or self._rigid_rigid_contact_type == RigidRigidContactType.TET
-        )
-        n_rigid_volume_verts = n_rigid_volume_elems = 0
+        # The tetrahedral volume meshes of the colliding rigid geoms, the geoms of their vertices and elements, and their
+        # pressure field
+        options = self.options
+        rigid_contact_types = (options.rigid_floor_contact_type, options.rigid_rigid_contact_type)
+        self._is_rigid_hydroelastic = rigid_solver.is_active and "tet" in rigid_contact_types
+        volume_verts, volume_elems, volume_verts_geom_idx, volume_elems_geom_idx, volume_pressure = [], [], [], [], []
+        n_rigid_volume_verts = 0
         if self._is_rigid_hydroelastic:
-            volume_verts, volume_elems, volume_verts_geom_idx, volume_elems_geom_idx, volume_pressure = (
-                self._get_rigid_volume_np()
-            )
-            n_rigid_volume_verts, n_rigid_volume_elems = len(volume_verts), len(volume_elems)
+            for geom in rigid_solver.geoms:
+                if geom.contype or geom.conaffinity:
+                    if geom.type == gs.GEOM_TYPE.PLANE:
+                        gs.raise_exception("Primitive plane not supported as user-specified collision geometries.")
+                    tet_cfg = {"nobisect": False, "maxvolume": geom.trimesh.volume / 100}
+                    verts, elems = eu.split_all_surface_tets(*eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg))
+                    volume_verts.append(verts)
+                    volume_elems.append(elems + n_rigid_volume_verts)
+                    volume_verts_geom_idx.append(np.full(len(verts), geom.idx, dtype=gs.np_int))
+                    volume_elems_geom_idx.append(np.full(len(elems), geom.idx, dtype=gs.np_int))
+                    volume_pressure.append(
+                        compute_pressure_field(verts, geom.init_verts, geom.init_faces, options.hydroelastic_stiffness)
+                    )
+                    n_rigid_volume_verts += len(verts)
+            if not volume_verts:
+                gs.raise_exception("No rigid collision geometries found.")
+        n_rigid_volume_elems = sum([len(elems) for elems in volume_elems])
         n_vertices, n_elements = fem_solver.n_vertices, fem_solver.n_elements
         n_surface_elements = fem_solver.n_surface_elements if fem_solver.is_active else 0
         n_dofs, n_faces = rigid_solver.n_dofs, rigid_solver.n_faces
 
         # Every handler, in the order every sum over them runs, the active ones alone detecting pairs
         fem_floor_tet = FEMFloorTetContactHandler(
-            n_surface_elements, n_elements, B, is_active=self._fem_floor_contact_type == FEMFloorContactType.TET
+            n_surface_elements,
+            n_elements,
+            B,
+            is_active=fem_solver.is_active and options.fem_floor_contact_type == "tet",
         )
         fem_floor_vert = FEMFloorVertContactHandler(
-            n_surface_elements, n_vertices, B, is_active=self._fem_floor_contact_type == FEMFloorContactType.VERT
+            n_surface_elements,
+            n_vertices,
+            B,
+            is_active=fem_solver.is_active and options.fem_floor_contact_type == "vert",
         )
         fem_self_tet = FEMSelfTetContactHandler(
-            n_surface_elements, n_elements, B, is_active=self._enable_fem_self_tet_contact
+            n_surface_elements, n_elements, B, is_active=fem_solver.is_active and options.enable_fem_self_tet_contact
         )
         rigid_floor_vert = RigidFloorVertContactHandler(
             rigid_solver.n_free_verts,
             rigid_solver.n_verts,
             B,
-            is_active=self._rigid_floor_contact_type == RigidFloorContactType.VERT,
+            is_active=rigid_solver.is_active and options.rigid_floor_contact_type == "vert",
         )
         rigid_floor_tet = RigidFloorTetContactHandler(
-            n_rigid_volume_elems, B, is_active=self._rigid_floor_contact_type == RigidFloorContactType.TET
+            n_rigid_volume_elems,
+            B,
+            is_active=rigid_solver.is_active and options.rigid_floor_contact_type == "tet",
         )
         rigid_rigid_tet = RigidRigidTetContactHandler(
-            n_rigid_volume_elems, B, is_active=self._rigid_rigid_contact_type == RigidRigidContactType.TET
+            n_rigid_volume_elems,
+            B,
+            is_active=rigid_solver.is_active and options.rigid_rigid_contact_type == "tet",
         )
         rigid_fem_tri_tet = RigidFemTriTetContactHandler(
-            n_surface_elements, n_elements, n_faces, B, is_active=self._enable_rigid_fem_contact
+            n_surface_elements,
+            n_elements,
+            n_faces,
+            B,
+            is_active=rigid_solver.is_active and fem_solver.is_active and options.enable_rigid_fem_contact,
         )
+        self._is_fem_hydroelastic = fem_floor_tet.is_active or fem_self_tet.is_active or rigid_fem_tri_tet.is_active
         self.contact_handlers.clear()
         self.contact_handlers.extend(
             [
@@ -833,10 +794,9 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
             queries.fem_self_filter.leaves_map.from_numpy(qd_to_numpy(fem_solver.fem_info.elements.el2v)[elements_idx])
         if rigid_rigid_tet.is_active:
             leaves_map = np.zeros((n_rigid_volume_elems, 4), dtype=gs.np_int)
-            leaves_map[:, 0] = volume_elems_geom_idx
+            leaves_map[:, 0] = np.concatenate(volume_elems_geom_idx)
             queries.rigid_tet_filter.leaves_map.from_numpy(leaves_map)
 
-        options = self.options
         self.sap_info = SAPInfo(
             sizes=dict(
                 handlers=n_handlers,
@@ -880,16 +840,22 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
         self.sap_info.tet_edges.from_numpy(np.array(TET_EDGES, dtype=gs.np_int))
 
         if self._is_fem_hydroelastic:
-            self.sap_state.hydroelastic_fem.pressure.from_numpy(
-                np.concatenate([fem_entity.compute_pressure_field() for fem_entity in fem_solver.entities])
-            )
+            fem_pressure = []
+            for entity in fem_solver.entities:
+                init_positions = tensor_to_array(entity.init_positions)
+                fem_pressure.append(
+                    compute_pressure_field(
+                        init_positions, init_positions, entity.surface_triangles, entity.material.hydroelastic_modulus
+                    )
+                )
+            self.sap_state.hydroelastic_fem.pressure.from_numpy(np.concatenate(fem_pressure))
         if self._is_rigid_hydroelastic:
             rigid_volume = self.sap_state.rigid_volume
-            rigid_volume.verts_rest.from_numpy(volume_verts)
-            rigid_volume.elems.from_numpy(volume_elems)
-            rigid_volume.verts_geom_idx.from_numpy(volume_verts_geom_idx)
-            rigid_volume.elems_geom_idx.from_numpy(volume_elems_geom_idx)
-            rigid_volume.pressure.from_numpy(volume_pressure)
+            rigid_volume.verts_rest.from_numpy(np.concatenate(volume_verts, dtype=gs.np_float))
+            rigid_volume.elems.from_numpy(np.concatenate(volume_elems, dtype=gs.np_int))
+            rigid_volume.verts_geom_idx.from_numpy(np.concatenate(volume_verts_geom_idx))
+            rigid_volume.elems_geom_idx.from_numpy(np.concatenate(volume_elems_geom_idx))
+            rigid_volume.pressure.from_numpy(np.concatenate(volume_pressure))
             kernel_compute_rigid_pressure_gradient_rest(self.sap_state, self.sap_info)
         if has_equalities:
             kernel_build_equality_constraints(
@@ -903,52 +869,6 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
 
     def reset(self, envs_idx=None):
         pass
-
-    def _get_rigid_volume_np(self):
-        """
-        Return the tetrahedral volume meshes of the colliding rigid geoms, the geoms of their elements, and their
-        pressure field.
-        """
-        rigid_volume_verts = []
-        rigid_volume_elems = []
-        rigid_volume_verts_geom_idx = []
-        rigid_volume_elems_geom_idx = []
-        rigid_pressure_field = []
-        offset = 0
-        for geom in self.rigid_solver.geoms:
-            if geom.contype or geom.conaffinity:
-                if geom.type == gs.GEOM_TYPE.PLANE:
-                    gs.raise_exception("Primitive plane not supported as user-specified collision geometries.")
-                volume = geom.trimesh.volume
-                tet_cfg = {"nobisect": False, "maxvolume": volume / 100}
-                mesh_verts, mesh_elems = eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg)
-                verts, elems = eu.split_all_surface_tets(mesh_verts, mesh_elems)
-                rigid_volume_verts.append(verts)
-                rigid_volume_elems.append(elems + offset)
-                rigid_volume_verts_geom_idx.append(np.full(len(verts), geom.idx, dtype=gs.np_int))
-                rigid_volume_elems_geom_idx.append(np.full(len(elems), geom.idx, dtype=gs.np_int))
-                # See FEMEntity.compute_pressure_field for the unsigned query
-                distance_unsigned, *_ = igl.signed_distance(
-                    verts, geom.init_verts, geom.init_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
-                )
-                distance_max = np.max(distance_unsigned)
-                if distance_max < gs.EPS:
-                    gs.raise_exception(
-                        f"Pressure field max distance is too small: {distance_max}. "
-                        "This might be due to a mesh having no internal vertices."
-                    )
-                pressure_field_np = distance_unsigned / distance_max * self.options.hydroelastic_stiffness
-                rigid_pressure_field.append(pressure_field_np)
-                offset += len(verts)
-        if not rigid_volume_verts:
-            gs.raise_exception("No rigid collision geometries found.")
-        return (
-            np.concatenate(rigid_volume_verts, axis=0, dtype=gs.np_float),
-            np.concatenate(rigid_volume_elems, axis=0, dtype=gs.np_int),
-            np.concatenate(rigid_volume_verts_geom_idx, axis=0, dtype=gs.np_int),
-            np.concatenate(rigid_volume_elems_geom_idx, axis=0, dtype=gs.np_int),
-            np.concatenate(rigid_pressure_field, axis=0, dtype=gs.np_float),
-        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- Main ----------------------------------------
@@ -995,12 +915,11 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
             handlers_is_overflow = qd_to_numpy(sap_state.pairs.handlers_is_overflow)
             message = "Overflowed In Contact Query: \n"
             for handler in self.contact_handlers:
+                name = type(handler).__name__
                 if handlers_n_pairs[handler.idx] > handler.capacity:
-                    message += (
-                        f"{handler.name} max contact pairs: {handler.capacity}, using {handlers_n_pairs[handler.idx]}\n"
-                    )
+                    message += f"{name} max contact pairs: {handler.capacity}, using {handlers_n_pairs[handler.idx]}\n"
                 if handlers_is_overflow[handler.idx]:
-                    message += f"{handler.name} overflowed its candidates or its box query\n"
+                    message += f"{name} overflowed its candidates or its box query\n"
             gs.raise_exception(message)
         if self.sap_static_config.has_rigid_contacts:
             kernel_compute_jacobian(
@@ -1087,19 +1006,9 @@ class SAPCoupler(RBC, Coupler, Preparation, Coupling, Integration, RigidConstrai
     # ------------------------------------------------------------------------------------
 
     @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self.sim.active_solvers
-
-    @property
     def has_rigid_tet_contacts(self) -> bool:
         """Whether the coupler detects the contacts between the tetrahedra of the rigid geoms."""
-        return any(
-            [
-                isinstance(handler, RigidRigidTetContactHandler) and handler.is_active
-                for handler in self.contact_handlers
-            ]
-        )
+        return any([isinstance(handler, RigidRigidTetContactHandler) for handler in self.contact_handlers])
 
 
 @register_system
@@ -1140,7 +1049,6 @@ class SAPContactHandler:
     def __init__(
         self, capacity: int, n_keys: int, is_active: bool, n_candidates: int = 0, n_query_results: int = 0
     ) -> None:
-        self.name = type(self).__name__
         self.capacity = capacity
         self.n_keys = n_keys
         self.is_active = is_active
@@ -1148,7 +1056,7 @@ class SAPContactHandler:
         self.n_query_results = min(n_query_results, MAX_N_QUERY_RESULTS)
         self.idx = -1
 
-    def detect(self, i_step: int, coupler: SAPCoupler) -> None:
+    def detect(self, f: int, coupler: SAPCoupler) -> None:
         """Append the pairs of the substep to the segment of the handler."""
         raise NotImplementedError
 
@@ -1160,10 +1068,10 @@ class FEMFloorTetContactHandler(SAPContactHandler):
         capacity = n_surface_elements * n_envs
         super().__init__(capacity, n_elements, is_active, n_candidates=capacity)
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         fem_solver = coupler.fem_solver
         kernel_detect_fem_floor_tet(
-            i_step, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
+            f, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
         )
 
 
@@ -1180,11 +1088,11 @@ class FEMSelfTetContactHandler(SAPContactHandler):
             n_query_results=n_surface_elements * MAX_N_QUERY_RESULT_PER_AABB * n_envs,
         )
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         fem_solver = coupler.fem_solver
         build_bvh(coupler.sap_state.fem_surface_tet_bvh, coupler.fem_surface_tet_bvh_config, eps=gs.EPS)
         kernel_detect_fem_self_tet(
-            i_step, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
+            f, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
         )
 
 
@@ -1194,10 +1102,10 @@ class FEMFloorVertContactHandler(SAPContactHandler):
     def __init__(self, n_surface_elements: int, n_vertices: int, n_envs: int, is_active: bool) -> None:
         super().__init__(n_surface_elements * n_envs, n_vertices, is_active)
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         fem_solver = coupler.fem_solver
         kernel_detect_fem_floor_vert(
-            i_step, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
+            f, self.idx, coupler.sap_state, fem_solver.fem_state, coupler.sap_info, fem_solver.fem_info
         )
 
 
@@ -1209,7 +1117,7 @@ class RigidFloorVertContactHandler(SAPContactHandler):
     def __init__(self, n_free_verts: int, n_verts: int, n_envs: int, is_active: bool) -> None:
         super().__init__(n_free_verts * n_envs, n_verts, is_active)
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         rigid_solver = coupler.rigid_solver
         kernel_detect_rigid_floor_vert(
             self.idx,
@@ -1230,7 +1138,7 @@ class RigidFloorTetContactHandler(SAPContactHandler):
         capacity = n_rigid_volume_elems * n_envs
         super().__init__(capacity, n_rigid_volume_elems, is_active, n_candidates=capacity * MAX_N_CANDIDATES_PER_PAIR)
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         rigid_solver = coupler.rigid_solver
         kernel_detect_rigid_floor_tet(
             self.idx,
@@ -1257,7 +1165,7 @@ class RigidRigidTetContactHandler(SAPContactHandler):
             n_query_results=n_rigid_volume_elems * MAX_N_QUERY_RESULT_PER_AABB * n_envs,
         )
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         kernel_compute_rigid_tet_aabb(coupler.sap_state)
         build_bvh(coupler.sap_state.rigid_tet_bvh, coupler.rigid_tet_bvh_config, eps=gs.EPS)
         kernel_detect_rigid_rigid_tet(
@@ -1282,7 +1190,7 @@ class RigidFemTriTetContactHandler(SAPContactHandler):
             n_query_results=max(n_surface_elements, n_faces) * MAX_N_QUERY_RESULT_PER_AABB * n_envs,
         )
 
-    def detect(self, i_step, coupler):
+    def detect(self, f, coupler):
         fem_solver, rigid_solver = coupler.fem_solver, coupler.rigid_solver
         kernel_compute_rigid_tri_aabb(
             coupler.sap_state.rigid_tri_bvh.leaves,
@@ -1293,7 +1201,7 @@ class RigidFemTriTetContactHandler(SAPContactHandler):
         )
         build_bvh(coupler.sap_state.rigid_tri_bvh, coupler.rigid_tri_bvh_config, eps=gs.EPS)
         kernel_detect_rigid_fem_tri_tet(
-            i_step,
+            f,
             self.idx,
             coupler.sap_state,
             fem_solver.fem_state,
@@ -1550,20 +1458,6 @@ def func_contact_velocity(
 
 
 @qd.func
-def func_contact_mode(mu: float, mu_hat: float, yr: float, yn: float):
-    """
-    Return whether a contact sticks, slides or separates, from its friction and its velocity scaled by its
-    regularization.
-    """
-    contact_mode = ContactMode.NO_CONTACT
-    if yr <= mu * yn:
-        contact_mode = ContactMode.STICK
-    elif -mu_hat * yr < yn and yn < yr / mu:
-        contact_mode = ContactMode.SLIDE
-    return contact_mode
-
-
-@qd.func
 def func_contact_gamma(
     i_p: int,
     vc: qd.types.vector(3),
@@ -1587,16 +1481,16 @@ def func_contact_gamma(
     mu = sap_state.pairs.mu[i_p]
     mu_hat = sap_state.pairs.mu_hat[i_p]
     mu_factor = sap_state.pairs.mu_factor[i_p]
-    contact_mode = func_contact_mode(mu, mu_hat, yr, yn)
     gamma = qd.Vector.zero(gs.qd_float, 3)
     G = qd.Matrix.zero(gs.qd_float, 3, 3)
-    if contact_mode == ContactMode.STICK:
+    # The contact sticks, slides or separates, from its friction and its velocity scaled by its regularization
+    if yr <= mu * yn:
         gamma = y
         if qd.static(compute_hessian):
             G[0, 0] = sap_state.pairs.Rt_inv[i_p]
             G[1, 1] = sap_state.pairs.Rt_inv[i_p]
             G[2, 2] = sap_state.pairs.Rn_inv[i_p]
-    elif contact_mode == ContactMode.SLIDE:
+    elif -mu_hat * yr < yn and yn < yr / mu:
         gn = (yn + mu_hat * yr) * mu_factor
         gt = mu * gn * t_hat
         gamma = qd.Vector([gt[0], gt[1], gn])
@@ -2201,7 +2095,7 @@ def kernel_detect_fem_self_tet(
         barycentric1 = func_tet_barycentric(centroid, tet_vertices1)
         g0 = sap_state.hydroelastic_fem.pressure_gradient[i_e0, i_b].dot(normal)
         g1 = -sap_state.hydroelastic_fem.pressure_gradient[i_e1, i_b].dot(normal)
-        # FIXME This is an approximated value, different from Drake, which actually calculates the distance
+        # TODO: This is an approximated value, different from Drake, which actually calculates the distance
         phi0 = -pressure / g0 - pressure / g1
         if phi0 > sap_info.EPS[None]:
             continue
@@ -2704,7 +2598,7 @@ def kernel_sort_contacts(
     return has_contact, is_overflow
 
 
-# FIXME: The Jacobian duplicates the one of the contact constraints of the rigid solver (see
+# TODO: The Jacobian duplicates the one of the contact constraints of the rigid solver (see
 # add_collision_constraints in rigid/constraint/solver.py).
 @qd.kernel(fastcache=True)
 def kernel_compute_jacobian(
@@ -2788,7 +2682,7 @@ def kernel_build_equality_constraints(
         sap_state.equalities.batch_start[i_b + 1] = n_constraints
 
 
-# FIXME: The solve duplicates func_solve_mass_block in rigid/abd/forward_dynamics.py, which solves one right-hand side
+# TODO: The solve duplicates func_solve_mass_block in rigid/abd/forward_dynamics.py, which solves one right-hand side
 # per environment instead of the three columns of the rigid Jacobian of every pair.
 @qd.func(requires_top_level=True)
 def func_rigid_solve_jacobian(sap_state: SAPState, entities_info: EntitiesInfo, rigid_info: RigidInfo):

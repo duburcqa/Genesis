@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import igl
 import trimesh
 
 import genesis as gs
@@ -456,34 +455,6 @@ class FEMEntity(Entity):
                 uvs=uvs,
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
-
-    def compute_pressure_field(self) -> np.ndarray:
-        """
-        Return the pressure field of the FEM entity at its vertices, from its tetrahedral elements.
-
-        For hydroelastic contact: https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
-
-        Notes
-        -----
-        https://github.com/RobotLocomotion/drake/blob/master/geometry/proximity/make_mesh_field.cc
-        TODO: Add margin support
-        Drake's implementation of margin seems buggy.
-        """
-        init_positions = tensor_to_array(self.init_positions)
-        # The unsigned query returns bitwise identical distances for identical inputs, whereas the signed ones differ in
-        # their last bits from one call to the next, which makes the whole simulation irreproducible.
-        unsigned_distance, *_ = igl.signed_distance(
-            init_positions, init_positions, self._surface_tri_np, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
-        )
-        unsigned_distance = unsigned_distance.astype(gs.np_float, copy=False)
-
-        max_distance = np.max(unsigned_distance)
-        if max_distance < gs.EPS:
-            gs.raise_exception(
-                f"Pressure field max distance is too small: {max_distance}. "
-                "This might be due to a mesh having no internal vertices."
-            )
-        return unsigned_distance / max_distance * self.material.hydroelastic_modulus
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------
