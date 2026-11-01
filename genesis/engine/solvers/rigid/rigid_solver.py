@@ -82,7 +82,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_held_by_links,
 )
-from .abd.diff import kernel_copy_next_to_curr_clear_coupling
+from .abd.diff import func_integrate_dq_entity, kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
     kernel_compute_smooth_qacc,
     kernel_forward_dynamics_without_qacc,
@@ -1287,6 +1287,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             is_backward=False,
             noslip=self._options.noslip_iterations > 0,
         )
+
+    def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
+        func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
 
     @mutates()
     def apply_links_external_wrench(
