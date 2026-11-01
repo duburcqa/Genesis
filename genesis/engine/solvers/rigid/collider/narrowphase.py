@@ -46,24 +46,28 @@ from .utils import func_closest_points_on_segments, func_is_discrete_geoms, func
 
 @qd.func
 def func_contact_sphere_sdf(
-    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, sdf_info: SDFInfo
+    i_ga: int,
+    i_gb: int,
+    ga_pos: qd.types.vector(3),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
 ):
+    """Detect the contact of the sphere A, centered at its frame origin, with the signed distance field (SDF) of B."""
     is_col = False
     penetration = gs.qd_float(0.0)
     normal = qd.Vector.zero(gs.qd_float, 3)
     contact_pos = qd.Vector.zero(gs.qd_float, 3)
 
-    sphere_center = dyn_state.geoms.pos[i_ga, i_b]
     sphere_radius = dyn_info.geoms.data[i_ga][0]
-
-    center_to_b_dist = sdf.sdf_func_world(i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, sdf_info)
+    center_to_b_dist = sdf.sdf_func_world_local(i_gb, ga_pos, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
     if center_to_b_dist < sphere_radius:
         is_col = True
-        normal = sdf.sdf_func_normal_world(
-            i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
-        )
+        normal = sdf.sdf_func_normal_world_local(i_gb, ga_pos, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info)
         penetration = sphere_radius - center_to_b_dist
-        contact_pos = sphere_center - (sphere_radius - 0.5 * penetration) * normal
+        contact_pos = ga_pos - (sphere_radius - 0.5 * penetration) * normal
 
     return is_col, normal, penetration, contact_pos
 
@@ -1321,8 +1325,10 @@ def func_contact_nonconvex_convex_sdf(
     # vertex scan when outside the grid costs at most one extra func_contact_vertex_sdf pass on the smaller side and
     # keeps the reject correct in all cases.
     center_a_world = gu.qd_transform_by_trans_quat(center_local, ga_pos, ga_quat)
-    # SPHERE B has an analytical SDF; grid-based B is only safe when the query point falls inside the grid.
-    can_use_sd_reject = dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
+    # SPHERE and PLANE B have an analytical SDF, while a grid-based B is exact only inside its grid
+    can_use_sd_reject = (
+        dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE or dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.PLANE
+    )
     if not can_use_sd_reject:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(center_a_world, gb_pos, gb_quat)
         pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_gb])
@@ -1342,117 +1348,267 @@ def func_contact_convex_convex_sdf(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    i_va_ws: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     sdf_info: SDFInfo,
-    enable_edge_detection_fallback: qd.template(),
 ):
-    EPS = rigid_info.EPS[None]
+    """
+    Detect the contact of the convex geom A with the signed distance field (SDF) of B at the deepest vertex of A.
 
-    gb_vert_start = dyn_info.geoms.vert_start[i_gb]
-    ga_pos = dyn_state.geoms.pos[i_ga, i_b]
-    ga_quat = dyn_state.geoms.quat[i_ga, i_b]
-    gb_pos = dyn_state.geoms.pos[i_gb, i_b]
-    gb_quat = dyn_state.geoms.quat[i_gb, i_b]
-
+    The deepest vertex is found by descending the signed distance of B over the edge graph of A, from the vertex of A
+    closest to the center of B. The descent strictly decreases the signed distance, so it visits every vertex at most
+    once. Returns whether the vertex penetrates B, the normal pointing from B to A, the penetration and the midpoint
+    between the vertex and the surface of B.
+    """
     is_col = False
     penetration = gs.qd_float(0.0)
     normal = qd.Vector.zero(gs.qd_float, 3)
     contact_pos = qd.Vector.zero(gs.qd_float, 3)
 
-    i_va = i_va_ws
-    if i_va == -1:
-        # start traversing on the vertex graph with a smart initial vertex
-        pos_vb = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[gb_vert_start], gb_pos, gb_quat)
-        i_va = sdf.sdf_func_find_closest_vert(i_ga, i_b, pos_vb, dyn_state, dyn_info, sdf_info)
-    i_v_closest = i_va
+    center_b = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_gb], gb_pos, gb_quat)
+    i_v_closest = sdf.sdf_func_find_closest_vert(i_ga, i_b, center_b, dyn_state, dyn_info, sdf_info)
     pos_v_closest = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v_closest], ga_pos, ga_quat)
-    sd_v_closest = sdf.sdf_func_world(i_gb, i_b, pos_v_closest, dyn_state.geoms, dyn_info.geoms, sdf_info)
+    sd_v_closest = sdf.sdf_func_world_local(i_gb, pos_v_closest, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
 
-    while True:
-        for i_neighbor_ in range(
-            collider_info.vert_neighbor_start[i_va],
-            collider_info.vert_neighbor_start[i_va] + collider_info.vert_n_neighbors[i_va],
-        ):
+    for _ in range(dyn_info.geoms.vert_end[i_ga] - dyn_info.geoms.vert_start[i_ga]):
+        i_va = i_v_closest
+        i_n_start = collider_info.vert_neighbor_start[i_va]
+        for i_neighbor_ in range(i_n_start, i_n_start + collider_info.vert_n_neighbors[i_va]):
             i_neighbor = collider_info.vert_neighbors[i_neighbor_]
             pos_neighbor = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
-            sd_neighbor = sdf.sdf_func_world(i_gb, i_b, pos_neighbor, dyn_state.geoms, dyn_info.geoms, sdf_info)
-            if sd_neighbor < sd_v_closest - 1e-5:  # 1e-5 (0.01mm) to avoid endless loop due to numerical instability
+            sd_neighbor = sdf.sdf_func_world_local(i_gb, pos_neighbor, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
+            if sd_neighbor < sd_v_closest:
                 i_v_closest = i_neighbor
                 sd_v_closest = sd_neighbor
                 pos_v_closest = pos_neighbor
-
-        if i_v_closest == i_va:  # no better neighbor
+        if i_v_closest == i_va:
             break
-        else:
-            i_va = i_v_closest
 
-    # i_va is the deepest vertex
-    pos_a = pos_v_closest
     if sd_v_closest < 0.0:
         is_col = True
-        normal = sdf.sdf_func_normal_world(i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info)
+        normal = sdf.sdf_func_normal_world_local(
+            i_gb, pos_v_closest, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+        )
         penetration = -sd_v_closest
-        contact_pos = pos_a
-    elif enable_edge_detection_fallback:  # check edge surrounding it
-        for i_neighbor_ in range(
-            collider_info.vert_neighbor_start[i_va],
-            collider_info.vert_neighbor_start[i_va] + collider_info.vert_n_neighbors[i_va],
-        ):
-            i_neighbor = collider_info.vert_neighbors[i_neighbor_]
+        contact_pos = pos_v_closest + 0.5 * penetration * normal
 
-            p_0 = pos_v_closest
-            p_1 = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
-            vec_01 = gu.qd_normalize(p_1 - p_0, EPS)
+    return is_col, normal, penetration, contact_pos
 
-            sdf_grad_0_b = sdf.sdf_func_grad_world(i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
-            sdf_grad_1_b = sdf.sdf_func_grad_world(i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
 
-            # check if the edge on a is facing towards mesh b (I am not 100% sure about this, subject to removal)
-            sdf_grad_0_a = sdf.sdf_func_grad_world(i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info)
-            sdf_grad_1_a = sdf.sdf_func_grad_world(i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info)
-            normal_edge_0 = sdf_grad_0_a - sdf_grad_0_a.dot(vec_01) * vec_01
-            normal_edge_1 = sdf_grad_1_a - sdf_grad_1_a.dot(vec_01) * vec_01
+@qd.func
+def func_contact_sdf(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
+):
+    """
+    Detect the deepest contact of a pair of geoms at the given poses by the signed distance field (SDF) of the geoms.
 
-            if normal_edge_0.dot(sdf_grad_0_b) < 0 or normal_edge_1.dot(sdf_grad_1_b) < 0:
-                # check if closest point is between the two points
-                if sdf_grad_0_b.dot(vec_01) < 0 and sdf_grad_1_b.dot(vec_01) > 0:
-                    cur_length = (p_1 - p_0).norm()
-                    ga_sdf_cell_size_vec = sdf_info.geoms_info.sdf_cell_size[i_ga]
-                    ga_sdf_cell_size = qd.min(
-                        qd.min(ga_sdf_cell_size_vec[0], ga_sdf_cell_size_vec[1]), ga_sdf_cell_size_vec[2]
-                    )
-                    while cur_length > ga_sdf_cell_size:
-                        p_mid = 0.5 * (p_0 + p_1)
-                        side = sdf.sdf_func_grad_world(i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, sdf_info).dot(
-                            vec_01
-                        )
-                        if side < 0:
-                            p_0 = p_mid
-                        else:
-                            p_1 = p_mid
+    A sphere A whose center lies where the SDF of B is exact is detected exactly against it. Otherwise, a pair of convex
+    geoms is detected both ways, the vertices of each against the SDF of the other, and keeps the deeper contact, a
+    plane taking part through its SDF alone. Any other pair is detected by the vertices of A against the SDF of B, the
+    caller placing at A the geom whose vertices penetrate. Returns whether the geoms collide, the normal pointing from B to A, the penetration and the midpoint
+    between the surfaces.
+    """
+    is_col = False
+    penetration = gs.qd_float(0.0)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
 
-                        cur_length = 0.5 * cur_length
+    # The signed distance at the center of a sphere is exact for an analytical SDF and inside the grid of a grid-based
+    # one, outside of which it is a proxy that overestimates the distance (see sdf_func_proxy_sdf)
+    is_sphere_exact = False
+    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE:
+        is_sphere_exact = (
+            dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE or dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.PLANE
+        )
+        if not is_sphere_exact:
+            pos_mesh = gu.qd_inv_transform_by_trans_quat(ga_pos, gb_pos, gb_quat)
+            pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_gb])
+            is_sphere_exact = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, sdf_info)
 
-                    p = 0.5 * (p_0 + p_1)
-                    new_penetration = -sdf.sdf_func_world(i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, sdf_info)
+    if is_sphere_exact:
+        is_col, normal, penetration, contact_pos = func_contact_sphere_sdf(
+            i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info, sdf_info
+        )
+    elif dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.is_convex[i_gb]:
+        for i_side in range(2):
+            i_g1, i_g2 = i_ga, i_gb
+            g1_pos, g1_quat, g2_pos, g2_quat = ga_pos, ga_quat, gb_pos, gb_quat
+            if i_side > 0:
+                i_g1, i_g2 = i_gb, i_ga
+                g1_pos, g1_quat, g2_pos, g2_quat = gb_pos, gb_quat, ga_pos, ga_quat
+            # The vertices of a plane bound a finite patch of an infinite surface, so they hold no contact
+            if dyn_info.geoms.type[i_g1] != gs.GEOM_TYPE.PLANE:
+                is_col_i, normal_i, penetration_i, contact_pos_i = func_contact_convex_convex_sdf(
+                    i_g1,
+                    i_g2,
+                    i_b,
+                    g1_pos,
+                    g1_quat,
+                    g2_pos,
+                    g2_quat,
+                    dyn_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    sdf_info,
+                )
+                if is_col_i and penetration_i > penetration:
+                    is_col = True
+                    normal = normal_i if i_side == 0 else -normal_i
+                    penetration = penetration_i
+                    contact_pos = contact_pos_i
+    else:
+        is_col, normal, penetration, contact_pos = func_contact_nonconvex_convex_sdf(
+            i_ga, i_gb, i_b, ga_pos, ga_quat, gb_pos, gb_quat, dyn_state, dyn_info, rigid_info, sdf_info
+        )
 
-                    if new_penetration > 0.0:
-                        is_col = True
-                        normal = sdf.sdf_func_normal_world(
-                            i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info
-                        )
-                        contact_pos = p
-                        penetration = new_penetration
-                        break
+    return is_col, normal, penetration, contact_pos
 
-    # The contact point must be offsetted by half the penetration depth, for consistency with MPR
-    contact_pos = contact_pos + 0.5 * penetration * normal
 
-    return is_col, normal, penetration, contact_pos, i_va
+@qd.func
+def func_add_contacts_sdf(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
+    rigid_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """
+    Add the contacts of a pair of geoms detected by their signed distance field (SDF) (see func_contact_sdf).
+
+    With multi-contact enabled, the pair is detected again with A and B rotated in opposite directions about the first
+    contact about two axes tangent to its normal, both ways, each contact found being mapped back onto the unperturbed geoms.
+    A sphere A touches B at a single point, so it is detected once.
+    """
+    EPS = rigid_info.EPS[None]
+    n_detections = qd.static(5 if rigid_config.enable_multi_contact else 1)
+
+    ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+    ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+    gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+    gb_quat = dyn_state.geoms.quat[i_gb, i_b]
+    tolerance = func_compute_mc_tolerance(i_ga, i_gb, dyn_info, rigid_info, collider_info, rigid_config)
+
+    normal_0 = qd.Vector.zero(gs.qd_float, 3)
+    contact_pos_0 = qd.Vector.zero(gs.qd_float, 3)
+    axis_0 = qd.Vector.zero(gs.qd_float, 3)
+    axis_1 = qd.Vector.zero(gs.qd_float, 3)
+    contacts_pos = qd.Matrix.zero(gs.qd_float, n_detections, 3)
+    n_con = 0
+    for i_detection in range(n_detections):
+        ga_pos_cur, ga_quat_cur, gb_pos_cur, gb_quat_cur = ga_pos, ga_quat, gb_pos, gb_quat
+        qrot = gu.qd_identity_quat()
+        if i_detection > 0:
+            # One axis at a time, both ways, as the convex narrowphase
+            axis = axis_0 if i_detection <= 2 else axis_1
+            angle_sign = 2 * ((i_detection - 1) % 2) - 1
+            qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+            ga_pos_cur, ga_quat_cur = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
+            gb_pos_cur, gb_quat_cur = func_rotate_frame(gb_pos, gb_quat, contact_pos_0, gu.qd_inv_quat(qrot))
+
+        is_col, normal, penetration, contact_pos = func_contact_sdf(
+            i_ga,
+            i_gb,
+            i_b,
+            ga_pos_cur,
+            ga_quat_cur,
+            gb_pos_cur,
+            gb_quat_cur,
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            collider_info,
+            sdf_info,
+        )
+
+        if i_detection == 0:
+            normal_0, contact_pos_0 = normal, contact_pos
+            if is_col:
+                axis_0, axis_1 = func_contact_orthogonals(
+                    i_ga, i_gb, i_b, normal, dyn_state, dyn_info, rigid_info, rigid_config
+                )
+        elif is_col:
+            # Map the material point of each geom back by undoing the rotation of its own geom, A having turned by qrot
+            # and B by its inverse. The contact lies on the patch of the first one, whose normal it takes, the depth
+            # being measured along it.
+            R = gu.qd_quat_to_R(qrot, EPS)
+            witness_a = R.transpose() @ (contact_pos - 0.5 * penetration * normal - contact_pos_0) + contact_pos_0
+            witness_b = R @ (contact_pos + 0.5 * penetration * normal - contact_pos_0) + contact_pos_0
+            normal = normal_0
+            penetration = normal.dot(witness_b - witness_a)
+            contact_pos = 0.5 * (witness_a + witness_b)
+            # A contact past the edge of the patch, which the unperturbed geoms do not reach, is dropped
+            is_col = penetration > -tolerance
+            penetration = qd.max(penetration, 0.0)
+
+        if is_col:
+            is_repeated = False
+            for i_c in range(n_con):
+                contact_pos_kept = qd.Vector(
+                    [contacts_pos[i_c, 0], contacts_pos[i_c, 1], contacts_pos[i_c, 2]], dt=gs.qd_float
+                )
+                if (contact_pos - contact_pos_kept).norm() < tolerance:
+                    is_repeated = True
+            if not is_repeated:
+                contact_pos = func_apply_smooth_refinement(
+                    i_ga,
+                    i_gb,
+                    normal,
+                    penetration,
+                    contact_pos,
+                    ga_pos,
+                    ga_quat,
+                    gb_pos,
+                    gb_quat,
+                    dyn_info,
+                    rigid_config,
+                )
+                for j in qd.static(range(3)):
+                    contacts_pos[n_con, j] = contact_pos[j]
+                n_con = n_con + 1
+                func_add_contact(
+                    i_ga,
+                    i_gb,
+                    i_b,
+                    i_pair,
+                    normal,
+                    contact_pos,
+                    penetration,
+                    dyn_state,
+                    collider_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    use_atomic=qd.static(rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL),
+                    errno=errno,
+                )
+
+        if i_detection == 0 and (not is_col or dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE):
+            break
 
 
 @qd.func
@@ -4947,3 +5103,108 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                             seeded=i_scan > 0,
                             errno=errno,
                         )
+
+
+@qd.func
+def func_narrow_phase_convex_vs_convex_sdf(
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
+    rigid_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """
+    Detect the contacts of the pairs of func_narrow_phase_convex_vs_convex by the signed distance field (SDF) of the
+    geoms (see func_add_contacts_sdf).
+
+    A sphere is placed at A, which detects it exactly against the SDF of the other geom.
+    """
+    _B = collider_state.active_buffer.shape[1]
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_b, i_pair in qd.ndrange(_B, collider_state.broad_collision_pairs.shape[0]):
+        if i_pair < collider_state.n_broad_pairs[i_b]:
+            i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
+            i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
+            if (
+                dyn_info.geoms.is_convex[i_ga]
+                and dyn_info.geoms.is_convex[i_gb]
+                and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
+                and not (
+                    rigid_config.box_box_detection
+                    and dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.BOX
+                    and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX
+                )
+                and not (
+                    dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX
+                )
+            ):
+                if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE:
+                    i_ga, i_gb = i_gb, i_ga
+                func_add_contacts_sdf(
+                    i_ga,
+                    i_gb,
+                    i_b,
+                    i_pair,
+                    dyn_state,
+                    collider_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    sdf_info,
+                    rigid_config,
+                    errno,
+                )
+
+
+@qd.func
+def func_narrow_phase_nonconvex_vs_nonterrain_sdf(
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
+    rigid_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """
+    Detect the contacts of the pairs of func_narrow_phase_nonconvex_vs_nonterrain by the deepest vertex of one geom in
+    the signed distance field (SDF) of the other (see func_add_contacts_sdf).
+
+    The geom with the smaller bounding box is placed at A, whose vertices are dense relative to the contact patch, a
+    plane being always B, while a sphere at A is detected exactly against the SDF of B.
+    """
+    _B = collider_state.active_buffer.shape[1]
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_b, i_pair in qd.ndrange(_B, collider_state.broad_collision_pairs.shape[0]):
+        if i_pair < collider_state.n_broad_pairs[i_b]:
+            i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
+            i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
+            if (
+                not (dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.is_convex[i_gb])
+                and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
+            ):
+                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                    i_ga, i_gb = i_gb, i_ga
+                elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
+                    diag_a_sq = (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]).norm_sqr()
+                    diag_b_sq = (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]).norm_sqr()
+                    if diag_a_sq > diag_b_sq:
+                        i_ga, i_gb = i_gb, i_ga
+                func_add_contacts_sdf(
+                    i_ga,
+                    i_gb,
+                    i_b,
+                    i_pair,
+                    dyn_state,
+                    collider_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    sdf_info,
+                    rigid_config,
+                    errno,
+                )

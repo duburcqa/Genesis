@@ -62,8 +62,10 @@ from .narrowphase import (
     func_narrow_phase_any_vs_terrain,
     func_narrow_phase_convex_specializations,
     func_narrow_phase_convex_vs_convex,
+    func_narrow_phase_convex_vs_convex_sdf,
     func_narrow_phase_diff_convex_vs_convex,
     func_narrow_phase_nonconvex_vs_nonterrain,
+    func_narrow_phase_nonconvex_vs_nonterrain_sdf,
     func_narrowphase_contact0,
     func_narrowphase_multicontact,
 )
@@ -1220,6 +1222,36 @@ class NonconvexNonconvex(Narrowphase):
         self, collider: Annotated[Collider, Enabled("has_nonconvex_pairs")], rigid_solver: RigidSolver, sdf: SDF
     ) -> None:
         pass
+
+
+class ConvexConvexSDF(ConvexConvexFirstContact, ConvexConvex[PerEnv], ConvexConvex[Queued]):
+    """
+    Detect the contacts of the convex pairs of ConvexConvex by the signed distance field (SDF) of the geoms, in place of
+    the convex narrowphases of both layouts, which it supersedes once requested (see 'Simulator.get_system').
+
+    A pair takes the deepest vertex of either geom in the SDF of the other, found by descending that SDF over the edge
+    graph of the geom, a sphere being detected exactly against the SDF of the other geom (see
+    func_narrow_phase_convex_vs_convex_sdf). The contacts carry no input for the differentiable reverse of the convex
+    narrowphase.
+    """
+
+    is_differentiable = False
+    detect = func_narrow_phase_convex_vs_convex_sdf
+
+    def __init__(
+        self, collider: Annotated[Collider, Enabled("has_convex_pairs")], rigid_solver: RigidSolver, sdf: SDF
+    ) -> None:
+        pass
+
+
+class NonconvexNonconvexSDF(NonconvexNonconvex):
+    """
+    Detect the contacts of the pairs holding a non-convex geom by the deepest vertex of the geom with the smaller
+    bounding box in the signed distance field (SDF) of the other, superseding NonconvexNonconvex once requested (see
+    'Simulator.get_system' and func_narrow_phase_nonconvex_vs_nonterrain_sdf).
+    """
+
+    detect = func_narrow_phase_nonconvex_vs_nonterrain_sdf
 
 
 @register_system
