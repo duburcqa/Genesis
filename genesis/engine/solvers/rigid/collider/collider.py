@@ -97,21 +97,13 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         self._options = options
 
     def build(self) -> None:
-        self._mc_perturbation = 1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 5e-3
-        self._mc_tolerance = 1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 1.5e-2
-        self._box_MAXCONPAIR = 16
-        self._diff_pos_tolerance = 1e-2
-        self._diff_normal_tolerance = 1e-2
-        self._prune_deep_penetration_ratio = 3.0
-        self._prune_max_contacts_per_link_pair = 32
-        self._prune_max_contacts_floor = 512
-
         self._init_static_config()
 
-        # Two threads per core fill the warp slots the register use of the terrain pass leaves
-        self._n_terrain_threads = 1
+        # The threads of the narrow phase of the terrain pairs: two per core fill the warp slots the register use of the
+        # terrain pass leaves
+        self.n_terrain_threads = 1
         if self.collider_config.has_terrain and gs.backend != gs.cpu:
-            self._n_terrain_threads = 2 * self.collider_config.gpu_cores
+            self.n_terrain_threads = 2 * self.collider_config.gpu_cores
 
         self._init_collision_fields()
 
@@ -227,7 +219,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     @property
     def has_primitive_pairs(self) -> bool:
         """Whether some pair of primitive geoms that a specialization handles can collide."""
-        return self.has_possible_pairs and self.collider_config.has_convex_specialization
+        return self.has_possible_pairs and self._has_convex_specialization
 
     @property
     def has_terrain_pairs(self) -> bool:
@@ -237,7 +229,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
     @property
     def has_nonconvex_pairs(self) -> bool:
         """Whether some pair of geoms holding a non-convex one, a terrain aside, can collide."""
-        return self.has_possible_pairs and self.collider_config.has_nonconvex_nonterrain
+        return self.has_possible_pairs and self._has_nonconvex_nonterrain
 
     @property
     def narrowphase_layout(self) -> type[Layout]:
@@ -249,16 +241,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         ):
             return Queued
         return PerEnv
-
-    @property
-    def is_pruning_cooperative(self) -> bool:
-        """Whether a warp prunes the contacts of an environment, rather than a thread."""
-        return self._use_coop_dedup
-
-    @property
-    def n_terrain_threads(self) -> int:
-        """The threads of the narrow phase of the terrain pairs."""
-        return self._n_terrain_threads
 
     def _init_static_config(self) -> None:
         # Identify the convex collision detection (ccd) algorithm
@@ -287,7 +269,10 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # as the geometry moves, losing constraint directions and letting bodies slip.
         n_contacts_per_nonconvex_pair = 40
         if self._options.box_box_detection and sum(g.type == gs.GEOM_TYPE.BOX for g in self._solver.geoms) > 1:
-            n_contacts_per_nonconvex_pair = max(n_contacts_per_nonconvex_pair, self._box_MAXCONPAIR)
+            n_contacts_per_nonconvex_pair = max(n_contacts_per_nonconvex_pair, 16)
+
+        self._geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=gs.np_int)
+        self._links_n_geoms = np.bincount(self._geoms_link_idx, minlength=self._solver.n_links_)
 
         # Compute collision pairs and algorithm flags in a single pass
         (
@@ -300,6 +285,15 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             has_nonconvex_nonterrain,
             self._large_contact_pair_mask,
         ) = self._compute_collision_pair_idx()
+        # The link pairs holding a valid geom pair and the one of each valid geom pair. A link pair is oriented with the
+        # link carrying the most geoms first, whose geoms the broad phase spreads its work over (see
+        # func_broad_phase_geoms).
+        valid_link_pairs, _, self._pairs_link_pair_idx, _ = unique_rows(
+            np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1)
+        )
+        is_swapped = self._links_n_geoms[valid_link_pairs[:, 1]] > self._links_n_geoms[valid_link_pairs[:, 0]]
+        valid_link_pairs[is_swapped] = valid_link_pairs[is_swapped, ::-1]
+        self._valid_link_pairs = valid_link_pairs
 
         # The hull prune drops a contact only from a (link_a, link_b) bucket of at least 3 contacts, the middle one of 3
         # collinear points being the smallest case, so the pass is compiled in whenever some pair of links can emit 3
@@ -307,32 +301,27 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # through their vertex-based narrowphase. A convex pair emits several through multi-contact detection or a box
         # specialization, unless it holds a sphere or an ellipsoid, which leaves it a single point. Outside performance
         # mode the pass is always compiled in, being a no-op wherever it would be left out.
-        self._geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=gs.np_int)
-        self._links_n_geoms = np.bincount(self._geoms_link_idx, minlength=self._solver.n_links_)
-
         has_prunable_contacts = gs.use_ndarray or has_nonconvex_nonterrain or has_terrain
         if not has_prunable_contacts and len(self._valid_collision_pairs):
             geoms_type = np.array([geom.type for geom in self._solver.geoms])
             pairs_type = geoms_type[self._valid_collision_pairs]
-            pairs_link_idx = np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1)
             is_point_pair = np.isin(pairs_type, (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)).any(axis=1)
             is_multi_point_pair = ~is_point_pair & (
                 self._options.enable_multi_contact | (pairs_type == gs.GEOM_TYPE.BOX).any(axis=1)
             )
-            _, _, links_pair_idx, _ = unique_rows(pairs_link_idx)
-            links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
+            links_pair_n_contacts = np.bincount(self._pairs_link_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
+        # Outside performance mode the box specializations are always compiled in, their pass finding nothing in a scene
+        # without box pairs, which every other path leaves to it by geom type.
+        self._has_convex_specialization = has_convex_specialization or gs.use_ndarray
+        self._has_nonconvex_nonterrain = has_nonconvex_nonterrain
         self.collider_config = ColliderStaticConfig(
             gpu_cores=get_gpu_core_count(),
             has_terrain=has_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
             # narrowphase finding nothing in a scene whose convex pairs all take a box specialization.
             has_non_box_plane_convex_convex=has_non_box_plane_convex_convex or gs.use_ndarray,
-            # Outside performance mode the box specializations are always compiled in, their pass finding nothing in a
-            # scene without box pairs, which every other path leaves to it by geom type.
-            has_convex_specialization=has_convex_specialization or gs.use_ndarray,
-            has_nonconvex_nonterrain=has_nonconvex_nonterrain,
             has_prunable_contacts=has_prunable_contacts,
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
@@ -344,15 +333,11 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         vert_neighbors, vert_neighbor_start, vert_n_neighbors = self._compute_verts_connectivity()
         n_vert_neighbors = len(vert_neighbors)
 
-        # The link pairs holding a valid geom pair, oriented with the link carrying the most geoms first, whose geoms
-        # the broad phase spreads its work over (see func_broad_phase_geoms).
-        valid_link_pairs, *_ = unique_rows(np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1))
-        is_swapped = self._links_n_geoms[valid_link_pairs[:, 1]] > self._links_n_geoms[valid_link_pairs[:, 0]]
-        valid_link_pairs[is_swapped] = valid_link_pairs[is_swapped, ::-1]
-        n_valid_link_pairs = len(valid_link_pairs)
+        n_valid_link_pairs = len(self._valid_link_pairs)
         link_pair_idx = np.full((self._solver.n_links_, self._solver.n_links_), fill_value=-1, dtype=gs.np_int)
-        link_pair_idx[valid_link_pairs[:, 0], valid_link_pairs[:, 1]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
-        link_pair_idx[valid_link_pairs[:, 1], valid_link_pairs[:, 0]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
+        links_a_idx, links_b_idx = self._valid_link_pairs.T
+        link_pair_idx[links_a_idx, links_b_idx] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
+        link_pair_idx[links_b_idx, links_a_idx] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
 
         n_possible_nonconvex_pairs = int(np.count_nonzero(self._large_contact_pair_mask))
         max_collision_pairs = min(self._solver.max_collision_pairs, self._n_possible_pairs)
@@ -370,23 +355,18 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         )
 
         # The constraint solver only sees the contacts surviving link-pair pruning, roughly the support polygon of each
-        # link pair, so its budget caps a link pair at _prune_max_contacts_per_link_pair points. A conforming patch is
-        # left unpruned and can exceed it, which halts the simulation with a request to increase 'max_contacts'. The
-        # floor keeps that risk away from small scenes, where the cap would save no meaningful memory.
+        # link pair, so its budget caps a link pair at 32 points. A conforming patch is left unpruned and can exceed it,
+        # which halts the simulation with a request to increase 'max_contacts'. The floor of 512 keeps that risk away
+        # from small scenes, where the cap would save no meaningful memory.
         max_contacts = max_candidate_contacts
         if (
             self.collider_config.has_prunable_contacts
             and not self._solver.requires_grad
             and self._options.contact_pruning_tolerance is not None
         ):
-            geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
-            pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
-            pairs_key = self._solver.n_links * pairs_link_idx.min(axis=1) + pairs_link_idx.max(axis=1)
-            _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)
             pairs_n_contacts = np.where(self._large_contact_pair_mask, cap_nonconvex, cap_convex)
-            link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts)
-            max_contacts_pruned = np.minimum(link_pairs_n_contacts, self._prune_max_contacts_per_link_pair)
-            max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
+            link_pairs_n_contacts = np.bincount(self._pairs_link_pair_idx, weights=pairs_n_contacts)
+            max_contacts_pruned_total = max(int(np.minimum(link_pairs_n_contacts, 32).sum()), 512)
             max_contacts = min(max_contacts, max_contacts_pruned_total)
 
         # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in
@@ -420,14 +400,14 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 max_collision_pairs_broad=max_collision_pairs_broad,
                 max_contacts=options.max_contacts,
                 n_valid_link_pairs=n_valid_link_pairs,
-                mc_perturbation=self._mc_perturbation,
-                mc_tolerance=self._mc_tolerance,
-                diff_pos_tolerance=self._diff_pos_tolerance,
-                diff_normal_tolerance=self._diff_normal_tolerance,
+                mc_perturbation=1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 5e-3,
+                mc_tolerance=1e-3 if self._solver.rigid_config.enable_mujoco_compatibility else 1.5e-2,
+                diff_pos_tolerance=1e-2,
+                diff_normal_tolerance=1e-2,
                 diff_contact_eps_boundary=1e-2,
                 diff_contact_eps_distance=1e-2,
                 contact_pruning_tolerance=self._options.contact_pruning_tolerance or 0.0,
-                prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
+                prune_deep_penetration_ratio=3.0,
             ),
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
@@ -447,7 +427,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
             self.collider_info.links_init_aabb_min.from_numpy(links_init_aabb_min.astype(gs.np_float))
             self.collider_info.links_init_aabb_max.from_numpy(links_init_aabb_max.astype(gs.np_float))
         if n_valid_link_pairs > 0:
-            self.collider_info.valid_link_pairs.from_numpy(valid_link_pairs)
+            self.collider_info.valid_link_pairs.from_numpy(self._valid_link_pairs)
         self._init_verts_connectivity(vert_neighbors, vert_neighbor_start, vert_n_neighbors)
         self._init_verts_spatial_grid()
         self._init_terrain_state()
@@ -465,7 +445,7 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 candidate_contacts=max_candidate_contacts,
                 nonconvex_pair_contacts=self.collider_config.n_contacts_per_nonconvex_pair,
                 contact_slots=1 if self._options.enable_contact_patch else 5,
-                terrain_threads=self._n_terrain_threads,
+                terrain_threads=self.n_terrain_threads,
             ),
             layout={ColliderState.contact_sort_key: True, "pruning": True},
             unused=dict(
@@ -483,9 +463,10 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # 'contact_data_cache' is not used in Quadrants kernels, so keep it outside of the collider state / info
         self._contact_data_cache: dict[tuple[bool, bool], dict[str, torch.Tensor | tuple[torch.Tensor]]] = {}
 
-        # The warp-per-env cooperative dedup kernel beats the one-env-per-thread fused kernel only while the GPU keeps
-        # spare occupancy: past half the cores in envs, the launch oversubscribes the SMs and the fused kernel wins.
-        self._use_coop_dedup = (
+        # Whether a warp prunes the contacts of an environment, rather than a thread. The warp-per-env cooperative dedup
+        # kernel beats the one-env-per-thread fused kernel only while the GPU keeps spare occupancy: past half the cores
+        # in envs, the launch oversubscribes the SMs and the fused kernel wins.
+        self.is_pruning_cooperative = (
             gs.backend != gs.cpu
             and not self._solver.rigid_config.requires_grad
             and self.collider_config.has_prunable_contacts
@@ -517,7 +498,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         links_idx_simulated = set() if coupler is None else coupler.rigid_links_idx_simulated
 
         # Pre-compute per-geom properties into numpy arrays for vectorized filtering
-        geom_link_idx = np.array([g.link.idx for g in geoms], dtype=np.int32)
         geom_root_idx = np.array([g.link.root_idx for g in geoms], dtype=np.int32)
         geom_is_fixed = np.array([g.link.is_fixed for g in geoms], dtype=bool)
         geom_entity_id = np.array([id(g.entity) for g in geoms], dtype=np.int64)
@@ -539,8 +519,8 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
         # --- Vectorized filtering: build upper-triangular valid-pair mask ---
         row, col = np.triu_indices(n_geoms, k=1)
 
-        link_a = geom_link_idx[row]
-        link_b = geom_link_idx[col]
+        link_a = self._geoms_link_idx[row]
+        link_b = self._geoms_link_idx[col]
 
         # geoms in the same link
         valid = link_a != link_b

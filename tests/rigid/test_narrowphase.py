@@ -947,7 +947,7 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
     yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
     offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
     box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
-    corners_tol = scene.sim.get_system(Collider)._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
+    corners_tol = scene.sim.get_system(Collider).collider_info.mc_tolerance[None] * 0.5 * np.linalg.norm(BOX_SIZE)
     box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
     box.set_quat(np.stack((np.cos(0.5 * yaw), np.zeros(N_ENVS), np.zeros(N_ENVS), np.sin(0.5 * yaw)), axis=-1))
     scene.step()
@@ -1087,7 +1087,7 @@ def test_maximum_contact_area(show_viewer, tol):
     yaws = np.tile(2.0 * np.pi * np.arange(N_YAWS) / N_YAWS, len(SCALES))
     quats_yaw = gu.rotvec_to_quat(yaws[:, None] * np.array((0.0, 0.0, 1.0)))
     envs_corners = [np.pad(tops_corners[i_b // N_YAWS], ((0, 0), (0, 1))) for i_b in range(scene.n_envs)]
-    tilt_max = TILT_RATIO * scene.sim.get_system(Collider)._mc_perturbation
+    tilt_max = TILT_RATIO * scene.sim.get_system(Collider).collider_info.mc_perturbation[None]
     for _ in range(N_TRIALS):
         # The narrow pillar lies inside the disk that the wide section contains, anywhere within it, with its deepest
         # corner pressed into the wide one by the penetration

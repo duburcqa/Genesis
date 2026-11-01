@@ -4449,75 +4449,74 @@ def func_narrow_phase_any_vs_terrain(
     balances the blocks whatever the cost of their pairs. A block detects its pair with its lanes (see
     func_contact_mpr_terrain), every thread on its own slot of mpr_state and of the prism scratch.
     """
-    if qd.static(collider_config.has_terrain):
-        is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
-        BLOCK_DIM = qd.static(32 if is_coop else 1)
-        _B = collider_state.active_buffer.shape[1]
-        max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
-        n_threads = collider_state.prism.shape[1]
+    is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
+    BLOCK_DIM = qd.static(32 if is_coop else 1)
+    _B = collider_state.active_buffer.shape[1]
+    max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
+    n_threads = collider_state.prism.shape[1]
 
-        # The top-level loops of a kernel run in order, so the reset costs no launch of its own
-        for _ in range(1):
-            collider_state.work_queue.n_pairs[0] = 0
-            collider_state.work_queue.n_claimed[0] = 0
+    # The top-level loops of a kernel run in order, so the reset costs no launch of its own
+    for _ in range(1):
+        collider_state.work_queue.n_pairs[0] = 0
+        collider_state.work_queue.n_claimed[0] = 0
 
-        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_b, i_pair in qd.ndrange(_B, max_broad_pairs):
-            if i_pair < collider_state.n_broad_pairs[i_b]:
-                i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
-                i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
-                if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.TERRAIN:
-                    # The terrain is detected against the convex hull of the other geom, which would fill the cavities
-                    # of a non-convex geom
-                    if dyn_info.geoms.is_convex[i_ga]:
-                        i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
-                        collider_state.work_queue.i_b[i_work] = i_b
-                        collider_state.work_queue.i_ga[i_work] = i_ga
-                        collider_state.work_queue.i_gb[i_work] = i_gb
-                    else:
-                        func_flag_error(i_b, RigidErrorCode.UNSUPPORTED_COLLISION_PAIR, errno)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_b, i_pair in qd.ndrange(_B, max_broad_pairs):
+        if i_pair < collider_state.n_broad_pairs[i_b]:
+            i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
+            i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
+            if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.TERRAIN:
+                # The terrain is detected against the convex hull of the other geom, which would fill the cavities
+                # of a non-convex geom
+                if dyn_info.geoms.is_convex[i_ga]:
+                    i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
+                    collider_state.work_queue.i_b[i_work] = i_b
+                    collider_state.work_queue.i_ga[i_work] = i_ga
+                    collider_state.work_queue.i_gb[i_work] = i_gb
+                else:
+                    func_flag_error(i_b, RigidErrorCode.UNSUPPORTED_COLLISION_PAIR, errno)
 
-        qd.loop_config(
-            name="narrowphase_terrain",
-            serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL,
-            block_dim=qd.static(BLOCK_DIM if is_coop else None),
-        )
-        for i_scratch in range(n_threads):
-            tid = i_scratch % BLOCK_DIM
-            n_queue = collider_state.work_queue.n_pairs[0]
-            # A block takes its first pair by its rank and the next ones from the counter, which spares an atomic to the
-            # blocks a short queue leaves idle
-            i_work = i_scratch // BLOCK_DIM
-            for i_claim_ in range(n_queue + 1):
-                if i_claim_ > 0:
-                    # One claim per block, issued by its first lane
-                    i_claim = 0
-                    if tid == 0:
-                        i_claim = qd.atomic_add(collider_state.work_queue.n_claimed[0], 1)
-                    if qd.static(BLOCK_DIM > 1):
-                        i_claim = su.qd_block_shuffle(i_claim, 0)
-                    i_work = n_threads // BLOCK_DIM + i_claim
-                if i_work >= n_queue:
-                    break
-                func_contact_mpr_terrain(
-                    collider_state.work_queue.i_ga[i_work],
-                    collider_state.work_queue.i_gb[i_work],
-                    i_scratch,
-                    collider_state.work_queue.i_b[i_work],
-                    tid,
-                    dyn_state,
-                    collider_state,
-                    mpr_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    mpr_info,
-                    support_field_info,
-                    rigid_config,
-                    collider_config,
-                    block_dim=BLOCK_DIM,
-                    errno=errno,
-                )
+    qd.loop_config(
+        name="narrowphase_terrain",
+        serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL,
+        block_dim=qd.static(BLOCK_DIM if is_coop else None),
+    )
+    for i_scratch in range(n_threads):
+        tid = i_scratch % BLOCK_DIM
+        n_queue = collider_state.work_queue.n_pairs[0]
+        # A block takes its first pair by its rank and the next ones from the counter, which spares an atomic to the
+        # blocks a short queue leaves idle
+        i_work = i_scratch // BLOCK_DIM
+        for i_claim_ in range(n_queue + 1):
+            if i_claim_ > 0:
+                # One claim per block, issued by its first lane
+                i_claim = 0
+                if tid == 0:
+                    i_claim = qd.atomic_add(collider_state.work_queue.n_claimed[0], 1)
+                if qd.static(BLOCK_DIM > 1):
+                    i_claim = su.qd_block_shuffle(i_claim, 0)
+                i_work = n_threads // BLOCK_DIM + i_claim
+            if i_work >= n_queue:
+                break
+            func_contact_mpr_terrain(
+                collider_state.work_queue.i_ga[i_work],
+                collider_state.work_queue.i_gb[i_work],
+                i_scratch,
+                collider_state.work_queue.i_b[i_work],
+                tid,
+                dyn_state,
+                collider_state,
+                mpr_state,
+                dyn_info,
+                rigid_info,
+                collider_info,
+                mpr_info,
+                support_field_info,
+                rigid_config,
+                collider_config,
+                block_dim=BLOCK_DIM,
+                errno=errno,
+            )
 
 
 @qd.func
@@ -4532,115 +4531,147 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
     collider_config: qd.template(),
     errno: qd.Tensor,
 ):
-    if qd.static(collider_config.has_nonconvex_nonterrain):
-        n_max = qd.static(collider_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
-        # The pairs of an env are split over chunks, every pair detected by one block whose lanes split its work. Pair
-        # costs span orders of magnitude, so the chunks outnumber the blocks the GPU holds at once 8 times, capped by
-        # the pairs an env can hold, a block done early taking the next one. They run chunk by chunk over the envs,
-        # which keeps the loaded chunks of envs with few pairs side by side.
-        is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
-        BLOCK_DIM = qd.static(32 if is_coop else 1)
-        _B = collider_state.active_buffer.shape[1]
-        max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
-        n_chunks = qd.max(qd.min((8 * collider_config.gpu_cores // BLOCK_DIM + _B - 1) // _B, max_broad_pairs), 1)
-        qd.loop_config(
-            name="narrowphase_nonconvex",
-            serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL,
-            block_dim=qd.static(BLOCK_DIM if is_coop else None),
-        )
-        for i_flat in range(_B * n_chunks * BLOCK_DIM):
-            tid = i_flat % BLOCK_DIM
-            i_b_chunk = i_flat // BLOCK_DIM
-            i_b = i_b_chunk % _B
-            i_chunk = i_b_chunk // _B
-            n_pairs = qd.min(collider_state.n_broad_pairs[i_b], max_broad_pairs)
-            for i_pair in range(i_chunk * n_pairs // n_chunks, (i_chunk + 1) * n_pairs // n_chunks):
-                i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
-                i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
-                if (
-                    not (dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.is_convex[i_gb])
-                    and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
-                ):
-                    # Place the bounded side at i_ga: the polytope helper iterates A's verts and queries B's SDF.
-                    # PLANE has infinite extent so it must be i_gb. For non-PLANE pairs the smaller-AABB side goes to
-                    # i_ga (its verts are dense relative to the contact patch, while the larger side's scan wastes
-                    # cycles on verts far from any contact). The type-ascending order of the pair is the tiebreaker so
-                    # smooth primitives (SPHERE/ELLIPSOID/CAPSULE) stay at i_ga, matching the smooth-contact refinement
-                    # convention shared with the convex-vs-convex narrowphase.
-                    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+    n_max = qd.static(collider_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
+    # The pairs of an env are split over chunks, every pair detected by one block whose lanes split its work. Pair
+    # costs span orders of magnitude, so the chunks outnumber the blocks the GPU holds at once 8 times, capped by
+    # the pairs an env can hold, a block done early taking the next one. They run chunk by chunk over the envs,
+    # which keeps the loaded chunks of envs with few pairs side by side.
+    is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
+    BLOCK_DIM = qd.static(32 if is_coop else 1)
+    _B = collider_state.active_buffer.shape[1]
+    max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
+    n_chunks = qd.max(qd.min((8 * collider_config.gpu_cores // BLOCK_DIM + _B - 1) // _B, max_broad_pairs), 1)
+    qd.loop_config(
+        name="narrowphase_nonconvex",
+        serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL,
+        block_dim=qd.static(BLOCK_DIM if is_coop else None),
+    )
+    for i_flat in range(_B * n_chunks * BLOCK_DIM):
+        tid = i_flat % BLOCK_DIM
+        i_b_chunk = i_flat // BLOCK_DIM
+        i_b = i_b_chunk % _B
+        i_chunk = i_b_chunk // _B
+        n_pairs = qd.min(collider_state.n_broad_pairs[i_b], max_broad_pairs)
+        for i_pair in range(i_chunk * n_pairs // n_chunks, (i_chunk + 1) * n_pairs // n_chunks):
+            i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
+            i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
+            if (
+                not (dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.is_convex[i_gb])
+                and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
+            ):
+                # Place the bounded side at i_ga: the polytope helper iterates A's verts and queries B's SDF.
+                # PLANE has infinite extent so it must be i_gb. For non-PLANE pairs the smaller-AABB side goes to
+                # i_ga (its verts are dense relative to the contact patch, while the larger side's scan wastes
+                # cycles on verts far from any contact). The type-ascending order of the pair is the tiebreaker so
+                # smooth primitives (SPHERE/ELLIPSOID/CAPSULE) stay at i_ga, matching the smooth-contact refinement
+                # convention shared with the convex-vs-convex narrowphase.
+                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                    i_ga, i_gb = i_gb, i_ga
+                elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
+                    diag_a_sq = (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]).norm_sqr()
+                    diag_b_sq = (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]).norm_sqr()
+                    if diag_a_sq > diag_b_sq:
                         i_ga, i_gb = i_gb, i_ga
-                    elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
-                        diag_a_sq = (
-                            rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]
-                        ).norm_sqr()
-                        diag_b_sq = (
-                            rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]
-                        ).norm_sqr()
-                        if diag_a_sq > diag_b_sq:
-                            i_ga, i_gb = i_gb, i_ga
 
-                    tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
-                        i_ga, i_gb, dyn_info, rigid_info
-                    )
+                tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
+                    i_ga, i_gb, dyn_info, rigid_info
+                )
 
-                    # enable_multi_contact controls how many contacts the helper emits per pair (n_max=1 vs
-                    # n_contacts_per_convex_pair); the dispatch is unconditional so disabling multi-contact never drops
-                    # collisions.
-                    ga_pos = dyn_state.geoms.pos[i_ga, i_b]
-                    ga_quat = dyn_state.geoms.quat[i_ga, i_b]
-                    gb_pos = dyn_state.geoms.pos[i_gb, i_b]
-                    gb_quat = dyn_state.geoms.quat[i_gb, i_b]
-                    # Nested-shell pair detection: BOTH bodies hollow (their own centers sit in their cavities),
-                    # A's center outside B's material, comparable sizes. Such pairs contact along an annular line
-                    # where the per-vertex manifold churns, so they use the sector-aggregated manifold; every other
-                    # pair - including a hollow body near a solid one (nut around a bolt) - keeps the per-vertex one.
-                    is_shell_pair = False
-                    center_a_w = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos, ga_quat)
-                    rb_a_sq = gs.qd_float(0.0)
-                    rb_b_sq = gs.qd_float(0.0)
-                    for k in qd.static(range(8)):
-                        d_a = rigid_info.geoms_init_AABB[i_ga, k] - dyn_info.geoms.center[i_ga]
-                        d_b = rigid_info.geoms_init_AABB[i_gb, k] - dyn_info.geoms.center[i_gb]
-                        if d_a.dot(d_a) > rb_a_sq:
-                            rb_a_sq = d_a.dot(d_a)
-                        if d_b.dot(d_b) > rb_b_sq:
-                            rb_b_sq = d_b.dot(d_b)
-                    sd_center_ab = sdf.sdf_func_world_local(i_gb, center_a_w, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
-                    # Nested-only: A's center must lie inside B's local AABB. Adjacent shells share every
-                    # other property of a nested pair, but their contact is a small lens ON the closing
-                    # line, where the azimuthal sectors degenerate to a single bucket and the aggregate
-                    # churns (cm-scale contact relocation every step, with intermittently silent steps);
-                    # the per-vertex manifold handles them well. The two populations sit far from this
-                    # boundary - a nested center is deep inside, an adjacent center a full bound outside -
-                    # so the gate is stable in practice.
-                    center_a_in_b = gu.qd_inv_transform_by_trans_quat(center_a_w, gb_pos, gb_quat)
-                    is_nested = True
-                    for j in qd.static(range(3)):
-                        if (
-                            center_a_in_b[j] < rigid_info.geoms_init_AABB[i_gb, 0][j]
-                            or center_a_in_b[j] > rigid_info.geoms_init_AABB[i_gb, 7][j]
-                        ):
-                            is_nested = False
+                # enable_multi_contact controls how many contacts the helper emits per pair (n_max=1 vs
+                # n_contacts_per_convex_pair); the dispatch is unconditional so disabling multi-contact never drops
+                # collisions.
+                ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+                ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+                gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+                gb_quat = dyn_state.geoms.quat[i_gb, i_b]
+                # Nested-shell pair detection: BOTH bodies hollow (their own centers sit in their cavities),
+                # A's center outside B's material, comparable sizes. Such pairs contact along an annular line
+                # where the per-vertex manifold churns, so they use the sector-aggregated manifold; every other
+                # pair - including a hollow body near a solid one (nut around a bolt) - keeps the per-vertex one.
+                is_shell_pair = False
+                center_a_w = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos, ga_quat)
+                rb_a_sq = gs.qd_float(0.0)
+                rb_b_sq = gs.qd_float(0.0)
+                for k in qd.static(range(8)):
+                    d_a = rigid_info.geoms_init_AABB[i_ga, k] - dyn_info.geoms.center[i_ga]
+                    d_b = rigid_info.geoms_init_AABB[i_gb, k] - dyn_info.geoms.center[i_gb]
+                    if d_a.dot(d_a) > rb_a_sq:
+                        rb_a_sq = d_a.dot(d_a)
+                    if d_b.dot(d_b) > rb_b_sq:
+                        rb_b_sq = d_b.dot(d_b)
+                sd_center_ab = sdf.sdf_func_world_local(i_gb, center_a_w, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
+                # Nested-only: A's center must lie inside B's local AABB. Adjacent shells share every
+                # other property of a nested pair, but their contact is a small lens ON the closing
+                # line, where the azimuthal sectors degenerate to a single bucket and the aggregate
+                # churns (cm-scale contact relocation every step, with intermittently silent steps);
+                # the per-vertex manifold handles them well. The two populations sit far from this
+                # boundary - a nested center is deep inside, an adjacent center a full bound outside -
+                # so the gate is stable in practice.
+                center_a_in_b = gu.qd_inv_transform_by_trans_quat(center_a_w, gb_pos, gb_quat)
+                is_nested = True
+                for j in qd.static(range(3)):
                     if (
-                        is_nested
-                        and dyn_info.geoms.is_hollow[i_ga]
-                        and dyn_info.geoms.is_hollow[i_gb]
-                        and qd.abs(sd_center_ab) < qd.sqrt(rb_a_sq)
-                        and rb_a_sq > 0.25 * rb_b_sq
-                        and sd_center_ab >= 0.0
+                        center_a_in_b[j] < rigid_info.geoms_init_AABB[i_gb, 0][j]
+                        or center_a_in_b[j] > rigid_info.geoms_init_AABB[i_gb, 7][j]
                     ):
-                        is_shell_pair = True
-                    if is_shell_pair and tid == 0:
-                        func_add_polytope_vertex_contacts_sdf_shell(
-                            i_ga,
-                            i_gb,
+                        is_nested = False
+                if (
+                    is_nested
+                    and dyn_info.geoms.is_hollow[i_ga]
+                    and dyn_info.geoms.is_hollow[i_gb]
+                    and qd.abs(sd_center_ab) < qd.sqrt(rb_a_sq)
+                    and rb_a_sq > 0.25 * rb_b_sq
+                    and sd_center_ab >= 0.0
+                ):
+                    is_shell_pair = True
+                if is_shell_pair and tid == 0:
+                    func_add_polytope_vertex_contacts_sdf_shell(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_pair,
+                        ga_pos,
+                        ga_quat,
+                        gb_pos,
+                        gb_quat,
+                        tolerance,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        sdf_info,
+                        rigid_config,
+                        collider_config,
+                        errno,
+                    )
+                elif not is_shell_pair:
+                    # Swapped-role verification: A's vertex scan cannot see a feature of B crossing one of A's
+                    # faces BETWEEN A's verts, so B's verts are checked against A's SDF as well - as a seeded
+                    # local search rather than a full scan. Skipped only for PLANE (its handful of far-flung
+                    # verts carry no contact information).
+                    n_scans = 1 if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.PLANE else 2
+                    n_added = 0
+                    contacts_slot = qd.Vector.zero(gs.qd_int, (n_max + BLOCK_DIM - 1) // BLOCK_DIM)
+                    for i_scan in range(n_scans):
+                        i_g1, i_g2 = i_ga, i_gb
+                        g1_pos, g1_quat, g2_pos, g2_quat = ga_pos, ga_quat, gb_pos, gb_quat
+                        if i_scan > 0:
+                            i_g1, i_g2 = i_gb, i_ga
+                            g1_pos, g1_quat, g2_pos, g2_quat = gb_pos, gb_quat, ga_pos, ga_quat
+                        n_added, contacts_slot = func_add_polytope_vertex_contacts_sdf(
+                            i_g1,
+                            i_g2,
                             i_b,
                             i_pair,
-                            ga_pos,
-                            ga_quat,
-                            gb_pos,
-                            gb_quat,
+                            tid,
+                            g1_pos,
+                            g1_quat,
+                            g2_pos,
+                            g2_quat,
                             tolerance,
+                            n_added,
+                            contacts_slot,
                             dyn_state,
                             collider_state,
                             dyn_info,
@@ -4649,44 +4680,7 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                             sdf_info,
                             rigid_config,
                             collider_config,
-                            errno,
+                            block_dim=BLOCK_DIM,
+                            seeded=i_scan > 0,
+                            errno=errno,
                         )
-                    elif not is_shell_pair:
-                        # Swapped-role verification: A's vertex scan cannot see a feature of B crossing one of A's
-                        # faces BETWEEN A's verts, so B's verts are checked against A's SDF as well - as a seeded
-                        # local search rather than a full scan. Skipped only for PLANE (its handful of far-flung
-                        # verts carry no contact information).
-                        n_scans = 1 if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.PLANE else 2
-                        n_added = 0
-                        contacts_slot = qd.Vector.zero(gs.qd_int, (n_max + BLOCK_DIM - 1) // BLOCK_DIM)
-                        for i_scan in range(n_scans):
-                            i_g1, i_g2 = i_ga, i_gb
-                            g1_pos, g1_quat, g2_pos, g2_quat = ga_pos, ga_quat, gb_pos, gb_quat
-                            if i_scan > 0:
-                                i_g1, i_g2 = i_gb, i_ga
-                                g1_pos, g1_quat, g2_pos, g2_quat = gb_pos, gb_quat, ga_pos, ga_quat
-                            n_added, contacts_slot = func_add_polytope_vertex_contacts_sdf(
-                                i_g1,
-                                i_g2,
-                                i_b,
-                                i_pair,
-                                tid,
-                                g1_pos,
-                                g1_quat,
-                                g2_pos,
-                                g2_quat,
-                                tolerance,
-                                n_added,
-                                contacts_slot,
-                                dyn_state,
-                                collider_state,
-                                dyn_info,
-                                rigid_info,
-                                collider_info,
-                                sdf_info,
-                                rigid_config,
-                                collider_config,
-                                block_dim=BLOCK_DIM,
-                                seeded=i_scan > 0,
-                                errno=errno,
-                            )

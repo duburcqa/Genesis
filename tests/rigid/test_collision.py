@@ -562,7 +562,7 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
     pairs_scale = np.linalg.norm(boxes_half, axis=-1).min(axis=-1)
     # Multi-contact detection tilts each box of a pair about its first contact by the perturbation angle. A point found
     # in the tilted pose moves by up to this angle times the diameter of its box, as does the overlap along any normal.
-    pairs_tol = 2.0 * scene.sim.get_system(Collider)._mc_perturbation * pairs_size
+    pairs_tol = 2.0 * scene.sim.get_system(Collider).collider_info.mc_perturbation[None] * pairs_size
 
     links_pair_idx = np.full(scene.rigid_solver.n_links, -1)
     links_box_idx = np.full(scene.rigid_solver.n_links, -1)
@@ -1061,7 +1061,7 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                             corners_pair_dist = np.linalg.norm(patch[:, None] - pair_pos, axis=-1)
                             corners_dist = corners_pair_dist.min(axis=-1, initial=np.inf)
                             pair_scale = np.linalg.norm(links_half[[i_lower, i_upper], i_b], axis=-1).min()
-                            corners_tol = scene.sim.get_system(Collider)._mc_tolerance * pair_scale
+                            corners_tol = scene.sim.get_system(Collider).collider_info.mc_tolerance[None] * pair_scale
                             assert (corners_dist[is_pressed & is_kept] < corners_tol).all()
 
                         # Otherwise, detection reports only a few points per pair, so their hull only has to span the

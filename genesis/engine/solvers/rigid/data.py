@@ -678,8 +678,6 @@ class ColliderStaticConfig(StaticConfig):
     # split narrowphase on GPU, func_narrow_phase_convex_vs_convex on CPU. It also gates the deterministic contact sort
     # (see func_sort_contacts). See its resolution in collider.py.
     has_non_box_plane_convex_convex: bool
-    has_convex_specialization: bool
-    has_nonconvex_nonterrain: bool
     # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
     # Contacts a convex pair and a nonconvex (vertex-versus-SDF) pair hold at most, the second one at least the first
