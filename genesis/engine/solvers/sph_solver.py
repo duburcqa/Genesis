@@ -339,6 +339,8 @@ class SPHSolver(ParticleSolver):
 # ------------------------------------------------------------------------------------
 
 
+# FIXME: quadrants#1036 - a func takes no subclass of its struct annotation, so the neighbour search, the sort and the
+# copy back of the sorted particles repeat those of the PBD solver.
 @qd.func
 def func_for_all_neighbors(
     i_p: int,

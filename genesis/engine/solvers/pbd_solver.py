@@ -1,4 +1,5 @@
 import math
+from functools import partial
 
 import numpy as np
 
@@ -230,78 +231,29 @@ class PBDSolver(ParticleSolver):
 
         self._build_gravity(self.pbd_info.gravity)
 
-    def add_uvs_and_faces(self, vvert_start, vface_start, uvs, faces):
+    def add_uvs_and_faces(self, *args):
         """Add the render UVs and faces of an entity, an empty `uvs` leaving its slice of the UV buffer zeroed."""
-        kernel_add_uvs_and_faces(vvert_start, vface_start, uvs, faces, self.pbd_info)
+        kernel_add_uvs_and_faces(*args, self.pbd_info)
 
-    def add_vverts(self, vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local):
+    def add_vverts(self, *args):
         """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""
-        kernel_add_vverts(
-            vvert_start, particle_start, vverts, particles, P_invs, support_idxs_local, self.pbd_info.vverts
-        )
+        kernel_add_vverts(*args, self.pbd_info.vverts)
 
-    def add_particles(
-        self,
-        particle_start,
-        active,
-        material_type,
-        mass,
-        rho_rest,
-        mu_s,
-        mu_k,
-        air_resistance,
-        density_relaxation,
-        viscosity_relaxation,
-        particles,
-    ):
+    def add_particles(self, *args, **kwargs):
         """Add the particles of an entity at rest, each property a material leaves out being given zero."""
-        kernel_add_particles(
-            particle_start,
-            active,
-            material_type,
-            mass,
-            rho_rest,
-            mu_s,
-            mu_k,
-            air_resistance,
-            density_relaxation,
-            viscosity_relaxation,
-            particles,
-            self.pbd_state,
-            self.pbd_info,
-        )
+        kernel_add_particles(*args, **kwargs, pbd_state=self.pbd_state, pbd_info=self.pbd_info)
 
-    def add_edges(self, edge_start, particle_start, stretch_compliance, stretch_relaxation, edges, edges_len_rest):
+    def add_edges(self, *args):
         """Add the stretch constraints of the edges of an entity, given by the local indices of their particles."""
-        kernel_add_edges(
-            edge_start, particle_start, stretch_compliance, stretch_relaxation, edges, edges_len_rest, self.pbd_info
-        )
+        kernel_add_edges(*args, self.pbd_info)
 
-    def add_inner_edges(
-        self,
-        inner_edge_start,
-        particle_start,
-        bending_compliance,
-        bending_relaxation,
-        inner_edges,
-        inner_edges_len_rest,
-    ):
+    def add_inner_edges(self, *args):
         """Add the bending constraints of the inner edges of an entity, given by the local indices of its particles."""
-        kernel_add_inner_edges(
-            inner_edge_start,
-            particle_start,
-            bending_compliance,
-            bending_relaxation,
-            inner_edges,
-            inner_edges_len_rest,
-            self.pbd_info,
-        )
+        kernel_add_inner_edges(*args, self.pbd_info)
 
-    def add_elems(self, elem_start, particle_start, volume_compliance, volume_relaxation, elems, elems_vol_rest):
+    def add_elems(self, *args):
         """Add the volume constraints of the tetrahedra of an entity, given by the local indices of their particles."""
-        kernel_add_elems(
-            elem_start, particle_start, volume_compliance, volume_relaxation, elems, elems_vol_rest, self.pbd_info
-        )
+        kernel_add_elems(*args, self.pbd_info)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -310,69 +262,41 @@ class PBDSolver(ParticleSolver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
+        # The constructor of the entity, given the start of its slices of the buffers beyond the particles
         if isinstance(material, gs.materials.PBD.Cloth):
-            entity = PBD2DEntity(
-                scene=self.scene,
-                solver=self,
-                material=material,
-                morph=morph,
-                surface=surface,
-                particle_size=self._particle_size,
-                idx=idx,
-                particle_start=self.n_particles,
+            entity_cls = partial(
+                PBD2DEntity,
                 edge_start=self.n_edges,
                 inner_edge_start=self.n_inner_edges,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                name=name,
             )
-
         elif isinstance(material, gs.materials.PBD.Elastic):
-            entity = PBD3DEntity(
-                scene=self.scene,
-                solver=self,
-                material=material,
-                morph=morph,
-                surface=surface,
-                particle_size=self._particle_size,
-                idx=idx,
-                particle_start=self.n_particles,
+            entity_cls = partial(
+                PBD3DEntity,
                 edge_start=self.n_edges,
                 elem_start=self.n_elems,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                name=name,
             )
-
         elif isinstance(material, gs.materials.PBD.Liquid):
-            entity = PBDParticleEntity(
-                scene=self.scene,
-                solver=self,
-                material=material,
-                morph=morph,
-                surface=surface,
-                particle_size=self._particle_size,
-                idx=idx,
-                particle_start=self.n_particles,
-                name=name,
-            )
-
+            entity_cls = PBDParticleEntity
         elif isinstance(material, gs.materials.PBD.Particle):
-            entity = PBDFreeParticleEntity(
-                scene=self.scene,
-                solver=self,
-                material=material,
-                morph=morph,
-                surface=surface,
-                particle_size=self._particle_size,
-                idx=idx,
-                particle_start=self.n_particles,
-                name=name,
-            )
-
+            entity_cls = PBDFreeParticleEntity
         else:
             raise NotImplementedError()
 
+        entity = entity_cls(
+            scene=self.scene,
+            solver=self,
+            material=material,
+            morph=morph,
+            surface=surface,
+            particle_size=self._particle_size,
+            idx=idx,
+            particle_start=self.n_particles,
+            name=name,
+        )
         self._entities.append(entity)
 
         return entity
@@ -705,6 +629,8 @@ def func_s_corr(d_ij: qd.types.vector(3), dist_scale: float):
     return -0.0001 * m * m * m * m
 
 
+# FIXME: quadrants#1036 - a func takes no subclass of its struct annotation, so the neighbour search, the sort and the
+# copy back of the sorted particles repeat those of the SPH solver.
 @qd.func
 def func_for_all_neighbors(
     i_p: int,
@@ -994,15 +920,7 @@ def kernel_solve_collision(pbd_state: PBDState, pbd_info: PBDInfo):
             )
             pbd_state.particles_reordered.dpos[i_p, i_b] = dpos
 
-    for i_p, i_b in qd.ndrange(pbd_state.particles_reordered.pos.shape[0], pbd_state.particles_reordered.pos.shape[1]):
-        if (
-            pbd_state.particles_reordered.free[i_p, i_b]
-            and pbd_state.particles_info_reordered.material_type[i_p, i_b] != PBDMaterial.PARTICLE
-        ):
-            pbd_state.particles_reordered.pos[i_p, i_b] = (
-                pbd_state.particles_reordered.pos[i_p, i_b] + pbd_state.particles_reordered.dpos[i_p, i_b]
-            )
-            pbd_state.particles_reordered.dpos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    func_apply_sorted_dpos(pbd_state, liquid_only=False)
 
 
 @qd.kernel(fastcache=True)
@@ -1067,17 +985,22 @@ def kernel_solve_density(pbd_state: PBDState, pbd_info: PBDInfo):
             )
             pbd_state.particles_reordered.dpos[i_p, i_b] = dpos
 
-    func_apply_liquid_dpos(pbd_state)
+    func_apply_sorted_dpos(pbd_state, liquid_only=True)
 
 
 @qd.func(requires_top_level=True)
-def func_apply_liquid_dpos(pbd_state: PBDState):
-    """Move the free sorted liquid particles by the correction their projections accumulated, then reset it."""
+def func_apply_sorted_dpos(pbd_state: PBDState, liquid_only: qd.template()):
+    """
+    Move the free sorted particles of physics by the correction their projections accumulated, then reset it.
+
+    `liquid_only` restricts the move to the particles of a liquid (see func_apply_dpos).
+    """
     for i_p, i_b in qd.ndrange(pbd_state.particles_reordered.pos.shape[0], pbd_state.particles_reordered.pos.shape[1]):
-        if (
-            pbd_state.particles_info_reordered.material_type[i_p, i_b] == PBDMaterial.LIQUID
-            and pbd_state.particles_reordered.free[i_p, i_b]
-        ):
+        material_type = pbd_state.particles_info_reordered.material_type[i_p, i_b]
+        is_moved = material_type != PBDMaterial.PARTICLE
+        if qd.static(liquid_only):
+            is_moved = material_type == PBDMaterial.LIQUID
+        if is_moved and pbd_state.particles_reordered.free[i_p, i_b]:
             pbd_state.particles_reordered.pos[i_p, i_b] = (
                 pbd_state.particles_reordered.pos[i_p, i_b] + pbd_state.particles_reordered.dpos[i_p, i_b]
             )
@@ -1111,7 +1034,7 @@ def kernel_solve_viscosity(pbd_state: PBDState, pbd_info: PBDInfo):
                 + xsph_sum * pbd_state.particles_info_reordered.viscosity_relaxation[i_p, i_b]
             )
 
-    func_apply_liquid_dpos(pbd_state)
+    func_apply_sorted_dpos(pbd_state, liquid_only=True)
 
 
 @qd.kernel(fastcache=True)
