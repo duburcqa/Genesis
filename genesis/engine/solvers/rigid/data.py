@@ -63,7 +63,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
     links_T: qd.Tensor = field((float, (4, 4)), shape=(LINKS,), kind=DataKind.DERIVED)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
-    # Stored reversed under the cooperative constraint kernels (see DataManager), i_d1 innermost, for their readers
+    # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
     mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
     # Stored in declared order whatever the kernels: its main reader, a serial back-substitution with lanes varying
@@ -1510,7 +1510,7 @@ def island_tile_caps(cap_first, cap_last):
     return tuple(caps)
 
 
-class DataManager(Data):
+class RigidData(Data):
     """Every array of a kinematic or rigid solver, allocated from the solver once its scene is built."""
 
     rigid_info: RigidInfo
@@ -1580,7 +1580,7 @@ class DataManager(Data):
             sizes=sizes,
             values=dict(rigid_info=values),
             layout={
-                DataManager.rigid_info.mass_mat: (2, 1, 0)
+                RigidData.rigid_info.mass_mat: (2, 1, 0)
                 if is_dynamic and config.enable_cooperative_constraint_kernels
                 else None
             },

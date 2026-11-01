@@ -13,8 +13,8 @@ from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.pipeline import Phase, Stages, System
 from genesis.engine.solvers.rigid.data import (
-    DataManager,
     HibernationState,
+    RigidData,
     RigidErrorCode,
     RigidSimStaticConfig,
     WeightScratch,
@@ -815,16 +815,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             if self._options.enable_torsional_friction or self._options.enable_rolling_friction:
                 gs.raise_exception("Torsional and rolling friction are not supported yet when requires_grad is True.")
 
-    def _create_data_manager(self):
-        # We initialize data even if the solver is not active because the coupler needs arguments like
-        # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = DataManager(self, kinematic_only=False)
-        self.errno = self.data_manager.errno
-
-        self.rigid_info = self.data_manager.rigid_info
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
-        self.kinematics_scratch = self.data_manager.kinematics_scratch
+    def _create_rigid_data(self, kinematic_only: bool = False):
+        # The data exists even for a solver holding no entity, whose arrays the couplings take as arguments regardless
+        super()._create_rigid_data(kinematic_only)
+        self.errno = self.rigid_data.errno
         self.hibernation_state = HibernationState(
             sizes=dict(envs=self._B, links=self.n_links_, dofs=self.n_dofs_, trees=self.n_trees_),
             env_first=dict(cooperative_rows=self.rigid_config.constraint_layout_batch_first),

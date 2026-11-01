@@ -16,7 +16,7 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_inverse_kinematics_entity,
     kernel_set_ik_targets,
 )
-from genesis.engine.solvers.rigid.data import DataManager, DynInfo, DynState, RigidInfo, RigidSimStaticConfig
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidData, RigidInfo, RigidSimStaticConfig
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SystemCheckpoint
 from genesis.options.morphs import Morph
@@ -371,7 +371,7 @@ class KinematicSolver(Solver):
             self._options.batch_dofs_info = True
 
         self._build_static_config()
-        self._create_data_manager()
+        self._create_rigid_data()
 
         self._init_dof_fields()
         self._init_vvert_fields()
@@ -419,19 +419,19 @@ class KinematicSolver(Solver):
             solver_type=0,
         )
 
-    def _create_data_manager(self):
-        self.data_manager = DataManager(self, kinematic_only=True)
-        self.rigid_info = self.data_manager.rigid_info
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
-        self.kinematics_scratch = self.data_manager.kinematics_scratch
+    def _create_rigid_data(self, kinematic_only: bool = True):
+        self.rigid_data = RigidData(self, kinematic_only)
+        self.rigid_info = self.rigid_data.rigid_info
+        self.dyn_info = self.rigid_data.dyn_info
+        self.dyn_state = self.rigid_data.dyn_state
+        self.kinematics_scratch = self.rigid_data.kinematics_scratch
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         yield from iter_data(self, "rigid_config")
-        yield from iter_data(self.data_manager, "errno", DataKind.STATE)
+        yield from iter_data(self.rigid_data, "errno", DataKind.STATE)
         for name in ("rigid_info", "dyn_info", "dyn_state"):
-            yield from iter_data(self.data_manager, name)
+            yield from iter_data(self.rigid_data, name)
         # The flags describe the derived poses and velocities, so they travel with them
         yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
         yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)
@@ -1441,7 +1441,7 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_scratch = self.data_manager.ik_scratch
+        ik_scratch = self.rigid_data.ik_scratch
         ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
