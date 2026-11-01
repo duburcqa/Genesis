@@ -119,13 +119,7 @@ def create_capsule_mjcf(name, pos, euler, radius, half_length):
     ET.SubElement(mjcf, "compiler", angle="degree")
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    body = ET.SubElement(
-        worldbody,
-        "body",
-        name=name,
-        pos=" ".join(map(str, pos)),
-        euler=" ".join(map(str, euler)),
-    )
+    body = ET.SubElement(worldbody, "body", name=name, pos=" ".join(map(str, pos)), euler=" ".join(map(str, euler)))
     ET.SubElement(body, "geom", type="capsule", size=f"{radius} {half_length}")
     ET.SubElement(body, "joint", name=f"{name}_joint", type="free")
     return mjcf
@@ -389,11 +383,7 @@ class AnalyticalVsGJKSceneCreator:
             viewer_options=viewer_options,
             show_viewer=self.show_viewer,
         )
-        self.build_scene(
-            scene=self.scene_analytical,
-            entities=self.entities_analytical,
-            tmp_path=self.tmp_path,
-        )
+        self.build_scene(scene=self.scene_analytical, entities=self.entities_analytical, tmp_path=self.tmp_path)
 
         # Scene 2: Uses GJK. Building a scene compiles its substep kernels, which inline the narrowphase, so the patch
         # must precede the build. The two scenes select their collision algorithm statically, so the analytical scene
@@ -426,9 +416,7 @@ class AnalyticalVsGJKSceneCreator:
             collider, "func_narrowphase_multicontact", narrowphase_modified.func_narrowphase_multicontact
         )
         self.monkeypatch.setattr(
-            collider,
-            "func_narrow_phase_convex_vs_convex",
-            narrowphase_modified.func_narrow_phase_convex_vs_convex,
+            collider, "func_narrow_phase_convex_vs_convex", narrowphase_modified.func_narrow_phase_convex_vs_convex
         )
 
     def update_pos_quat_analytical(self, entity_idx: int, pos, euler) -> None:
@@ -497,12 +485,7 @@ def create_sphere_mjcf(name, pos, radius):
     ET.SubElement(mjcf, "compiler", angle="degree")
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    body = ET.SubElement(
-        worldbody,
-        "body",
-        name=name,
-        pos=f"{pos[0]} {pos[1]} {pos[2]}",
-    )
+    body = ET.SubElement(worldbody, "body", name=name, pos=f"{pos[0]} {pos[1]} {pos[2]}")
     ET.SubElement(body, "geom", type="sphere", size=f"{radius}")
     ET.SubElement(body, "joint", name=f"{name}_joint", type="free")
     return mjcf
@@ -515,11 +498,7 @@ def create_box_mjcf(name, pos, euler, size):
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
     body = ET.SubElement(
-        worldbody,
-        "body",
-        name=name,
-        pos=f"{pos[0]} {pos[1]} {pos[2]}",
-        euler=f"{euler[0]} {euler[1]} {euler[2]}",
+        worldbody, "body", name=name, pos=f"{pos[0]} {pos[1]} {pos[2]}", euler=f"{euler[0]} {euler[1]} {euler[2]}"
     )
     half = (0.5 * size[0], 0.5 * size[1], 0.5 * size[2])
     ET.SubElement(body, "geom", type="box", size=f"{half[0]} {half[1]} {half[2]}")
@@ -641,10 +620,7 @@ def test_analytical_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
         scene.build()
 
     scene_creator = AnalyticalVsGJKSceneCreator(
-        monkeypatch=monkeypatch,
-        build_scene=build_scene,
-        tmp_path=tmp_path,
-        show_viewer=show_viewer,
+        monkeypatch=monkeypatch, build_scene=build_scene, tmp_path=tmp_path, show_viewer=show_viewer
     )
     scene_analytical, scene_gjk = scene_creator.setup_scenes()
     # The entities a case leaves unposed are parked far apart

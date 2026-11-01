@@ -4372,13 +4372,7 @@ def _func_disc_middle(rows_jaref, rows_efc_D, rows_friction, latch: float, rigid
 
 @qd.func
 def _func_cone_middle(
-    rows_jaref,
-    rows_efc_D,
-    con_mu: float,
-    rows_friction,
-    N: float,
-    T: float,
-    rigid_config: qd.template(),
+    rows_jaref, rows_efc_D, con_mu: float, rows_friction, N: float, T: float, rigid_config: qd.template()
 ):
     """Middle-zone force, cost and packed symmetric local Hessian of one elliptic contact, for the resolution in force:
     MuJoCo's coupled cone under 'convex', the latched-radius friction discs under 'signorini'.

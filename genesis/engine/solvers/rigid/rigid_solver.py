@@ -1567,12 +1567,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             kernel_clear_dynamic_constraints(envs_idx, self.dyn_state, self.rigid_info, self.rigid_config)
             if self._use_hibernation:
                 kernel_reset_hibernation(
-                    envs_idx,
-                    self.dyn_state,
-                    self.hibernation_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
+                    envs_idx, self.dyn_state, self.hibernation_state, self.dyn_info, self.rigid_info, self.rigid_config
                 )
         self.clear_errno(envs_idx)
 
@@ -2436,12 +2431,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         return int(ref)
 
     def get_links_pos(
-        self,
-        links_idx=None,
-        envs_idx=None,
-        *,
-        ref: link_ref_frame = link_ref_frame.link_origin,
-        relative=False,
+        self, links_idx=None, envs_idx=None, *, ref: link_ref_frame = link_ref_frame.link_origin, relative=False
     ):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if not gs.use_zerocopy:

@@ -231,8 +231,7 @@ def kernel_load_dL_dqacc_from_acc_grad(
     _B = dyn_state.dofs.acc.shape[1]
     n_dofs = dyn_state.dofs.acc.shape[0]
     qd.loop_config(
-        name="kernel_load_dL_dqacc_from_acc_grad",
-        serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
+        name="kernel_load_dL_dqacc_from_acc_grad", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         constraint_state.dL_dqacc[i_d, i_b] = dyn_state.dofs.acc.grad[i_d, i_b]
@@ -1312,8 +1311,7 @@ def kernel_manual_add_equality_constraints_bw(
                             # quat2_d = quat_mul_axis(inv_q2, jac_diff_r_d)
                             #        = quat_mul(inv_q2, [0, jac_diff_r_d])
                             v_padded = qd.Vector(
-                                [0.0, jac_diff_r_d[0], jac_diff_r_d[1], jac_diff_r_d[2]],
-                                dt=gs.qd_float,
+                                [0.0, jac_diff_r_d[0], jac_diff_r_d[1], jac_diff_r_d[2]], dt=gs.qd_float
                             )
                             g_inv_q2_contrib = gu.qd_quat_mul_grad_lhs(inv_q2, v_padded, g_quat2_d)
                             g_v_padded = gu.qd_quat_mul_grad_rhs(inv_q2, v_padded, g_quat2_d)
@@ -1426,10 +1424,7 @@ def kernel_manual_add_equality_constraints_bw(
 
                 # inv_q2 = inv_quat(quat_body2): (w, x, y, z) -> (w, -x, -y, -z)
                 # => g_quat_body2 (from inv_q2 chain) = (g_inv_q2[0], -g_inv_q2[1], -g_inv_q2[2], -g_inv_q2[3])
-                g_quat2_from_inv = qd.Vector(
-                    [g_inv_q2[0], -g_inv_q2[1], -g_inv_q2[2], -g_inv_q2[3]],
-                    dt=gs.qd_float,
-                )
+                g_quat2_from_inv = qd.Vector([g_inv_q2[0], -g_inv_q2[1], -g_inv_q2[2], -g_inv_q2[3]], dt=gs.qd_float)
 
                 # q_var = quat_mul(quat_body1, relpose); relpose const => drop g_v.
                 g_quat1_from_q = gu.qd_quat_mul_grad_lhs(quat_body1, relpose, g_q)

@@ -101,12 +101,7 @@ def _gs_search_by_links_name(
     return gs_links_idx
 
 
-def _get_model_mappings(
-    gs_sim,
-    mj_sim,
-    joints_name: list[str] | None = None,
-    bodies_name: list[str] | None = None,
-):
+def _get_model_mappings(gs_sim, mj_sim, joints_name: list[str] | None = None, bodies_name: list[str] | None = None):
     if joints_name is None:
         joints_name = [
             joint.name for entity in gs_sim.entities for joint in entity.joints if joint.type != gs.JOINT_TYPE.FIXED
@@ -337,12 +332,7 @@ def align_mujoco_invweight0(model):
 
 
 def check_mujoco_model_consistency(
-    gs_sim,
-    mj_sim,
-    joints_name: list[str] | None = None,
-    bodies_name: list[str] | None = None,
-    *,
-    tol: float,
+    gs_sim, mj_sim, joints_name: list[str] | None = None, bodies_name: list[str] | None = None, *, tol: float
 ):
     # Delay import to enable run benchmarks for old Genesis versions that do not have this method
     from genesis.engine.solvers.rigid.rigid_solver import _sanitize_sol_params

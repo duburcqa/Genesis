@@ -509,13 +509,7 @@ def func_inverse_kinematics(
                 )
                 lu.mat_add_eye(ik_state.mat, damping**2, n_error_dims, i_b)
                 lu.mat_inverse(
-                    ik_state.mat,
-                    ik_state.lu_lower,
-                    ik_state.lu_upper,
-                    ik_state.lu_y,
-                    ik_state.inv,
-                    n_error_dims,
-                    i_b,
+                    ik_state.mat, ik_state.lu_lower, ik_state.lu_upper, ik_state.lu_y, ik_state.inv, n_error_dims, i_b
                 )
                 lu.mat_mul_vec(ik_state.inv, ik_state.err_pose, ik_state.vec, n_error_dims, n_error_dims, i_b)
 
