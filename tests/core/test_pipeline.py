@@ -7,6 +7,15 @@ import quadrants as qd
 import genesis as gs
 import genesis.engine.pipeline as pipeline
 from genesis.engine.pipeline import System, assemble_systems, create_system, register_system
+from genesis.engine.solvers.rigid.collider import Collider
+from genesis.engine.solvers.rigid.collider.collider import (
+    ConvexConvex,
+    ConvexConvexFirstContact,
+    ConvexConvexSDF,
+    NonconvexNonconvex,
+    NonconvexNonconvexSDF,
+)
+from genesis.engine.solvers.rigid.collider.narrowphase import func_narrow_phase_nonconvex_vs_nonterrain
 from genesis.engine.solvers.rigid.data import DynState
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Integration
@@ -112,7 +121,56 @@ def test_template_instances_are_distinct_systems(monkeypatch):
     assert systems_by_cls[Pass[Queued]].scratch is systems_by_cls[Scratch[Queued]]
 
 
-def test_system_superseded_by_subclass(monkeypatch):
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_system_superseded_by_subclass(monkeypatch, show_viewer):
+    class OtherNonconvexNonconvex(NonconvexNonconvex):
+        detect = func_narrow_phase_nonconvex_vs_nonterrain
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(morph=gs.morphs.Sphere(radius=0.05))
+    scene.sim.get_system(NonconvexNonconvexSDF, opt_in=True)
+    scene.sim.get_system(OtherNonconvexNonconvex, opt_in=True)
+    with pytest.raises(gs.GenesisException, match="all supersede NonconvexNonconvex"):
+        scene.build()
+
+    # A requested subclass of a registered narrowphase replaces it in the detection, whichever layout the collider
+    # picks for the convex pairs, and finds nothing in a scene without pairs of its family
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.3),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(morph=gs.morphs.Plane())
+    sphere = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.0, 0.05),
+        ),
+    )
+    convex_sdf = scene.sim.get_system(ConvexConvexSDF, opt_in=True)
+    nonconvex_sdf = scene.sim.get_system(NonconvexNonconvexSDF, opt_in=True)
+    scene.build(n_envs=2)
+    collider = scene.sim.get_system(Collider)
+    assert scene.sim.get_system(ConvexConvex[collider.narrowphase_layout]) is convex_sdf
+    assert scene.sim.get_system(ConvexConvexFirstContact) is convex_sdf
+    assert scene.sim.get_system(NonconvexNonconvex) is nonconvex_sdf
+    # A func stage runs through the kernel generated around it, named after it
+    narrowphase_names = [stage.fn.__name__ for stage, _ in collider.detection.slots["narrowphase"].items]
+    assert "kernel_narrow_phase_convex_vs_convex_sdf" in narrowphase_names
+    assert "kernel_narrow_phase_nonconvex_vs_nonterrain_sdf" in narrowphase_names
+    assert "kernel_narrow_phase_nonconvex_vs_nonterrain" not in narrowphase_names
+    for _ in range(10):
+        scene.step()
+    assert_allclose(sphere.get_pos()[:, 2], 0.05, atol=1e-3)
+    with pytest.raises(gs.GenesisException, match="requested once the scene is built"):
+        scene.sim.get_system(ConvexConvexSDF, opt_in=True)
+
     class Base(System): ...
 
     class Custom(Base): ...
@@ -141,3 +199,8 @@ def test_system_superseded_by_subclass(monkeypatch):
     monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Base, Custom, Other])
     with pytest.raises(gs.GenesisException, match="all supersede Base"):
         assemble_systems([], [])
+
+    # Two Systems given of distinct subclasses of a registered class conflict as well
+    monkeypatch.setattr(pipeline, "_SYSTEM_CLASSES", [Base])
+    with pytest.raises(gs.GenesisException, match="all supersede Base"):
+        assemble_systems([Custom(), Other()], [])

@@ -1000,7 +1000,11 @@ def assemble_systems(
         if all([dependency is not other for other in systems])
     }
     # A registered subclass supersedes its registered base, which the pipeline then never creates on its own, as does a
-    # System of the scene of a subclass
+    # System of the scene of a subclass, two of them conflicting
+    for cls in _SYSTEM_CLASSES:
+        classes_superseding = list({type(system): None for system in systems if isinstance(system, cls)})
+        if len(classes_superseding) > 1:
+            gs.raise_exception(f"{[other.__name__ for other in classes_superseding]} all supersede {cls.__name__}.")
     classes_pending = [
         cls
         for cls in _SYSTEM_CLASSES
