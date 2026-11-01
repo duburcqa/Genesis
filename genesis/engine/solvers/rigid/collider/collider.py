@@ -430,8 +430,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 terrain_cols=terrain_hf_shape[1],
             ),
             values=dict(
-                max_possible_pairs=self._n_possible_pairs,
-                max_collision_pairs=max_collision_pairs,
                 max_candidate_contacts=max_candidate_contacts,
                 max_collision_pairs_broad=max_collision_pairs_broad,
                 max_contacts=options.max_contacts,
@@ -442,7 +440,6 @@ class Collider(RigidCollisionDetection, RigidCollisionDetectionBackward):
                 diff_normal_tolerance=self._diff_normal_tolerance,
                 diff_contact_eps_boundary=1e-2,
                 diff_contact_eps_distance=1e-2,
-                diff_contact_eps_affine=1e-2,
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),

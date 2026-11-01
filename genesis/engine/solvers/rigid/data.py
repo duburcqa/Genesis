@@ -129,7 +129,6 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     noslip_tolerance: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     impratio: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     n_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
-    n_candidate_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
     hibernation_thresh_vel: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     EPS: qd.Tensor = field(float, shape=())
 
@@ -925,8 +924,6 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     # Lower and upper corners of the box of every link in its own frame, bounding the boxes of its geoms
     links_init_aabb_min: qd.Tensor = field((float, 3), shape=(LINKS,))
     links_init_aabb_max: qd.Tensor = field((float, 3), shape=(LINKS,))
-    max_possible_pairs: qd.Tensor = field(int, shape=())
-    max_collision_pairs: qd.Tensor = field(int, shape=())
     max_candidate_contacts: qd.Tensor = field(int, shape=())
     max_collision_pairs_broad: qd.Tensor = field(int, shape=())
     # Contacts per environment after pruning, which sizes the contact rows of the constraint solve. Below
@@ -945,14 +942,11 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     # Tolerances of the differentiable contact
     diff_pos_tolerance: qd.Tensor = field(float, shape=())
     diff_normal_tolerance: qd.Tensor = field(float, shape=())
-    # Tolerances of the differentiable contact on a face of the Minkowski difference: the distance along its normal from
-    # the face to the support point, zero on the boundary of the difference, the excess of the distance from the origin
-    # to the face over the EPA depth, and the excursion of the affine coordinates of the projection of the origin
-    # outside [0, 1].
-    # FIXME: Calibrate these values on real scenes.
+    # Tolerances of the differentiable contact on a face of the Minkowski difference, both set to 1e-2 without
+    # calibration on real scenes: the distance along its normal from the face to the support point, zero on the boundary
+    # of the difference, and the excess of the distance from the origin to the face over the EPA depth.
     diff_contact_eps_boundary: qd.Tensor = field(float, shape=())
     diff_contact_eps_distance: qd.Tensor = field(float, shape=())
-    diff_contact_eps_affine: qd.Tensor = field(float, shape=())
     # Link-pair contact pruning
     contact_pruning_tolerance: qd.Tensor = field(float, shape=())
     prune_deep_penetration_ratio: qd.Tensor = field(float, shape=())
@@ -1565,7 +1559,6 @@ class RigidData(Data):
                 noslip_tolerance=options.noslip_tolerance,
                 impratio=options.impratio,
                 n_equalities=solver.n_equalities,
-                n_candidate_equalities=solver.n_candidate_equalities_,
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )
         super().__init__(
