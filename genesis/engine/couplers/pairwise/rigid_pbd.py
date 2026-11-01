@@ -8,7 +8,7 @@ import genesis as gs
 import genesis.utils.sdf as sdf
 from genesis.engine.entities.particle_entity import PARTICLES
 from genesis.engine.pipeline import Enabled
-from genesis.engine.solvers.particle_solver import func_set_particle_pos, func_set_particle_vel
+from genesis.engine.solvers.particle_solver import func_set_particle_vec3
 from genesis.engine.solvers.pbd_solver import PBDInfo, PBDSolver, PBDState
 from genesis.engine.solvers.rigid.abd import func_apply_coupling_force
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, GeomsState, LinksState, RigidInfo
@@ -100,8 +100,8 @@ def kernel_pbd_rigid_collide(
                         rigid_info,
                         sdf_info,
                     )
-                    func_set_particle_pos(i_p, i_b, pos, pbd_state.particles_reordered.pos)
-                    func_set_particle_vel(i_p, i_b, vel, pbd_state.particles_reordered.vel)
+                    func_set_particle_vec3(i_p, i_b, pos, pbd_state.particles_reordered.pos)
+                    func_set_particle_vec3(i_p, i_b, vel, pbd_state.particles_reordered.vel)
 
 
 @qd.kernel(fastcache=True)
@@ -160,7 +160,7 @@ def kernel_drive_pbd_particles_by_link(
 
             i_r = pbd_state.particles.reordered_idx[i_p, i_b]
             pos_correction = target_world_pos - pbd_state.particles_reordered.pos[i_r, i_b]
-            func_set_particle_vel(
+            func_set_particle_vec3(
                 i_r, i_b, pos_correction * clamped_inv_dt + target_world_vel, pbd_state.particles_reordered.vel
             )
 

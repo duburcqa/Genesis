@@ -33,7 +33,6 @@ from .particle_solver import (
     ParticlesRender,
     VVertsRender,
     VVertsSupport,
-    kernel_add_vverts,
 )
 
 if TYPE_CHECKING:
@@ -458,8 +457,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self._grid_density = options.grid_density
         self._enable_CPIC = options.enable_CPIC
 
-        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
-
         # The particle volume is scaled up for numerical robustness (see MPMInfo)
         self._particle_volume_real = float(self._particle_size**3)
         self._particle_volume_scale = 1e3
@@ -496,8 +493,6 @@ class MPMSolver(ParticleSolver, Coupling):
         super().build()
 
         # particles and entities
-        self._n_vverts = self.n_vverts
-        self._n_vfaces = self.n_vfaces
 
         # The singular value decomposition always runs under requires_grad, its backward being registered with the
         # kernel computing it (see MPMStaticConfig).
@@ -599,10 +594,6 @@ class MPMSolver(ParticleSolver, Coupling):
         self._entities.append(entity)
 
         return entity
-
-    def add_vverts(self, *args):
-        """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""
-        kernel_add_vverts(*args, self.mpm_info.vverts)
 
     def add_particles(self, *args):
         """Add the particles of an entity at rest to a frame (see 'kernel_add_particles')."""
@@ -769,25 +760,6 @@ class MPMSolver(ParticleSolver, Coupling):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def n_vvert_supports(self):
-        """
-        Number of particles supporting each visual vertex.
-        """
-        return self._n_vvert_supports
-
-    @property
-    def n_vverts(self):
-        if self.is_built:
-            return self._n_vverts
-        return sum(entity.n_vverts for entity in self._entities)
-
-    @property
-    def n_vfaces(self):
-        if self.is_built:
-            return self._n_vfaces
-        return sum(entity.n_vfaces for entity in self._entities)
 
     @property
     def grid_density(self):

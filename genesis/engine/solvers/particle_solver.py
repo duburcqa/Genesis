@@ -69,7 +69,10 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
 
+        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
         self._n_particles: int | None = None
+        self._n_vverts: int | None = None
+        self._n_vfaces: int | None = None
         # Held in frames for a solver whose state is (see 'System.has_frames')
         self._particles: Data | None = None
         self._particles_params: Data | None = None
@@ -80,6 +83,12 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def build(self):
         super().build()
         self._n_particles = self.n_particles
+        self._n_vverts = self.n_vverts
+        self._n_vfaces = self.n_vfaces
+
+    def add_vverts(self, *args):
+        """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""
+        kernel_add_vverts(*args, self._vverts_support)
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
@@ -190,6 +199,25 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_built:
             return self._n_particles
         return sum([entity.n_particles for entity in self._entities])
+
+    @property
+    def n_vvert_supports(self):
+        """
+        Number of particles supporting each visual vertex.
+        """
+        return self._n_vvert_supports
+
+    @property
+    def n_vverts(self):
+        if self.is_built:
+            return self._n_vverts
+        return sum(entity.n_vverts for entity in self._entities)
+
+    @property
+    def n_vfaces(self):
+        if self.is_built:
+            return self._n_vfaces
+        return sum(entity.n_vfaces for entity in self._entities)
 
     @property
     def particle_size(self):
@@ -407,13 +435,6 @@ def func_add_particles_momentum(
 
 @ParticleSolver.api
 @qd.func
-def func_set_particle_pos(i_p: int, i_b: int, pos: qd.types.vector(3), particles_pos: qd.Tensor):
-    """Set the position of a sorted particle of a solver."""
-    particles_pos[i_p, i_b] = pos
-
-
-@ParticleSolver.api
-@qd.func
-def func_set_particle_vel(i_p: int, i_b: int, vel: qd.types.vector(3), particles_vel: qd.Tensor):
-    """Set the velocity of a sorted particle of a solver."""
-    particles_vel[i_p, i_b] = vel
+def func_set_particle_vec3(i_p: int, i_b: int, value: qd.types.vector(3), particles_values: qd.Tensor):
+    """Set a 3D vector of a sorted particle of a solver, such as its position or its velocity."""
+    particles_values[i_p, i_b] = value

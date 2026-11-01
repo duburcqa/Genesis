@@ -28,7 +28,6 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.step import Integration, Preparation
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
 from genesis.utils.data import ENVS, Data, DataKind, field
-from genesis.utils.misc import broadcast_tensor
 from genesis.utils.sdf import SDF, SDFInfo
 
 from .rigid_contact import func_collide_with_rigid
@@ -44,24 +43,6 @@ class RigidMPMCPICState(Data, kind=DataKind.STATE):
 
     rigid_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, GEOMS, ENVS))
     cells_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 27, ENVS), kind=DataKind.SCRATCH)
-
-
-@qd.func
-def func_mpm_rigid(
-    f: int,
-    i_b: int,
-    pos: qd.types.vector(3),
-    vel: qd.types.vector(3),
-    mass: float,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
-) -> qd.types.vector(3):
-    """Return the velocity of a cell of the grid colliding with the coupled rigid geoms (see func_collide_with_rigid)."""
-    return func_collide_with_rigid(
-        i_b, pos, vel, mass, dyn_state.geoms, dyn_state.links, dyn_info.geoms, rigid_info, sdf_info
-    )
 
 
 @qd.func
@@ -180,7 +161,7 @@ def kernel_reset_cpic_rigid_normal(envs_idx: qd.types.ndarray(), rigid_mpm_cpic:
 class RigidMPM(GridCoupling):
     """Collide the cells of the material point method (MPM) grid holding mass with the coupled rigid geoms."""
 
-    grid_coupling = func_mpm_rigid
+    grid_coupling = func_collide_with_rigid
 
     def __init__(
         self,
@@ -354,9 +335,8 @@ def kernel_attach_mpm_particles(
     link_idx: int,
     stiffness: float,
     particles_mask: qd.types.ndarray(),
-    link_pos: qd.types.ndarray(element_dim=1),
-    link_quat: qd.types.ndarray(element_dim=1),
     mpm_state: MPMState,
+    links_state: LinksState,
     rigid_mpm_attachment_info: RigidMPMAttachmentInfo,
 ):
     """Attach the masked particles to a link, at the point of its frame where each one lies now."""
@@ -368,7 +348,7 @@ def kernel_attach_mpm_particles(
             rigid_mpm_attachment_info.stiffness[i_p, i_b] = stiffness
             rigid_mpm_attachment_info.link_idx[i_p, i_b] = link_idx
             rigid_mpm_attachment_info.link_local_pos[i_p, i_b] = gu.qd_inv_transform_by_trans_quat(
-                pos, link_pos[i_b], link_quat[i_b]
+                pos, links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
             )
 
 
@@ -439,23 +419,15 @@ class RigidMPMAttachment(Integration):
         `particles_mask` selects consecutive particles of the MPM solver from the global index `particles_start` on, one
         row per environment.
         """
-        if not isinstance(link_idx, int):
-            gs.raise_exception("link_idx must be an integer.")
-        n_envs = self._mpm_solver.sim._B
-        # The attachment is a configuration of the constraint, which carries no gradient
-        with torch.no_grad():
-            link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
-            link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
-        link_pos = broadcast_tensor(link_pos, gs.tc_float, (n_envs, 3)).contiguous()
-        link_quat = broadcast_tensor(link_quat, gs.tc_float, (n_envs, 4)).contiguous()
+        if not isinstance(link_idx, int) or not 0 <= link_idx < self._rigid_solver.n_links:
+            gs.raise_exception("link_idx must be the global index of a rigid link.")
         kernel_attach_mpm_particles(
             particles_start,
             link_idx,
             stiffness,
             particles_mask.contiguous(),
-            link_pos,
-            link_quat,
             self._mpm_solver.mpm_state,
+            self._rigid_solver.dyn_state.links,
             self.rigid_mpm_attachment_info,
         )
 

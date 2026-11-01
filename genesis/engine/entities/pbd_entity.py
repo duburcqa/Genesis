@@ -164,7 +164,8 @@ class PBDTetEntity(PBDBaseEntity):
             viscosity_relaxation=0.0,
             particles=self._particles,
         )
-        self._solver.add_edges(
+        self._solver.add_constraints(
+            self._solver.pbd_info.edges,
             self._edge_start,
             self._particle_start,
             self.material.stretch_compliance,
@@ -316,7 +317,8 @@ class PBD2DEntity(PBDTetEntity):
 
     def _add_particles_to_solver(self):
         super()._add_particles_to_solver()
-        self._solver.add_inner_edges(
+        self._solver.add_constraints(
+            self._solver.pbd_info.inner_edges,
             self._inner_edge_start,
             self._particle_start,
             self.material.bending_compliance,
@@ -436,7 +438,8 @@ class PBD3DEntity(PBDTetEntity):
 
     def _add_particles_to_solver(self):
         super()._add_particles_to_solver()
-        self._solver.add_elems(
+        self._solver.add_constraints(
+            self._solver.pbd_info.elems,
             self._elem_start,
             self._particle_start,
             self.material.volume_compliance,

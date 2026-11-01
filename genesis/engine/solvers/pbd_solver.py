@@ -30,7 +30,7 @@ from genesis.utils.geom import (
     func_hash_pos_to_grid,
 )
 
-from .particle_solver import ParticleSolver, kernel_add_vverts, kernel_get_particles_state, kernel_set_particles_state
+from .particle_solver import ParticleSolver, kernel_get_particles_state, kernel_set_particles_state
 
 
 class PBDParticles(Particles):
@@ -68,38 +68,35 @@ INNER_EDGES = Size("inner_edges")
 ELEMS = Size("elems")
 
 
-class PBDEdges(Data, kind=DataKind.CONSTANT, shape=(EDGES,)):
-    """The stretch constraints, one per edge between the particles `v1` and `v2`."""
+class PBDConstraints(Data, kind=DataKind.CONSTANT):
+    """
+    The constraints of one kind between the particles `verts`, one per edge or tetrahedron.
 
-    len_rest: qd.Tensor = field(float)
-    stretch_compliance: qd.Tensor = field(float)
-    stretch_relaxation: qd.Tensor = field(float)
-    v1: qd.Tensor = field(int)
-    v2: qd.Tensor = field(int)
+    Each constraint holds the rest value of what it measures, a length or a volume, and the compliance and relaxation
+    of its projection.
+    """
+
+    rest: qd.Tensor = field(float)
+    compliance: qd.Tensor = field(float)
+    relaxation: qd.Tensor = field(float)
 
 
-class PBDInnerEdges(Data, kind=DataKind.CONSTANT, shape=(INNER_EDGES,)):
+class PBDEdges(PBDConstraints, shape=(EDGES,)):
+    """The stretch constraints, one per edge between its two particles."""
+
+    verts: qd.Tensor = field((int, 2))
+
+
+class PBDInnerEdges(PBDConstraints, shape=(INNER_EDGES,)):
     """The bending constraints, one per edge `v1`-`v2` shared by the triangles `v1, v2, v3` and `v1, v2, v4`."""
 
-    len_rest: qd.Tensor = field(float)
-    bending_compliance: qd.Tensor = field(float)
-    bending_relaxation: qd.Tensor = field(float)
-    v1: qd.Tensor = field(int)
-    v2: qd.Tensor = field(int)
-    v3: qd.Tensor = field(int)
-    v4: qd.Tensor = field(int)
+    verts: qd.Tensor = field((int, 4))
 
 
-class PBDElems(Data, kind=DataKind.CONSTANT, shape=(ELEMS,)):
-    """The volume constraints, one per tetrahedron of the particles `v1` to `v4`."""
+class PBDElems(PBDConstraints, shape=(ELEMS,)):
+    """The volume constraints, one per tetrahedron of its four particles."""
 
-    vol_rest: qd.Tensor = field(float)
-    volume_compliance: qd.Tensor = field(float)
-    volume_relaxation: qd.Tensor = field(float)
-    v1: qd.Tensor = field(int)
-    v2: qd.Tensor = field(int)
-    v3: qd.Tensor = field(int)
-    v4: qd.Tensor = field(int)
+    verts: qd.Tensor = field((int, 4))
 
 
 class PBDState(Data, kind=DataKind.STATE):
@@ -171,8 +168,6 @@ class PBDSolver(ParticleSolver):
         self._hash_grid_cell_size = options.hash_grid_cell_size
         self._hash_grid_res = options._hash_grid_res
 
-        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
-
         self.boundary = CubeBoundary(lower=self._lower_bound, upper=self._upper_bound)
 
     def build(self):
@@ -182,8 +177,6 @@ class PBDSolver(ParticleSolver):
         self._n_edges = self.n_edges
         self._n_inner_edges = self.n_inner_edges
         self._n_elems = self.n_elems
-        self._n_vverts = self.n_vverts
-        self._n_vfaces = self.n_vfaces
 
         # The couplers take the data of the solver whether it holds entities or not
         sizes = dict(envs=self._B, particles=self._n_particles, vverts=self._n_vverts)
@@ -227,25 +220,13 @@ class PBDSolver(ParticleSolver):
         """Add the render UVs and faces of an entity, an empty `uvs` leaving its slice of the UV buffer zeroed."""
         kernel_add_uvs_and_faces(*args, self.pbd_info)
 
-    def add_vverts(self, *args):
-        """Bind the given vverts to their supporting particles (see 'kernel_add_vverts')."""
-        kernel_add_vverts(*args, self.pbd_info.vverts)
-
     def add_particles(self, *args, **kwargs):
         """Add the particles of an entity at rest, each property a material leaves out being given zero."""
         kernel_add_particles(*args, **kwargs, pbd_state=self.pbd_state, pbd_info=self.pbd_info)
 
-    def add_edges(self, *args):
-        """Add the stretch constraints of the edges of an entity, given by the local indices of their particles."""
-        kernel_add_edges(*args, self.pbd_info)
-
-    def add_inner_edges(self, *args):
-        """Add the bending constraints of the inner edges of an entity, given by the local indices of its particles."""
-        kernel_add_inner_edges(*args, self.pbd_info)
-
-    def add_elems(self, *args):
-        """Add the volume constraints of the tetrahedra of an entity, given by the local indices of their particles."""
-        kernel_add_elems(*args, self.pbd_info)
+    def add_constraints(self, constraints: PBDConstraints, *args):
+        """Add the constraints of an entity of the kind `constraints` holds (see 'kernel_add_constraints')."""
+        kernel_add_constraints(*args, constraints, constraints.verts)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -440,25 +421,6 @@ class PBDSolver(ParticleSolver):
         return sum(entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity))
 
     @property
-    def n_vvert_supports(self):
-        """
-        Number of particles supporting each visual vertex.
-        """
-        return self._n_vvert_supports
-
-    @property
-    def n_vverts(self):
-        if self.is_built:
-            return self._n_vverts
-        return sum(entity.n_vverts for entity in self._entities)
-
-    @property
-    def n_vfaces(self):
-        if self.is_built:
-            return self._n_vfaces
-        return sum(entity.n_vfaces for entity in self._entities)
-
-    @property
     def hash_grid_res(self):
         return self._hash_grid_res
 
@@ -524,64 +486,29 @@ def kernel_add_particles(
 
 
 @qd.kernel(fastcache=True)
-def kernel_add_edges(
-    edge_start: int,
+def kernel_add_constraints(
+    constraint_start: int,
     particle_start: int,
-    stretch_compliance: float,
-    stretch_relaxation: float,
-    edges: qd.types.ndarray(),
-    edges_len_rest: qd.types.ndarray(),
-    pbd_info: PBDInfo,
+    compliance: float,
+    relaxation: float,
+    verts: qd.types.ndarray(),
+    rests: qd.types.ndarray(),
+    constraints: PBDConstraints,
+    constraints_verts: qd.Tensor,
 ):
-    for i_e_ in range(edges.shape[0]):
-        i_e = i_e_ + edge_start
-        pbd_info.edges.stretch_compliance[i_e] = stretch_compliance
-        pbd_info.edges.stretch_relaxation[i_e] = stretch_relaxation
-        pbd_info.edges.len_rest[i_e] = edges_len_rest[i_e_]
-        pbd_info.edges.v1[i_e] = particle_start + edges[i_e_, 0]
-        pbd_info.edges.v2[i_e] = particle_start + edges[i_e_, 1]
+    """
+    Add the constraints of an entity, given the local indices of their particles and their rest values.
 
-
-@qd.kernel(fastcache=True)
-def kernel_add_inner_edges(
-    inner_edge_start: int,
-    particle_start: int,
-    bending_compliance: float,
-    bending_relaxation: float,
-    inner_edges: qd.types.ndarray(),
-    inner_edges_len_rest: qd.types.ndarray(),
-    pbd_info: PBDInfo,
-):
-    for i_ie_ in range(inner_edges.shape[0]):
-        i_ie = i_ie_ + inner_edge_start
-        pbd_info.inner_edges.bending_compliance[i_ie] = bending_compliance
-        pbd_info.inner_edges.bending_relaxation[i_ie] = bending_relaxation
-        pbd_info.inner_edges.len_rest[i_ie] = inner_edges_len_rest[i_ie_]
-        pbd_info.inner_edges.v1[i_ie] = particle_start + inner_edges[i_ie_, 0]
-        pbd_info.inner_edges.v2[i_ie] = particle_start + inner_edges[i_ie_, 1]
-        pbd_info.inner_edges.v3[i_ie] = particle_start + inner_edges[i_ie_, 2]
-        pbd_info.inner_edges.v4[i_ie] = particle_start + inner_edges[i_ie_, 3]
-
-
-@qd.kernel(fastcache=True)
-def kernel_add_elems(
-    elem_start: int,
-    particle_start: int,
-    volume_compliance: float,
-    volume_relaxation: float,
-    elems: qd.types.ndarray(),
-    elems_vol_rest: qd.types.ndarray(),
-    pbd_info: PBDInfo,
-):
-    for i_el_ in range(elems.shape[0]):
-        i_el = i_el_ + elem_start
-        pbd_info.elems.volume_compliance[i_el] = volume_compliance
-        pbd_info.elems.volume_relaxation[i_el] = volume_relaxation
-        pbd_info.elems.vol_rest[i_el] = elems_vol_rest[i_el_]
-        pbd_info.elems.v1[i_el] = particle_start + elems[i_el_, 0]
-        pbd_info.elems.v2[i_el] = particle_start + elems[i_el_, 1]
-        pbd_info.elems.v3[i_el] = particle_start + elems[i_el_, 2]
-        pbd_info.elems.v4[i_el] = particle_start + elems[i_el_, 3]
+    `constraints_verts` is the array of the particles of `constraints`, passed apart since a kernel annotated with the
+    base struct sees none of the fields of its subclasses.
+    """
+    for i_c_ in range(verts.shape[0]):
+        i_c = i_c_ + constraint_start
+        constraints.compliance[i_c] = compliance
+        constraints.relaxation[i_c] = relaxation
+        constraints.rest[i_c] = rests[i_c_]
+        for k in range(verts.shape[1]):
+            constraints_verts[i_c][k] = particle_start + verts[i_c_, k]
 
 
 @qd.func
@@ -744,16 +671,16 @@ def func_apply_dpos(pbd_state: PBDState, pbd_info: PBDInfo):
 @qd.kernel(fastcache=True)
 def kernel_solve_stretch(pbd_state: PBDState, pbd_info: PBDInfo):
     """Run one projection of the stretch constraints of the edges (extended position-based dynamics)."""
-    for i_e, i_b in qd.ndrange(pbd_info.edges.v1.shape[0], pbd_state.particles.pos.shape[1]):
-        i_p1 = pbd_info.edges.v1[i_e]
-        i_p2 = pbd_info.edges.v2[i_e]
+    for i_e, i_b in qd.ndrange(pbd_info.edges.rest.shape[0], pbd_state.particles.pos.shape[1]):
+        i_p1 = pbd_info.edges.verts[i_e][0]
+        i_p2 = pbd_info.edges.verts[i_e][1]
 
         w1 = pbd_state.particles.free[i_p1, i_b] / pbd_info.particles.mass[i_p1]
         w2 = pbd_state.particles.free[i_p2, i_b] / pbd_info.particles.mass[i_p2]
         n = pbd_state.particles.pos[i_p1, i_b] - pbd_state.particles.pos[i_p2, i_b]
-        C = n.norm() - pbd_info.edges.len_rest[i_e]
-        alpha = pbd_info.edges.stretch_compliance[i_e] / (pbd_info.substep_dt[None] ** 2)
-        dp = -C / (w1 + w2 + alpha) * n / n.norm(pbd_info.EPS[None]) * pbd_info.edges.stretch_relaxation[i_e]
+        C = n.norm() - pbd_info.edges.rest[i_e]
+        alpha = pbd_info.edges.compliance[i_e] / (pbd_info.substep_dt[None] ** 2)
+        dp = -C / (w1 + w2 + alpha) * n / n.norm(pbd_info.EPS[None]) * pbd_info.edges.relaxation[i_e]
         pbd_state.particles.dpos[i_p1, i_b] += dp * w1
         pbd_state.particles.dpos[i_p2, i_b] -= dp * w2
 
@@ -763,11 +690,11 @@ def kernel_solve_stretch(pbd_state: PBDState, pbd_info: PBDInfo):
 @qd.kernel(fastcache=True)
 def kernel_solve_bending(pbd_state: PBDState, pbd_info: PBDInfo):
     """Run one projection of the bending constraints of the inner edges (extended position-based dynamics)."""
-    for i_ie, i_b in qd.ndrange(pbd_info.inner_edges.v1.shape[0], pbd_state.particles.pos.shape[1]):
-        i_p1 = pbd_info.inner_edges.v1[i_ie]
-        i_p2 = pbd_info.inner_edges.v2[i_ie]
-        i_p3 = pbd_info.inner_edges.v3[i_ie]
-        i_p4 = pbd_info.inner_edges.v4[i_ie]
+    for i_ie, i_b in qd.ndrange(pbd_info.inner_edges.rest.shape[0], pbd_state.particles.pos.shape[1]):
+        i_p1 = pbd_info.inner_edges.verts[i_ie][0]
+        i_p2 = pbd_info.inner_edges.verts[i_ie][1]
+        i_p3 = pbd_info.inner_edges.verts[i_ie][2]
+        i_p4 = pbd_info.inner_edges.verts[i_ie][3]
 
         w1 = pbd_state.particles.free[i_p1, i_b] / pbd_info.particles.mass[i_p1]
         w2 = pbd_state.particles.free[i_p2, i_b] / pbd_info.particles.mass[i_p2]
@@ -796,10 +723,8 @@ def kernel_solve_bending(pbd_state: PBDState, pbd_info: PBDInfo):
             constraint = qd.acos(d) - qd.acos(-1.0)
 
             # Extended position-based dynamics (XPBD)
-            alpha = pbd_info.inner_edges.bending_compliance[i_ie] / (pbd_info.substep_dt[None] ** 2)
-            constraint = (
-                -qd.sqrt(1 - d**2) * constraint / (sum_wq + alpha) * pbd_info.inner_edges.bending_relaxation[i_ie]
-            )
+            alpha = pbd_info.inner_edges.compliance[i_ie] / (pbd_info.substep_dt[None] ** 2)
+            constraint = -qd.sqrt(1 - d**2) * constraint / (sum_wq + alpha) * pbd_info.inner_edges.relaxation[i_ie]
 
             pbd_state.particles.dpos[i_p1, i_b] += w1 * constraint * q1
             pbd_state.particles.dpos[i_p2, i_b] += w2 * constraint * q2
@@ -812,11 +737,11 @@ def kernel_solve_bending(pbd_state: PBDState, pbd_info: PBDInfo):
 @qd.kernel(fastcache=True)
 def kernel_solve_volume(pbd_state: PBDState, pbd_info: PBDInfo):
     """Run one projection of the volume constraints of the tetrahedra (extended position-based dynamics)."""
-    for i_el, i_b in qd.ndrange(pbd_info.elems.v1.shape[0], pbd_state.particles.pos.shape[1]):
-        i_p1 = pbd_info.elems.v1[i_el]
-        i_p2 = pbd_info.elems.v2[i_el]
-        i_p3 = pbd_info.elems.v3[i_el]
-        i_p4 = pbd_info.elems.v4[i_el]
+    for i_el, i_b in qd.ndrange(pbd_info.elems.rest.shape[0], pbd_state.particles.pos.shape[1]):
+        i_p1 = pbd_info.elems.verts[i_el][0]
+        i_p2 = pbd_info.elems.verts[i_el][1]
+        i_p3 = pbd_info.elems.verts[i_el][2]
+        i_p4 = pbd_info.elems.verts[i_el][3]
 
         p1 = pbd_state.particles.pos[i_p1, i_b]
         p2 = pbd_state.particles.pos[i_p2, i_b]
@@ -835,9 +760,9 @@ def kernel_solve_volume(pbd_state: PBDState, pbd_info: PBDInfo):
 
         if w1 + w2 + w3 + w4 > 0.0:
             vol = gu.qd_tet_vol(p1, p2, p3, p4)
-            C = vol - pbd_info.elems.vol_rest[i_el]
-            alpha = pbd_info.elems.volume_compliance[i_el] / (pbd_info.substep_dt[None] ** 2)
-            s = -C / (w1 + w2 + w3 + w4 + alpha) * pbd_info.elems.volume_relaxation[i_el]
+            C = vol - pbd_info.elems.rest[i_el]
+            alpha = pbd_info.elems.compliance[i_el] / (pbd_info.substep_dt[None] ** 2)
+            s = -C / (w1 + w2 + w3 + w4 + alpha) * pbd_info.elems.relaxation[i_el]
 
             pbd_state.particles.dpos[i_p1, i_b] += s * w1 * grad1
             pbd_state.particles.dpos[i_p2, i_b] += s * w2 * grad2

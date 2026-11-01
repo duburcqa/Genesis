@@ -2,11 +2,9 @@
 
 from typing import Annotated
 
-import torch
 
 import quadrants as qd
 
-import genesis as gs
 from genesis.engine.pipeline import Enabled
 from genesis.engine.solvers.fem_solver import (
     VERTICES,
@@ -15,13 +13,12 @@ from genesis.engine.solvers.fem_solver import (
     FEMVertexConstraintsInfo,
     func_set_constraint_target,
 )
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.step import Coupling
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor
 from genesis.utils.sdf import SDF, SDFInfo
 
 from .fem_surface import FEMSurface, SurfaceCoupling
@@ -46,20 +43,21 @@ def kernel_attach_fem_vertices(
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     link_idx: int,
-    link_pos: qd.types.ndarray(element_dim=1),
-    link_quat: qd.types.ndarray(element_dim=1),
     fem_state: FEMState,
+    links_state: LinksState,
     rigid_fem_attachment_info: RigidFEMAttachmentInfo,
 ):
-    """Make the targets of some vertices follow a link of the given pose, keeping the offset of each vertex from it."""
+    """Make the targets of some vertices follow a link, -1 for none, keeping the offset of each vertex from it."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_v = verts_idx[i_b_, i_v_]
         i_b = envs_idx[i_b_]
         # See 'kernel_set_values' in base_solver.py
         if i_v >= 0:
             rigid_fem_attachment_info.link_idx[i_v, i_b] = link_idx
-            rigid_fem_attachment_info.link_offset_pos[i_v, i_b] = fem_state.vertices.pos[0, i_v, i_b] - link_pos[i_b_]
-            rigid_fem_attachment_info.link_init_quat[i_v, i_b] = link_quat[i_b_]
+            if link_idx >= 0:
+                link_pos = links_state.pos[link_idx, i_b]
+                rigid_fem_attachment_info.link_offset_pos[i_v, i_b] = fem_state.vertices.pos[0, i_v, i_b] - link_pos
+                rigid_fem_attachment_info.link_init_quat[i_v, i_b] = links_state.quat[link_idx, i_b]
 
 
 @qd.kernel(fastcache=True)
@@ -103,24 +101,12 @@ class RigidFEMAttachment(Coupling):
 
     def attach(self, verts_idx, envs_idx, link_idx: int) -> None:
         """Make the targets of some constrained vertices follow a rigid link from its current pose, -1 for none."""
-        if link_idx < 0:
-            link_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
-            link_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
-        else:
-            links_envs_idx = envs_idx if self._rigid_solver.n_envs > 0 else None
-            # The attachment is a configuration of the constraint, which carries no gradient
-            with torch.no_grad():
-                link_pos = self._rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-                link_quat = self._rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-            link_pos = broadcast_tensor(link_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
-            link_quat = broadcast_tensor(link_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
         kernel_attach_fem_vertices(
             verts_idx,
             envs_idx,
             link_idx,
-            link_pos,
-            link_quat,
             self._fem_solver.fem_state,
+            self._rigid_solver.dyn_state.links,
             self.rigid_fem_attachment_info,
         )
 
@@ -138,6 +124,7 @@ def func_fem_rigid(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
+    rigid_config: qd.template(),
 ) -> qd.types.vector(3):
     """
     Return the velocity of a surface vertex colliding with the coupled rigid geoms (see func_collide_with_rigid).
@@ -145,7 +132,7 @@ def func_fem_rigid(
     The mass of the element of its triangle is spread evenly over the vertices of the triangle.
     """
     return func_collide_with_rigid(
-        i_b, pos, vel, mass / 3.0, dyn_state.geoms, dyn_state.links, dyn_info.geoms, rigid_info, sdf_info
+        f, i_b, pos, vel, mass / 3.0, dyn_state, dyn_info, rigid_info, sdf_info, rigid_config
     )
 
 
