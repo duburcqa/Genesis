@@ -431,7 +431,7 @@ def test_contact_detection_jacobian_matches_fd():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.debug(False)
-def test_constraint_solver_backward_matches_fd(monkeypatch):
+def test_constraint_solver_backward_matches_fd():
     # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
     from genesis.engine.solvers.rigid.constraint.solver import func_solve_body, func_solve_init
     from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics
@@ -493,6 +493,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     def constraint_solver_resolve():
         func_solve_init(
             rigid_solver.dyn_state,
+            rigid_solver.hibernation_state,
             constraint_solver.constraint_state,
             rigid_solver.rigid_info,
             rigid_solver.rigid_config,
@@ -500,6 +501,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         )
         func_solve_body(
             rigid_solver.dyn_state,
+            rigid_solver.hibernation_state,
             constraint_solver.constraint_state,
             rigid_solver.dyn_info,
             rigid_solver.rigid_info,
@@ -507,19 +509,14 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             constraint_solver._n_iterations,
         )
 
-    monkeypatch.setattr(constraint_solver, "resolve", constraint_solver_resolve)
-
     kernel_forward_dynamics(
         rigid_solver.dyn_state,
-        constraint_solver.constraint_state,
+        rigid_solver.hibernation_state,
         rigid_solver.dyn_info,
         rigid_solver.rigid_info,
         rigid_solver.rigid_config,
     )
-    constraint_solver.add_equality_constraints()
-    rigid_solver.collider.detection()
-    constraint_solver.add_inequality_constraints()
-    constraint_solver.resolve()
+    rigid_solver.constraints(**rigid_solver.get_substep_values(is_recording=False))
 
     def compute_loss(input_mass, input_jac, input_aref, input_efc_D, input_force):
         rigid_solver.rigid_info.mass_mat.from_numpy(input_mass)
@@ -529,7 +526,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         rigid_solver.dyn_state.dofs.qf_smooth.from_numpy(input_force)
         updated_acc_smooth = np.linalg.solve(input_mass[..., 0], input_force[..., 0])
         rigid_solver.dyn_state.dofs.acc_smooth.from_numpy(updated_acc_smooth[..., None])
-        constraint_solver.resolve()
+        constraint_solver_resolve()
         # Collapse to a Python scalar right away: the reduction reads a zero-copy view of qacc, and a deferred
         # evaluation (MPS is lazy) would otherwise run only after the next call overwrites the buffer in place.
         return float(((qd_to_torch(constraint_solver.qacc) - target_qacc) ** 2).mean())

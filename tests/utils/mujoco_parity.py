@@ -10,6 +10,7 @@ import scipy.sparse.csgraph
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics, kernel_update_acc
 from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
@@ -190,16 +191,15 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     if qvel is not None:
         gs_sim.rigid_solver.set_dofs_velocity(qvel)
 
-    # The consistency checks compare pre-step derived quantities (bias forces, smooth and constrained accelerations),
-    # which a substep computes before integrating, mirroring the mj_forward call below. The initial state is then put
-    # back, keeping the contacts the substep detected at that same state.
-    rigid_solver = gs_sim.rigid_solver
-    qpos, dofs_vel = rigid_solver.get_qpos(), rigid_solver.get_dofs_velocity()
-    rigid_solver.substep(0)
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(rigid_solver.collider, "clear", lambda envs_idx=None: None)
-        rigid_solver.set_qpos(qpos)
-    rigid_solver.set_dofs_velocity(dofs_vel)
+    # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
+    # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
+    gs_sim.rigid_solver.dyn_state.dofs.qf_constraint.fill(0.0)
+    rigid = gs_sim.rigid_solver
+    kernel_forward_dynamics(
+        rigid.dyn_state, rigid.hibernation_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config
+    )
+    rigid.constraints(**rigid.get_substep_values(is_recording=False))
+    kernel_update_acc(rigid.dyn_state, rigid.dyn_info, rigid.rigid_info, rigid.rigid_config, is_backward=False)
 
     if gs_sim.scene.visualizer:
         gs_sim.scene.visualizer.update()

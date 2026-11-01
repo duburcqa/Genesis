@@ -7,6 +7,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.abd.forward_dynamics import kernel_forward_dynamics
 from genesis.engine.states.solvers import RigidSolverState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
@@ -112,6 +113,9 @@ def test_data_accessor(n_envs, batched, tol):
                     trim_i = trimmed[key] if n_envs == 0 else trimmed[key][i_b]
                     assert len(pad_i) == capacity
                     assert_equal(pad_i[:n_contacts], trim_i[:n_contacts])
+
+    kernel_forward_dynamics(gs_s.dyn_state, gs_s.hibernation_state, gs_s.dyn_info, gs_s.rigid_info, gs_s.rigid_config)
+    gs_s.constraints(**gs_s.get_substep_values(is_recording=False))
 
     # Make sure that all the robots ends up in the different state
     qposs = gs_robot.get_qpos()

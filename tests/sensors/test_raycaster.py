@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins.raycast import Raycaster
 
@@ -895,7 +896,7 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
     # box's x side face (2mm inside, dynamic tree).
     pad.set_pos((*TACTILE_POS, PAD_POS_Z))
     tactile_box.set_pos((*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02))
-    scene.rigid_solver.detect_collision()
+    scene.sim.get_system(Collider).detect_collision()
     scene.sim._sensor_manager.observe()
     probe_1_world_z = PAD_POS_Z + PROBE_1_LOCAL_Z
     assert_allclose(

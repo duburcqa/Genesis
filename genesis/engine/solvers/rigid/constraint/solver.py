@@ -309,29 +309,6 @@ class ConstraintSolver(System):
             fn = constraint_solver_kernel_clear
         fn(envs_idx, self.constraint_state, self._solver.rigid_info, self._solver.rigid_config)
 
-    def add_equality_constraints(self):
-        self._eq_const_info_cache.clear()
-
-        kernel_add_equality_constraints(
-            self._solver.dyn_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-        )
-
-    def add_inequality_constraints(self):
-        kernel_add_inequality_constraints(
-            self._solver.dyn_state,
-            self._solver.hibernation_state,
-            self._collider.collider_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-            self._collider.collider_config,
-        )
-
     def solve(self):
         """Solve the constraint forces, which invalidates the readback of the equality constraints."""
         self._eq_const_info_cache.clear()
@@ -343,32 +320,6 @@ class ConstraintSolver(System):
             self._solver.rigid_info,
             self._solver.rigid_config,
             self._n_iterations,
-        )
-
-    def resolve(self):
-        """Solve the constraint forces, then update the accelerations and the contact forces from them."""
-        # func_solve_init is launched by each dispatch entrypoint (func_solve_body_monolith / func_solve_decomposed),
-        # not here: only the entrypoint statically knows its arm, which determines whether the init factor/gradient is
-        # done (monolith) or skipped (decomposed re-factors in-loop).
-        func_solve_body(
-            self._solver.dyn_state,
-            self._solver.hibernation_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-            self._n_iterations,
-        )
-        kernel_resolve_post(
-            self._solver.dyn_state,
-            self._solver.hibernation_state,
-            self._collider.collider_state,
-            self.constraint_state,
-            self._solver.dyn_info,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
-            self._solver._options.noslip_iterations > 0,
-            self._solver._errno,
         )
 
     def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):

@@ -2811,7 +2811,10 @@ class RigidEntity(KinematicEntity):
             The index of the environment. Defaults to 0.
         """
 
-        all_collision_pairs = self._solver.detect_collision(env_idx)
+        # Imported here to avoid a circular dependency, the collider importing the solvers which import the entities
+        from genesis.engine.solvers.rigid.collider import Collider
+
+        all_collision_pairs = self._solver.sim.get_system(Collider).detect_collision(env_idx)
         collision_pairs = all_collision_pairs[
             np.logical_and(all_collision_pairs >= self.geom_start, all_collision_pairs < self.geom_end).any(axis=1)
         ]

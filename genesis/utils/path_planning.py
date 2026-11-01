@@ -9,6 +9,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import Collider
 from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, DynState, RigidInfo
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ class PathPlanner(ABC):
     def __init__(self, entity):
         self._entity = entity
         self._solver: "RigidSolver" = entity._solver
+        self._collider = entity._solver.sim.get_system(Collider)
 
         self.PENETRATION_EPS = 1e-5 if gs.qd_float == qd.f32 else 0.0
 
@@ -132,7 +134,8 @@ class PathPlanner(ABC):
                 self._entity.set_qpos(qpos, envs_idx=envs_idx, zero_velocity=False)
             else:
                 self._entity.set_qpos(qpos[0], zero_velocity=False)
-            self._solver._kernel_detect_collision()
+            self._collider.clear()
+            self._collider.detection()
             scene_contact_info = self._entity.get_contacts()
             geom_a = scene_contact_info["geom_a"]
             geom_b = scene_contact_info["geom_b"]
@@ -198,14 +201,15 @@ class PathPlanner(ABC):
 
             if is_plan_with_obj:
                 self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
-            self._solver._kernel_detect_collision()
+            self._collider.clear()
+            self._collider.detection()
             self._kernel_check_collision(
                 envs_idx,
                 obj_geom_start,
                 obj_geom_end,
                 ignore_geom_pairs,
                 out,
-                self._solver.collider.collider_state,
+                self._collider.collider_state,
                 is_plan_with_obj,
             )
         return out
@@ -564,13 +568,14 @@ class RRT(PathPlanner):
                 )
                 if is_plan_with_obj:
                     self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
-                self._solver._kernel_detect_collision()
+                self._collider.clear()
+                self._collider.detection()
                 self._kernel_rrt_step2(
                     envs_idx,
                     obj_geom_start,
                     obj_geom_end,
                     ignore_geom_pairs,
-                    self._solver.collider.collider_state,
+                    self._collider.collider_state,
                     ignore_collision,
                     is_plan_with_obj,
                 )
@@ -948,13 +953,14 @@ class RRTConnect(PathPlanner):
             )
             if is_plan_with_obj:
                 self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
-            self._solver._kernel_detect_collision()
+            self._collider.clear()
+            self._collider.detection()
             self._kernel_rrt_connect_step2(
                 envs_idx,
                 obj_geom_start,
                 obj_geom_end,
                 ignore_geom_pairs,
-                self._solver.collider.collider_state,
+                self._collider.collider_state,
                 self._solver.rigid_info,
                 forward_pass,
                 ignore_collision,

@@ -1356,32 +1356,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             collider_config=None if self.collider is None else self.collider.collider_config,
         )
 
-    def _kernel_detect_collision(self):
-        self.collider.clear()
-        self.collider.detection()
-
-    def detect_collision(self, env_idx=0):
-        # TODO: support batching
-        self._kernel_detect_collision()
-
-        n_collision = qd_to_numpy(self.collider.collider_state.n_contacts)[env_idx]
-        collision_pairs = np.empty((n_collision, 2), dtype=np.int32)
-        collision_pairs[:, 0] = qd_to_numpy(self.collider.collider_state.contact_data.geom_a)[:n_collision, env_idx]
-        collision_pairs[:, 1] = qd_to_numpy(self.collider.collider_state.contact_data.geom_b)[:n_collision, env_idx]
-
-        return collision_pairs
-
-    def _func_constraint_force(self):
-        if not self._disable_constraint:
-            self.constraint_solver.add_equality_constraints()
-
-        if self._enable_collision:
-            self.collider.detection()
-
-        if not self._disable_constraint:
-            self.constraint_solver.add_inequality_constraints()
-            self.constraint_solver.resolve()
-
     def _constraint_force_grad(self):
         """
         Reverse the smooth acceleration together with the constraint solve, through the implicit function theorem.
@@ -1459,18 +1433,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.rigid_config,
                 enable_collision=self._enable_collision,
             )
-
-    def _func_forward_dynamics(self):
-        kernel_forward_dynamics(
-            self.dyn_state,
-            self.hibernation_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-        )
-
-    def _func_update_acc(self):
-        kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
 
     def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
         func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
@@ -1673,6 +1635,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
             cfrc_coupling_vel_dst = qd_to_torch(self.dyn_state.links.cfrc_coupling_vel, transpose=True, copy=False)
             cfrc_coupling_ang_dst = qd_to_torch(self.dyn_state.links.cfrc_coupling_ang, transpose=True, copy=False)
             fric_dst = qd_to_torch(self.dyn_state.geoms.friction_ratio, transpose=True, copy=False)
+            # A full state carries the static equalities alone, the constraints added at runtime being dropped
+            n_equalities_dst = qd_to_torch(self.dyn_state.n_equalities, copy=False)
             # Setting the state is a discontinuity: wake every body in the affected envs (a body left hibernated would
             # stay frozen), restoring the flags and the awake-dof count alongside the other state buffers.
             if self._use_hibernation:
@@ -1710,6 +1674,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 cfrc_coupling_ang_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 if self.n_geoms:
                     torch.where(envs_mask[:, None], state.friction_ratio, fric_dst, out=fric_dst)
+                if not partial:
+                    n_equalities_dst.masked_fill_(envs_mask, self.n_equalities)
                 if self._use_hibernation:
                     links_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     awake_steps_dst.masked_fill_(envs_mask[:, None], 0)
@@ -1734,6 +1700,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 cfrc_coupling_ang_dst[envs_idx] = 0.0
                 if self.n_geoms:
                     fric_dst[envs_idx] = state.friction_ratio[envs_idx]
+                if not partial:
+                    n_equalities_dst[envs_idx] = self.n_equalities
                 if self._use_hibernation:
                     links_hibernated_dst[envs_idx] = 0
                     awake_steps_dst[envs_idx] = 0
@@ -1759,6 +1727,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
                 self.rigid_info,
                 self.rigid_config,
             )
+            if not partial:
+                kernel_clear_dynamic_constraints(envs_idx, self.dyn_state, self.rigid_info, self.rigid_config)
             if self._use_hibernation:
                 kernel_reset_hibernation(
                     envs_idx,
@@ -1771,16 +1741,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver, Completion):
         self.clear_errno(envs_idx)
 
         if not partial:
-            # A full state carries the static equalities alone, the constraints added at runtime being dropped
-            if gs.use_zerocopy:
-                n_equalities = qd_to_torch(self.dyn_state.n_equalities, copy=False)
-                assign_indexed_tensor(n_equalities, indices_to_mask(envs_idx), self.n_equalities)
-                if gs.backend == gs.metal:
-                    torch.mps.synchronize()
-            else:
-                kernel_clear_dynamic_constraints(
-                    self._scene._sanitize_envs_idx(envs_idx), self.dyn_state, self.rigid_info, self.rigid_config
-                )
             self._update_forward_kinematics(envs_idx)
         else:
             self._is_forward_pos_updated = False

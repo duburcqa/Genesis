@@ -853,6 +853,16 @@ class Collider(System):
             self.collider_config,
         )
 
+    def detect_collision(self, env_idx: int = 0) -> np.ndarray:
+        """Detect the contacts of the current poses afresh and return the pairs of geoms in contact in an environment."""
+        self.clear()
+        self.detection()
+        n_collision = qd_to_numpy(self.collider_state.n_contacts)[env_idx]
+        collision_pairs = np.empty((n_collision, 2), dtype=gs.np_int)
+        collision_pairs[:, 0] = qd_to_numpy(self.collider_state.contact_data.geom_a)[:n_collision, env_idx]
+        collision_pairs[:, 1] = qd_to_numpy(self.collider_state.contact_data.geom_b)[:n_collision, env_idx]
+        return collision_pairs
+
     def get_contacts(
         self, as_tensor: bool = True, to_torch: bool = True, keep_batch_dim: bool = False, is_padded: bool = False
     ):
