@@ -187,7 +187,7 @@ class GravityMixin:
 class Solver(RBC, Dynamics, Integration):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
-    # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
+    # See 'System.is_differentiable'
     is_differentiable: bool = False
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):

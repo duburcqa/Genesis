@@ -157,7 +157,6 @@ def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
     rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
-    stiffness = qd_to_numpy(sph_solver.sph_info.particles.stiffness)[0]
 
     # Get initial pressure values
     densities, pressures = get_sph_density_pressure(scene, n_particles)

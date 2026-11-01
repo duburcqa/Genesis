@@ -491,8 +491,7 @@ class MPMSolver(ParticleSolver, Coupling):
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
         is_svd_needed = self._sim.requires_grad or any([material.is_svd_needed for material in self._materials])
 
-        # The couplers take the data of the solver whether it holds entities or not, an inactive solver leaving its
-        # arrays unused
+        # An inactive solver leaves its arrays unused (see 'FEMSolver.build')
         requires_grad = self._sim.requires_grad
         unused = {None: True}
         if self.is_active:

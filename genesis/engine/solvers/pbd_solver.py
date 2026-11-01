@@ -178,7 +178,6 @@ class PBDSolver(ParticleSolver):
         self._n_inner_edges = self.n_inner_edges
         self._n_elems = self.n_elems
 
-        # The couplers take the data of the solver whether it holds entities or not
         sizes = dict(envs=self._B, particles=self._n_particles, vverts=self._n_vverts)
         unused = {None: not self.is_active}
         self.pbd_state = PBDState(
@@ -547,8 +546,7 @@ def func_s_corr(d_ij: qd.types.vector(3), dist_scale: float):
     return -0.0001 * m * m * m * m
 
 
-# FIXME: quadrants#1036 - a func takes no subclass of its struct annotation, so the neighbour search, the sort and the
-# copy back of the sorted particles repeat those of the SPH solver.
+# FIXME: quadrants#1036 - see 'func_for_all_neighbors' in sph_solver.py
 @qd.func
 def func_for_all_neighbors(
     i_p: int, i_b: int, ret: qd.template(), pbd_state: PBDState, pbd_info: PBDInfo, radius: float, task: qd.template()
