@@ -21,7 +21,6 @@ import genesis.utils.geom as gu
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInfo, HibernationState, LinksState, RigidInfo
 from genesis.grad.bridge import reversed_with
-from genesis.utils.array_class import ConstraintState, DynInfo, DynState, LinksState, RigidInfo
 
 from .forward_kinematics import (
     LINK_SWEEP_PASS,

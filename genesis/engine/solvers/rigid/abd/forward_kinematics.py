@@ -22,7 +22,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.grad.bridge import register_custom_backward
-from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
 
 from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forward_velocity_bw
 from .misc import (
