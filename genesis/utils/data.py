@@ -90,33 +90,14 @@ class StaticConfig:
 
 
 class _SizeArithmetic:
-    """The arithmetic of sizes and integers (see Size)."""
+    """The arithmetic of sizes and integers (see Size), whose operators are set below the class."""
 
     __slots__ = ()
 
-    def __add__(self, other):
-        return SizeExpr(operator.add, "+", self, other)
 
-    def __radd__(self, other):
-        return SizeExpr(operator.add, "+", other, self)
-
-    def __sub__(self, other):
-        return SizeExpr(operator.sub, "-", self, other)
-
-    def __rsub__(self, other):
-        return SizeExpr(operator.sub, "-", other, self)
-
-    def __mul__(self, other):
-        return SizeExpr(operator.mul, "*", self, other)
-
-    def __rmul__(self, other):
-        return SizeExpr(operator.mul, "*", other, self)
-
-    def __floordiv__(self, other):
-        return SizeExpr(operator.floordiv, "//", self, other)
-
-    def __rfloordiv__(self, other):
-        return SizeExpr(operator.floordiv, "//", other, self)
+for _op, _s in ((operator.add, "+"), (operator.sub, "-"), (operator.mul, "*"), (operator.floordiv, "//")):
+    setattr(_SizeArithmetic, f"__{_op.__name__}__", lambda self, other, op=_op, s=_s: SizeExpr(op, s, self, other))
+    setattr(_SizeArithmetic, f"__r{_op.__name__}__", lambda self, other, op=_op, s=_s: SizeExpr(op, s, other, self))
 
 
 class Size(_SizeArithmetic):

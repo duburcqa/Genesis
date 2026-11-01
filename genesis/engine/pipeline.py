@@ -5,17 +5,8 @@ A System declares what it depends on as the typed parameters of its constructor,
 classes it derives from. The simulator assembles the Systems a scene calls for (see 'assemble_systems'): it creates each
 one once its dependencies exist, builds it once they are built, then routes the stage of each of its roles into the slot
 the role fills. A System that depends on a System or a struct the scene never has is absent, and so are its stages. See
-https://genesis-world.readthedocs.io/en/latest/user_guide/developers/composable_pipeline.html for the design.
-
-A Phase is an ordered sequence of stages, split into slots. A stage is a kernel, a func whose loops run at the top
-level, a kernel method of a data-oriented object, a Python function, an extension point of a kernel (see Inline) or
-another Phase. Its arguments are bound by name to the Data of the System it belongs to and of the Systems it depends on,
-and an argument that none of them provides is a call argument, given by name when the Phase runs.
-
-A Phase fuses the kernels it runs between two Python functions into one kernel, generated from source, which calls the
-body of each of them as a top-level func. While the launches are recorded for a backward pass, it launches every kernel
-on its own instead, since the launch recorder of the differentiable simulation reverses one launch per entry (see
-genesis/grad/bridge.py), whose tags (`no_grad`, `register_custom_backward`, `reversed_with`) apply as usual.
+https://genesis-world.readthedocs.io/en/latest/user_guide/developers/composable_pipeline.html for the design, and
+Phase and Inline for the stages.
 """
 
 import ast
@@ -78,8 +69,6 @@ _API_FUNCS: dict[Callable, type["System"]] = {}
 class BoundaryItems(NamedTuple):
     """The items a boundary checkpoint holds, listed once by the System (see 'System.save_checkpoint')."""
 
-    # Every item the checkpoint holds
-    items: list[DataItem]
     # The names of the arrays copied at once, in the order of their views
     names: list[str]
     # The zero-copy views of the arrays copied at once
@@ -207,9 +196,7 @@ class System:
         if self._boundary_items is None:
             # The gradients ('iter_data' names each one after its array) and the placeholders of the features
             # switched off (see 'ArrayItem') hold nothing a replay reads
-            self._boundary_items = BoundaryItems(
-                items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
-            )
+            self._boundary_items = BoundaryItems(names=[], views=[], items_copied=[], grads=[], items_grad_copied=[])
             grad_names = set()
             for item in self.data:
                 if isinstance(item, ConfigItem) or item.kind not in kinds:
@@ -225,7 +212,6 @@ class System:
                             self._boundary_items.grads.append(grad[..., None])
                         else:
                             self._boundary_items.items_grad_copied.append(item)
-                self._boundary_items.items.append(item)
                 if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
                     self._boundary_items.items_copied.append(item)
                     continue
@@ -408,6 +394,20 @@ class _FusedStage(NamedTuple):
     is_method: bool
 
 
+def _get_import(fn: Callable, alias: str) -> tuple[str, str]:
+    """Return the line importing the module-level object holding a function under an alias, and the path reaching it."""
+    # A method is reached through its class
+    owner_name, *path = fn.__qualname__.split(".")
+    assert "<locals>" not in path, f"'{fn.__qualname__}' must be defined at the top level of its module."
+    return f"from {fn.__module__} import {owner_name} as {alias}", f"{alias}{''.join([f'.{attr}' for attr in path])}"
+
+
+def _name_apart(names: dict[tuple[str, int], str], name: str, arg: Any) -> str:
+    """Return the name of an object in a generated kernel, objects of one parameter name being numbered apart."""
+    n_named = len([key for key in names if key[0] == name])
+    return names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
+
+
 def _make_fused_kernel(name: str, stages: Sequence[_FusedStage], is_graph: bool) -> tuple[Callable, tuple[str, ...]]:
     """
     Generate the kernel calling the bodies of the given kernels in order, and return it with its parameter names.
@@ -422,11 +422,8 @@ def _make_fused_kernel(name: str, stages: Sequence[_FusedStage], is_graph: bool)
     annotations: dict[str, tuple[Any, str]] = {}
     lines, calls = ["import inspect", "", "import quadrants as qd", ""], []
     for i, (kernel, names, is_method) in enumerate(stages):
-        # A kernel method is reached through its class, at module level
-        owner_name, *path = kernel.fn.__qualname__.split(".")
-        assert "<locals>" not in path, "A kernel stage must be defined at the top level of its module."
-        lines.append(f"from {kernel.fn.__module__} import {owner_name} as kernel_{i}")
-        lines.append(f"fn_{i} = kernel_{i}{''.join([f'.{attr}' for attr in path])}.fn")
+        line_import, path = _get_import(kernel.fn, f"kernel_{i}")
+        lines += [line_import, f"fn_{i} = {path}.fn"]
         lines.append(f"func_{i} = qd.func(requires_top_level=True)(fn_{i})")
         for i_param, (name_, parameter) in enumerate(zip(names, inspect.signature(kernel.fn).parameters.values())):
             if is_method and i_param == 0:
@@ -461,10 +458,7 @@ def _make_fused_kernel(name: str, stages: Sequence[_FusedStage], is_graph: bool)
 def _load_generated(source: str, name: str) -> Any:
     """
     Return the object of the given name a generated source defines, written to the cache directory and imported from
-    there.
-
-    The fastcache of Quadrants reads the source of a kernel from its file, and a file named after the hash of its
-    content stays valid across processes. The module is imported once per process.
+    there once per process (see '_make_fused_kernel').
     """
     path = os.path.join(get_cache_dir(), "pipeline", f"{hashlib.sha1(source.encode()).hexdigest()[:16]}.py")
     if not os.path.exists(path):
@@ -484,7 +478,31 @@ def _load_generated(source: str, name: str) -> Any:
     return vars(module)[name]
 
 
-class Phase:
+class _Declared:
+    """
+    A Phase or an extension point declared on a System class, of which every System of the class holds a copy (see
+    '_copy' of each).
+
+    `owner` and `name` are the class declaring it and its attribute. A role naming it as its slot assigns it again,
+    which leaves its owner.
+    """
+
+    owner: type | None = None
+    name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        if self.owner is None:
+            self.owner, self.name = owner, name
+
+    def __get__(self, system: "System | None", owner: type) -> Any:
+        if system is None:
+            return self
+        copy = self._copy(system)
+        vars(system)[self.name] = copy
+        return copy
+
+
+class Phase(_Declared):
     """
     An ordered sequence of stages, which its System runs, split into the `slots` that roles fill.
 
@@ -512,27 +530,15 @@ class Phase:
         # The stages, in order, with their arguments
         self.items: list[tuple[Callable, tuple[Any, ...]]] = [(phase, ()) for phase in self.slots.values()]
         self._launches: tuple[_Launch, ...] | None = None
-        # The System class declaring the Phase and its attribute, for a declaration (see '__set_name__')
-        self.owner: type | None = None
-        self.name = ""
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        # A role naming the phase as its slot assigns it again, which leaves its owner
-        if self.owner is None:
-            self.owner, self.name = owner, name
 
     def __getattr__(self, slot: str) -> _SlotRef:
         if slot not in vars(self).get("slots", {}):
             raise AttributeError(f"The phase has no slot '{slot}'.")
         return _SlotRef(self.owner, self.name, slot)
 
-    def __get__(self, system: "System | None", owner: type) -> "Phase":
-        if system is None:
-            return self
+    def _copy(self, system: "System") -> "Phase":
         is_graph = self.is_graph(system) if callable(self.is_graph) else self.is_graph
-        phase = Phase(*self.slots, is_graph=is_graph, backward=self.backward)
-        vars(system)[self.name] = phase
-        return phase
+        return Phase(*self.slots, is_graph=is_graph, backward=self.backward)
 
     def add(self, *stages: Callable) -> None:
         """Append stages, binding their arguments to the Data of the System they belong to and of its dependencies."""
@@ -547,9 +553,7 @@ class Phase:
                 names = list(inspect.signature(stage.fn).parameters)
             else:
                 names = list(inspect.signature(stage).parameters)
-            args = []
-            for name in names:
-                args.append(_bind(scope, name))
+            args = [_bind(scope, name) for name in names]
             if isinstance(stage, (QuadrantsCallable, BoundQuadrantsCallable)):
                 owner = stage.instance if isinstance(stage, BoundQuadrantsCallable) else None
                 _check_writes(stage.fn, owner, names, args, writable_ids)
@@ -588,8 +592,7 @@ class Phase:
                     item, args = item.quadrants_callable, (item.instance, *args)
                 for i, (name, arg) in enumerate(zip(names, args)):
                     if not isinstance(arg, _CallArg):
-                        n_named = len([key for key in fused_names if key[0] == name])
-                        names[i] = fused_names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
+                        names[i] = _name_apart(fused_names, name, arg)
                 run.append((_FusedStage(item, tuple(names), is_method), args))
                 continue
             if run:
@@ -633,7 +636,7 @@ class Phase:
                     stage(*[values[arg.name] if isinstance(arg, _CallArg) else arg for arg in args])
 
 
-class Inline:
+class Inline(_Declared):
     """
     An extension point of a kernel: the funcs the Systems add run in turn where the kernel calls a placeholder func.
 
@@ -663,21 +666,9 @@ class Inline:
         self.items: list[tuple[Callable, tuple[Any, ...]]] = []
         self._args: tuple[Any, ...] | None = None
         self._launch: tuple[Callable, tuple[Any, ...]] | None = None
-        # The System class declaring the extension point and its attribute, for a declaration (see '__set_name__')
-        self.owner: type | None = None
-        self.name = ""
 
-    def __set_name__(self, owner: type, name: str) -> None:
-        # A role naming the extension point as its slot assigns it again, which leaves its owner
-        if self.owner is None:
-            self.owner, self.name = owner, name
-
-    def __get__(self, system: "System | None", owner: type) -> "Inline":
-        if system is None:
-            return self
-        inline = Inline(self.kernel, self.hook, run_without_funcs=self._is_run_without_funcs)
-        vars(system)[self.name] = inline
-        return inline
+    def _copy(self, system: "System") -> "Inline":
+        return Inline(self.kernel, self.hook, run_without_funcs=self._is_run_without_funcs)
 
     def bind(self) -> None:
         """Bind the parameters of the kernel to the Data of the System declaring the extension point, once built."""
@@ -723,19 +714,13 @@ class Inline:
         params_new: list[ast.arg] = []
         calls_data: list[list[str]] = []
         for i, (func, args) in enumerate(self.items):
-            owner_name, *path = func.fn.__qualname__.split(".")
-            assert "<locals>" not in path, "An extension point func must be defined at the top level of its module."
-            lines.append(f"from {func.fn.__module__} import {owner_name} as func_module_{i}")
-            lines.append(f"func_{i} = func_module_{i}{''.join([f'.{attr}' for attr in path])}")
+            line_import, path = _get_import(func.fn, f"func_module_{i}")
+            lines += [line_import, f"func_{i} = {path}"]
             names = list(inspect.signature(func.fn).parameters)[-len(args) :] if args else []
             names_bound = []
             for name, arg in zip(names, args):
                 # A parameter that the scope of the func leaves unbound takes the value the kernel binds to its name
-                if isinstance(arg, _CallArg):
-                    name_bound = name
-                else:
-                    n_named = len([key for key in bound_names if key[0] == name])
-                    name_bound = bound_names.setdefault((name, id(arg)), f"{name}_{n_named}" if n_named else name)
+                name_bound = name if isinstance(arg, _CallArg) else _name_apart(bound_names, name, arg)
                 names_bound.append(name_bound)
                 if name_bound not in args_by_name:
                     args_by_name[name_bound] = arg
