@@ -2233,7 +2233,7 @@ def kernel_detect_rigid_rigid_tet(i_h: int, sap_state: SAPState, sap_info: SAPIn
         elem0 = sap_state.rigid_volume.elems[i_e0]
         elem1 = sap_state.rigid_volume.elems[i_e1]
         i_v0 = elem0[0]
-        i_v1 = elem1[1]
+        i_v1 = elem1[0]
         g0 = sap_state.rigid_volume.pressure_gradient[i_e0, i_b]
         g1 = sap_state.rigid_volume.pressure_gradient[i_e1, i_b]
         is_valid, normal, x = func_equal_pressure_plane(
