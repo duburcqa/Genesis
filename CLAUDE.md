@@ -54,6 +54,7 @@
 - **Metal stream sync is the caller's job**: after a batch of torch zero-copy writes, call `torch.mps.synchronize()` once before the next quadrants kernel reads the buffers. Helpers performing such writes (e.g. `qd_zero_grad`) never sync internally.
 - **Branch zero-copy paths on `gs.use_zerocopy` alone, without try/except probing.**
 - **Do not pass `copy=` at all** to `qd_to_torch` / `qd_to_numpy` when the value returned to the caller is fresh arithmetic (nothing internal aliases out). Let it zero-copy or copy only as needed. Reserve `copy=True` for when a raw field view would otherwise escape and could be mutated.
+- **A public accessor of the data of a System returns a value its caller owns**, never a view of the memory of the System: a raw field read is returned with `copy=True`.
 - **Store Python references at build time** (entity, link objects in dicts) for runtime lookup, rather than re-deriving from solver fields every step.
 - **Never pass numpy scalar types** (e.g., `numpy.float64`) to kernel arguments. Always cast to native Python types (`float()`, `int()`). Numpy scalars break quadrants fastcache (weak reference).
 - **Never use `np.asarray` on torch tensors.** Use `tensor_to_array` from `genesis.utils.misc` instead, which properly handles GPU->CPU transfer via `tensor_to_cpu` first. Pass its `dtype` argument (`tensor_to_array(x, dtype=...)`) rather than chaining `.astype`, and convert once inside the consuming function, not at each call site.
