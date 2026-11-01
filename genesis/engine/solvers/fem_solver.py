@@ -698,8 +698,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         return qd_to_torch(self.fem_state.force, transpose=True, copy=True)
 
-    def add_elements(self, f, material_idx, mat_mu, mat_lam, mat_rho, mat_friction_mu, v_start, el_start, verts, elems):
-        """Add the tetrahedra of an entity at rest to the given frame, with the parameters of its material."""
+    def add_elements(self, verts, elems, **kwargs):
+        """Add the tetrahedra of an entity at rest to the given frame, with the parameters of its material (see
+        'kernel_add_elements')."""
         # The vertices of every tetrahedron are ordered so that its rest shape matrix has a negative determinant
         rest_shape = verts[elems[:, :3]] - verts[elems[:, 3:4]]
         if (np.linalg.det(rest_shape) >= 0.0).any():
@@ -707,31 +708,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 "The order of vertices in the tetrahedral elements is not correct. Please check the input mesh or the "
                 "FEM solver implementation."
             )
-        kernel_add_elements(
-            f,
-            material_idx,
-            v_start,
-            el_start,
-            mat_mu,
-            mat_lam,
-            mat_rho,
-            mat_friction_mu,
-            verts,
-            elems,
-            self.fem_state,
-            self.fem_info,
-        )
+        kernel_add_elements(**kwargs, verts=verts, elems=elems, fem_state=self.fem_state, fem_info=self.fem_info)
 
-    def add_cloth(self, f, v_start, verts):
-        """
-        Add the vertices of a cloth at rest to the given frame, for position tracking and coupling only.
+    def add_cloth(self, **kwargs):
+        """Add the vertices of a cloth at rest to the given frame (see 'kernel_add_cloth')."""
+        kernel_add_cloth(**kwargs, fem_state=self.fem_state, fem_info=self.fem_info)
 
-        The IPC coupler owns the elements and the mass of a cloth, so its vertices hold placeholder values.
-        """
-        kernel_add_cloth(f, v_start, verts, self.fem_state, self.fem_info)
-
-    def add_vverts(self, vvert_start, vface_start, v_start, verts_idx, uvs, vfaces):
-        kernel_add_vverts(vvert_start, vface_start, v_start, verts_idx, uvs, vfaces, self.fem_info)
+    def add_vverts(self, **kwargs):
+        """Bind the visual vertices of a visual geom to the simulated vertices (see 'kernel_add_vverts')."""
+        kernel_add_vverts(**kwargs, fem_info=self.fem_info)
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
@@ -753,7 +738,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
         # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
-        kernel_set_verts_pos(f=0, verts_idx=verts_idx, envs_idx=envs_idx, poss=poss, fem_state=self.fem_state)
+        kernel_set_verts_values(0, verts_idx, envs_idx, poss, self.fem_state.vertices.pos)
 
     def get_verts_pos(self, verts_idx=None, envs_idx=None):
         """Get the position of some vertices (see 'set_verts_pos')."""
@@ -772,7 +757,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             vels, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
         # See 'set_verts_pos'
-        kernel_set_verts_vel(f=0, verts_idx=verts_idx, envs_idx=envs_idx, vels=vels, fem_state=self.fem_state)
+        kernel_set_verts_values(0, verts_idx, envs_idx, vels, self.fem_state.vertices.vel)
 
     @gs.assert_built
     @mutates()
@@ -1547,7 +1532,11 @@ def kernel_add_elements(
 
 @qd.kernel(fastcache=True)
 def kernel_add_cloth(f: int, v_start: int, verts: qd.types.ndarray(), fem_state: FEMState, fem_info: FEMInfo):
-    """Add the vertices of a cloth at rest to a frame, with placeholder mass and friction."""
+    """
+    Add the vertices of a cloth at rest to a frame, for position tracking and coupling only.
+
+    The IPC coupler owns the elements and the mass of a cloth, so its vertices hold placeholder mass and friction.
+    """
     for i_v, i_b in qd.ndrange(verts.shape[0], fem_state.vertices.pos.shape[2]):
         i_global = i_v + v_start
         for j in qd.static(range(3)):
@@ -1598,39 +1587,21 @@ def kernel_set_state(f: int, pos: qd.types.ndarray(), vel: qd.types.ndarray(), f
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_verts_pos(
+def kernel_set_verts_values(
     f: int,
     verts_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
-    poss: qd.types.ndarray(),
-    fem_state: FEMState,
+    values: qd.types.ndarray(),
+    verts_values: qd.Tensor,
 ):
-    """Set the position of some vertices in a frame."""
+    """Set the position or the velocity of some vertices in a frame, `verts_values` being the field of either."""
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_v = verts_idx[i_b_, i_v_]
         i_b = envs_idx[i_b_]
         # The earlier occurrences of a repeated vertex are -1 (see 'drop_repeated_index')
         if i_v >= 0:
             for k in qd.static(range(3)):
-                fem_state.vertices.pos[f, i_v, i_b][k] = poss[i_b_, i_v_, k]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_verts_vel(
-    f: int,
-    verts_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    vels: qd.types.ndarray(),
-    fem_state: FEMState,
-):
-    """Set the velocity of some vertices in a frame."""
-    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
-        i_v = verts_idx[i_b_, i_v_]
-        i_b = envs_idx[i_b_]
-        # See 'kernel_set_verts_pos'
-        if i_v >= 0:
-            for k in qd.static(range(3)):
-                fem_state.vertices.vel[f, i_v, i_b][k] = vels[i_b_, i_v_, k]
+                verts_values[f, i_v, i_b][k] = values[i_b_, i_v_, k]
 
 
 @qd.kernel(fastcache=True)
@@ -1662,7 +1633,7 @@ def kernel_set_elements_actu(
     for i_e_, i_g, i_b_ in qd.ndrange(elements_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
         i_e = elements_idx[i_b_, i_e_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_verts_pos'
+        # See 'kernel_set_verts_values'
         if i_e >= 0:
             if fem_info.elements.muscle_group[i_e] == i_g:
                 fem_state.actu[f, i_e, i_b] = actus[i_b_, i_e_, i_g]
@@ -1675,7 +1646,7 @@ def kernel_set_elements_muscle_group(
     """Set the muscle group of some elements."""
     for i_e_ in range(elements_idx.shape[0]):
         i_e = elements_idx[i_e_]
-        # See 'kernel_set_verts_pos'
+        # See 'kernel_set_verts_values'
         if i_e >= 0:
             fem_info.elements.muscle_group[i_e] = muscle_group[i_e_]
 
@@ -1687,7 +1658,7 @@ def kernel_set_elements_muscle_direction(
     """Set the direction of the muscle fibers of some elements."""
     for i_e_ in range(elements_idx.shape[0]):
         i_e = elements_idx[i_e_]
-        # See 'kernel_set_verts_pos'
+        # See 'kernel_set_verts_values'
         if i_e >= 0:
             for j in qd.static(range(3)):
                 fem_info.elements.muscle_direction[i_e][j] = muscle_direction[i_e_, j]
@@ -1763,7 +1734,7 @@ def kernel_set_vertex_constraints(
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
-        # See 'kernel_set_verts_pos'
+        # See 'kernel_set_verts_values'
         if i_v >= 0:
             vertex_constraints.is_constrained[i_v, i_b] = True
             vertex_constraints.is_soft_constraint[i_v, i_b] = is_soft_constraint
@@ -1789,7 +1760,7 @@ def kernel_update_constraint_targets(
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
-        # See 'kernel_set_verts_pos'
+        # See 'kernel_set_verts_values'
         if i_v >= 0:
             for j in qd.static(range(3)):
                 vertex_constraints.target_pos[i_v, i_b][j] = new_target_poss[i_b_, i_v_, j]
