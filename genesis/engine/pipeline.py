@@ -846,6 +846,39 @@ def _get_dependencies(cls: type[System]) -> list[_Dependency]:
     return dependencies
 
 
+def _create(cls: type[System], args: dict[str, Any]) -> System:
+    """Create a System from the values of the parameters of its constructor, the Systems and structs it depends on."""
+    system = cls(**args)
+    system._dependencies = tuple([arg for arg in args.values() if isinstance(arg, System)])
+    system._data_dependencies = {name: arg for name, arg in args.items() if isinstance(arg, Data)}
+    return system
+
+
+def create_system(cls: type[System], values: Sequence[object]) -> System:
+    """
+    Create a System before the Systems of a scene are assembled, from the values its dependencies take at that time.
+
+    Every dependency takes the one value of its classes among `values`, whose conditions are read at once, and an
+    optional dependency no value fits takes None. A dependency left to the assembly, a System it creates or a condition
+    on a System read once built, refuses the creation. The System is then given to 'assemble_systems', which builds it
+    once the Systems it depends on are built, any other System depending on its class using it.
+    """
+    args = {}
+    for dependency in _get_dependencies(cls):
+        candidates = list({id(value): value for value in values if isinstance(value, dependency.classes)}.values())
+        if len(candidates) > 1:
+            raise TypeError(f"Dependency '{dependency.name}' of {cls.__name__} is ambiguous: {candidates}.")
+        if candidates and dependency.conditions and isinstance(candidates[0], System):
+            raise TypeError(f"{cls.__name__} reads its condition on '{dependency.name}' once the scene is built.")
+        if not candidates or not all([condition.holds(candidates[0]) for condition in dependency.conditions]):
+            if not dependency.is_optional:
+                raise TypeError(f"{cls.__name__} has no value for '{dependency.name}' before the scene is built.")
+            args[dependency.name] = None
+            continue
+        args[dependency.name] = candidates[0]
+    return _create(cls, args)
+
+
 def _is_component(cls: type) -> bool:
     """
     Return whether a System class is a component: playing no role and unregistered, created on demand.
@@ -922,17 +955,13 @@ def _get_scope() -> tuple[dict[str, list[Any]], set[int]]:
 
 
 def assemble_systems(
-    systems: Sequence[System],
-    systems_built: Sequence[System],
-    context: Sequence[object] = (),
-    requested: Sequence[type[System]] = (),
+    systems: Sequence[System], systems_built: Sequence[System], context: Sequence[object] = ()
 ) -> list[System]:
     """
     Create and build the Systems a scene calls for, then route their roles and return them.
 
-    `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, `context` the
-    other objects a dependency may name, such as the options of the scene, and `requested` the classes requested from
-    outside the pipeline, decided as if a System depended on them.
+    `systems` are the Systems the scene holds already, `systems_built` those among them built elsewhere, and `context`
+    the other objects a dependency may name, such as the options of the scene.
 
     A registered System is created once every System it depends on exists, every struct it depends on is built, and
     every condition on them holds, and is absent once one of them never will, the reason being logged. A component
@@ -943,11 +972,17 @@ def assemble_systems(
     given, then those created in registration order, then the components.
     """
     systems = list(systems)
-    # A System the scene gives depends on the Systems its public attributes hold, which its stages bind
+    # A System the scene gives depends on the Systems its public attributes hold, which its stages bind, unless it was
+    # created from its dependencies (see 'create_system')
     for system in systems:
-        system._dependencies = tuple(
-            [value for name, value in vars(system).items() if not name.startswith("_") and isinstance(value, System)]
-        )
+        if "_dependencies" not in vars(system):
+            system._dependencies = tuple(
+                [
+                    value
+                    for name, value in vars(system).items()
+                    if not name.startswith("_") and isinstance(value, System)
+                ]
+            )
     built_ids = {id(system) for system in systems_built}
     # A dependency outside the scene, such as a solver holding no entity, is built by the scene itself
     built_ids |= {
@@ -957,7 +992,6 @@ def assemble_systems(
         if all([dependency is not other for other in systems])
     }
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
-    classes_pending += [cls for cls in requested if cls not in classes_pending]
     dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
     def decide(cls: type[System]) -> "dict[str, Any] | str | None":
@@ -1020,10 +1054,7 @@ def assemble_systems(
             if isinstance(decision, str):
                 gs.logger.debug(f"{cls.__name__} is absent: {decision}.")
                 continue
-            system = cls(**decision)
-            system._dependencies = tuple([arg for arg in decision.values() if isinstance(arg, System)])
-            system._data_dependencies = {name: arg for name, arg in decision.items() if isinstance(arg, Data)}
-            systems.append(system)
+            systems.append(_create(cls, decision))
         for system in [system for system in systems if id(system) not in built_ids]:
             # A pending class needing what a build provides (the Data of this System, a condition on a System
             # not built yet) is decided after that build, so it makes no request of this one in its constructor

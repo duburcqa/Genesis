@@ -688,9 +688,10 @@ class ContactDepthQuerySensorMixin:
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # The signed distance fields (SDF) of the rigid geoms, which the raycast query skips, are requested for the build
+        # The signed distance fields (SDF) of the rigid geoms, which the raycast query skips
+        self._sdf: SDF | None = None
         if self._options.contact_depth_query != "raycast":
-            self._manager._sim.get_system(SDF, opt_in=True)
+            self._sdf = self._manager._sim.get_system(SDF, opt_in=True)
 
     def build(self):
         super().build()
@@ -702,7 +703,7 @@ class ContactDepthQuerySensorMixin:
             if self._shared_metadata.sdf_info is None:
                 self._shared_metadata.sdf_info = SDFInfo(unused=True)
         else:
-            self._shared_metadata.sdf_info = self._manager._sim.get_system(SDF).sdf_info
+            self._shared_metadata.sdf_info = self._sdf.sdf_info
             if not self._shared_metadata.collision_bvh_contexts:
                 # The raycaster module registers a sensor, which imports the sensor manager importing this module
                 from .raycaster import BVHContext

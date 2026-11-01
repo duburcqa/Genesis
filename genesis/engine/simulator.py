@@ -18,7 +18,7 @@ from genesis.utils.tools import StepTimer
 from .couplers import IPCCoupler, SAPCoupler, pairwise
 from .couplers.base import Coupler
 from .entities import HybridEntity
-from .pipeline import System, assemble_systems
+from .pipeline import System, assemble_systems, create_system
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SFSolver, SPHSolver
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
@@ -120,8 +120,8 @@ class Simulator(RBC):
         self._active_solvers: list["Solver"] = gs.List()
         # The Systems of the scene, those it calls for and their parts included, set at build
         self._systems: list[System] = []
-        # The classes of the Systems requested from outside the pipeline before the build (see 'get_system')
-        self._requested_system_classes: list[type[System]] = []
+        # The Systems requested from outside the pipeline before the build (see 'get_system')
+        self._requested_systems: list[System] = []
         # The active solvers holding their state in frames, which roll over at the end of each window of substeps
         self._framed_solvers: list["Solver"] = []
         self._step_system: Step | None = None
@@ -243,10 +243,14 @@ class Simulator(RBC):
                 solver.build()
         systems_built = [self._sensor_manager] if self._sensor_manager.sensors else []
         self._systems = assemble_systems(
-            [*self._active_solvers, *([self._coupler] if self._coupler else []), *systems_built],
+            [
+                *self._active_solvers,
+                *([self._coupler] if self._coupler else []),
+                *systems_built,
+                *self._requested_systems,
+            ],
             systems_built,
             (self._coupler_options, *[solver._options for solver in self._active_solvers]),
-            self._requested_system_classes,
         )
         self._step_system = self.get_system(Step)
         # Every System of a differentiable scene supports gradients, which it declares
@@ -633,12 +637,15 @@ class Simulator(RBC):
         """
         Return the System of the scene of the given class, None when the scene has none.
 
-        Before the scene is built, `opt_in` requests the System of that class from outside the pipeline: the scene then
-        holds it once built whenever its dependencies hold, as if one of its Systems depended on it.
+        Before the scene is built, `opt_in` requests the System of that class from outside the pipeline, creating it at
+        once from the solvers, the coupler and their options (see 'create_system'). The System is built with the scene,
+        and every System depending on its class uses it.
         """
-        if opt_in and not self._scene.is_built and cls not in self._requested_system_classes:
-            self._requested_system_classes.append(cls)
-        matches = [system for system in self._systems if isinstance(system, cls)]
+        if opt_in and not self._scene.is_built:
+            if not any([isinstance(system, cls) for system in self._requested_systems]):
+                options = [self._coupler_options, *[solver._options for solver in self._solvers]]
+                self._requested_systems.append(create_system(cls, [*self._solvers, self._coupler, *options]))
+        matches = [system for system in (*self._systems, *self._requested_systems) if isinstance(system, cls)]
         return matches[0] if matches else None
 
     @property
