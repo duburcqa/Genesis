@@ -693,8 +693,8 @@ def func_task_divergence_solve_iteration(
         ret.dv -= k_sum * grad_p_j
 
 
-# The task of the divergence-free solve, `drho` offset by one and the velocity change scaled by the time step. The offset
-# stays a constant, which fast math folds into the arithmetic: a runtime offset would change the rounding.
+# The task of the divergence-free solve, `drho` offset by one and the velocity change scaled by the time step. The
+# offset stays a constant, which fast math folds into the arithmetic: a runtime offset would change the rounding.
 @qd.func
 def func_task_density_solve_iteration(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo

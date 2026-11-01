@@ -11,7 +11,7 @@ from genesis.utils.geom import SpatialHashGrid
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 
-# Sizes of the particle solvers: the particles, the visual vertices and faces, and the support particles of a visual vertex
+# Sizes of the particle solvers: the particles, the visual vertices and faces, and the supports of a visual vertex
 PARTICLES = Size("particles")
 VVERTS = Size("vverts")
 VFACES = Size("vfaces")

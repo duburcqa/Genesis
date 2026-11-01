@@ -45,9 +45,9 @@ def func_mpm_particles(
     mpm_particles_info: MPMParticlesInfo,
 ) -> qd.types.vector(3):
     """
-    Return the velocity of a cell of the grid set to the mean velocity of the sorted particles of a solver in it, if any.
+    Return the velocity of a cell of the grid set to the mean velocity of the sorted particles of a solver in it if any.
 
-    The particles that `particles_is_moved` selects take the opposite of the momentum the cell gains, divided among them.
+    The particles that `particles_is_moved` selects take the opposite of the momentum the cell gains, shared among them.
     """
     half_size = 0.5 * mpm_info.dx[None]
     stencil_size = mpm_particles_info.stencil_size[None]

@@ -142,7 +142,7 @@ def kernel_divergence(sf_state: SFState):
     """Compute the divergence of the advected velocity, mirrored at the walls of the grid."""
     n_grid = sf_state.vel.shape[0]
     for I in qd.grouped(qd.ndrange(n_grid, n_grid, n_grid)):
-        # The rows of 'vel_lo' and 'vel_hi' are the velocities of the neighbours below and above the cell along each axis
+        # The rows of 'vel_lo' and 'vel_hi' are the velocities of the neighbours below and above the cell on each axis
         vel_lo = qd.Matrix.zero(gs.qd_float, 3, 3)
         vel_hi = qd.Matrix.zero(gs.qd_float, 3, 3)
         for d in qd.static(range(3)):
