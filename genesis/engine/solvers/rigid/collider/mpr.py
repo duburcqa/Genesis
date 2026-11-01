@@ -1,4 +1,3 @@
-from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import quadrants as qd
@@ -7,8 +6,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.pipeline import System
 from genesis.engine.solvers.rigid.collider.support_field import SupportFieldInfo
-from genesis.engine.solvers.rigid.data import WORKERS, ColliderInfo, ColliderState, DynInfo, RigidInfo
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
+from genesis.engine.solvers.rigid.data import WORKERS, ColliderState, DynInfo, RigidInfo
+from genesis.utils.data import Data, DataKind, field
 
 from . import support_field
 from .constants import MPR_STAGE, MPR_SUPPORT_TYPE, PORTAL_STATUS, Layout, PerEnv
@@ -82,11 +81,6 @@ class MPR[LayoutT: Layout](System):
 
     def build(self) -> None:
         self.mpr_state = MPRState(sizes=dict(workers=self._n_workers))
-
-
-@qd.kernel
-def clear(mpr_state: qd.template()):
-    mpr_state.simplex_size.fill(0)
 
 
 @qd.func
@@ -189,7 +183,6 @@ def mpr_portal_encapsules_origin(
     i_b: int,
     direction: qd.types.vector(3),
     mpr_state: MPRState,
-    collider_info: ColliderInfo,
 ):
     # Pure sign test: at the boundary both outcomes are equally valid and the result is value-continuous, so any
     # epsilon would only shift the decision without protecting anything.
@@ -198,7 +191,7 @@ def mpr_portal_encapsules_origin(
 
 
 @qd.func
-def mpr_portal_can_encapsule_origin(v: qd.types.vector(3), direction: qd.types.vector(3), collider_info: ColliderInfo):
+def mpr_portal_can_encapsule_origin(v: qd.types.vector(3), direction: qd.types.vector(3)):
     # Pure sign test (see mpr_portal_encapsules_origin).
     dot = v.dot(direction)
     return dot > 0.0
@@ -520,7 +513,6 @@ def func_mpr_contact_from_centers(
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
     mpr_info: MPRInfo,
     support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
@@ -567,7 +559,7 @@ def func_mpr_contact_from_centers(
         elif stage == MPR_STAGE.REFINE or stage == MPR_STAGE.PENETRATION:
             direction = mpr_portal_dir(i_b, mpr_state)
             if stage == MPR_STAGE.REFINE:
-                if mpr_portal_encapsules_origin(i_b, direction, mpr_state):
+                if mpr_portal_encapsules_origin(i_ga, i_gb, i_b, direction, mpr_state):
                     stage = MPR_STAGE.PENETRATION
 
         v, v1, v2 = compute_support(
@@ -799,7 +791,6 @@ def func_mpr_contact(
     mpr_state: MPRState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
     mpr_info: MPRInfo,
     support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
@@ -833,7 +824,6 @@ def func_mpr_contact(
         collider_state,
         mpr_state,
         dyn_info,
-        collider_info,
         mpr_info,
         support_field_info,
         rigid_config,
