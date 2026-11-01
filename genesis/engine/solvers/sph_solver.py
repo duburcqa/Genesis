@@ -781,6 +781,6 @@ def kernel_clear_particles_acc(particles_idx: qd.types.ndarray(), envs_idx: qd.t
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos' in particle_solver.py
+        # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
             sph_state.particles.acc[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)

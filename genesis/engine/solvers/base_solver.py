@@ -614,6 +614,72 @@ def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(),
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]
 
 
+# The accessors of a solver read and write frame 0 of a solver holding its state in frames, which holds the state between
+# two steps (see 'System.has_frames')
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_values(
+    items_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    values: qd.types.ndarray(),
+    items_values: qd.Tensor,
+    has_frames: qd.template(),
+):
+    """Set a 3D vector or a scalar of some items of a solver, such as the velocity of its particles or vertices."""
+    for i_i_, i_b_ in qd.ndrange(items_idx.shape[1], envs_idx.shape[0]):
+        i_i = items_idx[i_b_, i_i_]
+        i_b = envs_idx[i_b_]
+        # The earlier occurrences of a repeated item are -1 (see 'drop_repeated_index')
+        if i_i >= 0:
+            I_i = [0, i_i, i_b] if qd.static(has_frames) else [i_i, i_b]
+            if qd.static(len(values.shape) == 3):
+                items_values[I_i] = qd.Vector([values[i_b_, i_i_, 0], values[i_b_, i_i_, 1], values[i_b_, i_i_, 2]])
+            else:
+                items_values[I_i] = values[i_b_, i_i_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_values(
+    items_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    values: qd.types.ndarray(),
+    items_values: qd.Tensor,
+    has_frames: qd.template(),
+):
+    """Get a 3D vector or a scalar of some items of a solver (see 'kernel_set_values')."""
+    for i_i_, i_b_ in qd.ndrange(items_idx.shape[1], envs_idx.shape[0]):
+        i_i = items_idx[i_b_, i_i_]
+        i_b = envs_idx[i_b_]
+        I_i = [0, i_i, i_b] if qd.static(has_frames) else [i_i, i_b]
+        if qd.static(len(values.shape) == 3):
+            for k in qd.static(range(3)):
+                values[i_b_, i_i_, k] = items_values[I_i][k]
+        else:
+            values[i_b_, i_i_] = items_values[I_i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), items_values: qd.Tensor):
+    """Set a 3D vector or a scalar parameter of some items of a solver, shared by every environment."""
+    for i_i_ in range(items_idx.shape[0]):
+        i_i = items_idx[i_i_]
+        # See 'kernel_set_values'
+        if i_i >= 0:
+            if qd.static(len(values.shape) == 2):
+                items_values[i_i] = qd.Vector([values[i_i_, 0], values[i_i_, 1], values[i_i_, 2]])
+            else:
+                items_values[i_i] = values[i_i_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), items_values: qd.Tensor):
+    """Get a scalar parameter of some items of a solver (see 'kernel_set_info')."""
+    for i_i_ in range(items_idx.shape[0]):
+        i_i = items_idx[i_i_]
+        values[i_i_] = items_values[i_i]
+
+
 @qd.func
 def func_flag_error(i_b: int, code: int, errno: qd.Tensor):
     """Flag an error of env i_b in the error flags of a solver.

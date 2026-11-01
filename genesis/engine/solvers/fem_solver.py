@@ -19,7 +19,18 @@ from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.linalg import FixedOrderSums, PCGScalars
 from genesis.utils.misc import broadcast_tensor, qd_to_torch, tensor_to_array
 
-from .base_solver import FRAMES, VFACES, VVERTS, GravityMixin, MaterialDispatcher, Solver, TimeBasedMixin
+from .base_solver import (
+    FRAMES,
+    VFACES,
+    VVERTS,
+    GravityMixin,
+    MaterialDispatcher,
+    Solver,
+    TimeBasedMixin,
+    kernel_get_values,
+    kernel_set_info,
+    kernel_set_values,
+)
 
 
 # Sizes of the FEM solver: the vertices and the elements, the frames of the element contributions of the explicit
@@ -707,16 +718,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         poss, verts_idx, envs_idx = self._sanitize_io_variables(
             poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        # Between two steps, the state sits in frame 0 (see 'System.has_frames')
-        kernel_set_verts_values(0, verts_idx, envs_idx, poss, self.fem_state.vertices.pos)
+        kernel_set_values(verts_idx, envs_idx, poss, self.fem_state.vertices.pos, has_frames=True)
 
     def get_verts_pos(self, verts_idx=None, envs_idx=None):
         """Get the position of some vertices (see 'set_verts_pos')."""
         poss, verts_idx, envs_idx = self._sanitize_io_variables(
             None, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        # See 'set_verts_pos'
-        kernel_get_verts_pos(f=0, verts_idx=verts_idx, envs_idx=envs_idx, poss=poss, fem_state=self.fem_state)
+        kernel_get_values(verts_idx, envs_idx, poss, self.fem_state.vertices.pos, has_frames=True)
         return poss[0] if self._scene.n_envs == 0 else poss
 
     @gs.assert_built
@@ -726,8 +735,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         vels, verts_idx, envs_idx = self._sanitize_io_variables(
             vels, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        # See 'set_verts_pos'
-        kernel_set_verts_values(0, verts_idx, envs_idx, vels, self.fem_state.vertices.vel)
+        kernel_set_values(verts_idx, envs_idx, vels, self.fem_state.vertices.vel, has_frames=True)
 
     @gs.assert_built
     @mutates()
@@ -749,7 +757,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         actus, elements_idx, envs_idx = self._sanitize_io_variables(
             actus, elements_idx, self.n_elements, "elements_idx", envs_idx, (n_groups,), batched_idx=True
         )
-        # See 'set_verts_pos'
+        # See 'kernel_set_values' in base_solver.py
         kernel_set_elements_actu(
             f=0,
             elements_idx=elements_idx,
@@ -765,7 +773,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         muscle_group, elements_idx, _ = self._sanitize_io_variables(
             muscle_group, elements_idx, self.n_elements, "elements_idx", dtype=gs.tc_int, batched=False
         )
-        kernel_set_elements_muscle_group(elements_idx, muscle_group, self.fem_info)
+        kernel_set_info(elements_idx, muscle_group, self.fem_info.elements.muscle_group)
 
     @mutates(StateChange.MODEL)
     def set_elements_muscle_direction(self, muscle_direction, elements_idx=None):
@@ -773,7 +781,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         muscle_direction, elements_idx, _ = self._sanitize_io_variables(
             muscle_direction, elements_idx, self.n_elements, "elements_idx", element_shape=(3,), batched=False
         )
-        kernel_set_elements_muscle_direction(elements_idx, muscle_direction, self.fem_info)
+        kernel_set_info(elements_idx, muscle_direction, self.fem_info.elements.muscle_direction)
 
     def get_elements_el2v(self, elements_idx=None):
         """Get the global index of the four vertices of some elements."""
@@ -828,10 +836,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             target_poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
         if is_target_current:
-            # See 'set_verts_pos'
-            kernel_get_verts_pos(
-                f=0, verts_idx=verts_idx, envs_idx=envs_idx, poss=target_poss, fem_state=self.fem_state
-            )
+            kernel_get_values(verts_idx, envs_idx, target_poss, self.fem_state.vertices.pos, has_frames=True)
 
         if link_idx < 0:
             link_init_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
@@ -848,7 +853,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             link_init_pos = broadcast_tensor(link_init_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
             link_init_quat = broadcast_tensor(link_init_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
 
-        # See 'set_verts_pos'
+        # See 'kernel_set_values' in base_solver.py
         kernel_set_vertex_constraints(
             f=0,
             verts_idx=verts_idx,
@@ -1609,40 +1614,6 @@ def kernel_set_state(f: int, pos: qd.types.ndarray(), vel: qd.types.ndarray(), f
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_verts_values(
-    f: int,
-    verts_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    values: qd.types.ndarray(),
-    verts_values: qd.Tensor,
-):
-    """Set the position or the velocity of some vertices in a frame, `verts_values` being the field of either."""
-    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
-        i_v = verts_idx[i_b_, i_v_]
-        i_b = envs_idx[i_b_]
-        # The earlier occurrences of a repeated vertex are -1 (see 'drop_repeated_index')
-        if i_v >= 0:
-            for k in qd.static(range(3)):
-                verts_values[f, i_v, i_b][k] = values[i_b_, i_v_, k]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_verts_pos(
-    f: int,
-    verts_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    poss: qd.types.ndarray(),
-    fem_state: FEMState,
-):
-    """Get the position of some vertices in a frame."""
-    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
-        i_v = verts_idx[i_b_, i_v_]
-        i_b = envs_idx[i_b_]
-        for k in qd.static(range(3)):
-            poss[i_b_, i_v_, k] = fem_state.vertices.pos[f, i_v, i_b][k]
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_elements_actu(
     f: int,
     elements_idx: qd.types.ndarray(),
@@ -1655,35 +1626,10 @@ def kernel_set_elements_actu(
     for i_e_, i_g, i_b_ in qd.ndrange(elements_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
         i_e = elements_idx[i_b_, i_e_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_verts_values'
+        # See 'kernel_set_values' in base_solver.py
         if i_e >= 0:
             if fem_info.elements.muscle_group[i_e] == i_g:
                 fem_state.actu[f, i_e, i_b] = actus[i_b_, i_e_, i_g]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_elements_muscle_group(
-    elements_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray(), fem_info: FEMInfo
-):
-    """Set the muscle group of some elements."""
-    for i_e_ in range(elements_idx.shape[0]):
-        i_e = elements_idx[i_e_]
-        # See 'kernel_set_verts_values'
-        if i_e >= 0:
-            fem_info.elements.muscle_group[i_e] = muscle_group[i_e_]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_elements_muscle_direction(
-    elements_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray(), fem_info: FEMInfo
-):
-    """Set the direction of the muscle fibers of some elements."""
-    for i_e_ in range(elements_idx.shape[0]):
-        i_e = elements_idx[i_e_]
-        # See 'kernel_set_verts_values'
-        if i_e >= 0:
-            for j in qd.static(range(3)):
-                fem_info.elements.muscle_direction[i_e][j] = muscle_direction[i_e_, j]
 
 
 @qd.kernel(fastcache=True)
@@ -1756,7 +1702,7 @@ def kernel_set_vertex_constraints(
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
-        # See 'kernel_set_verts_values'
+        # See 'kernel_set_values' in base_solver.py
         if i_v >= 0:
             vertex_constraints.is_constrained[i_v, i_b] = True
             vertex_constraints.is_soft_constraint[i_v, i_b] = is_soft_constraint
@@ -1782,7 +1728,7 @@ def kernel_update_constraint_targets(
     for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
-        # See 'kernel_set_verts_values'
+        # See 'kernel_set_values' in base_solver.py
         if i_v >= 0:
             for j in qd.static(range(3)):
                 vertex_constraints.target_pos[i_v, i_b][j] = new_target_poss[i_b_, i_v_, j]

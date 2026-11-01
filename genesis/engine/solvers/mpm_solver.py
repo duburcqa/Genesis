@@ -20,14 +20,20 @@ from genesis.options.solvers import MPMOptions
 from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
 from genesis.utils.misc import qd_isfinite, qd_to_torch
 
-from .base_solver import FRAMES, MaterialDispatcher, func_flag_error
+from .base_solver import (
+    FRAMES,
+    MaterialDispatcher,
+    func_flag_error,
+    kernel_get_info,
+    kernel_get_values,
+    kernel_set_info,
+)
 from .particle_solver import (
     ParticleSolver,
     ParticlesRender,
     VVertsRender,
     VVertsSupport,
     kernel_add_vverts,
-    kernel_get_particles_scalar,
 )
 
 if TYPE_CHECKING:
@@ -708,7 +714,7 @@ class MPMSolver(ParticleSolver, Coupling):
         actus, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True
         )
-        kernel_get_particles_scalar(particles_idx, envs_idx, actus, self.mpm_state.particles.actu, has_frames=True)
+        kernel_get_values(particles_idx, envs_idx, actus, self.mpm_state.particles.actu, has_frames=True)
         return actus[0] if self._scene.n_envs == 0 else actus
 
     @mutates(StateChange.MODEL)
@@ -717,14 +723,14 @@ class MPMSolver(ParticleSolver, Coupling):
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             muscle_group, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        kernel_set_particles_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
+        kernel_set_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
 
     def get_particles_muscle_group(self, particles_idx=None):
         """Get the muscle group of some particles (see 'set_particles_muscle_group')."""
         muscle_group, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_int, batched=False
         )
-        kernel_get_particles_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
+        kernel_get_info(particles_idx, muscle_group, self.mpm_info.particles.muscle_group)
         return muscle_group
 
     @mutates(StateChange.MODEL)
@@ -733,7 +739,7 @@ class MPMSolver(ParticleSolver, Coupling):
         muscle_direction, particles_idx, _ = self._sanitize_io_variables(
             muscle_direction, particles_idx, self.n_particles, "particles_idx", element_shape=(3,), batched=False
         )
-        kernel_set_particles_muscle_direction(particles_idx, muscle_direction, self.mpm_info)
+        kernel_set_info(particles_idx, muscle_direction, self.mpm_info.particles.muscle_direction)
 
     @mutates(StateChange.MODEL)
     def set_particles_free(self, free, particles_idx=None):
@@ -741,14 +747,14 @@ class MPMSolver(ParticleSolver, Coupling):
         free, particles_idx, _ = self._sanitize_io_variables(
             free, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        kernel_set_particles_info(particles_idx, free, self.mpm_info.particles.is_free)
+        kernel_set_info(particles_idx, free, self.mpm_info.particles.is_free)
 
     def get_particles_free(self, particles_idx=None):
         """Get whether some particles move freely (see 'set_particles_free')."""
         free, particles_idx, _ = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", dtype=gs.tc_bool, batched=False
         )
-        kernel_get_particles_info(particles_idx, free, self.mpm_info.particles.is_free)
+        kernel_get_info(particles_idx, free, self.mpm_info.particles.is_free)
         return free
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None):
@@ -1082,7 +1088,7 @@ def kernel_reset_particles_deformation(
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos' in particle_solver.py
+        # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
             mpm_state.particles.F[0, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
             mpm_state.particles.C[0, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1101,45 +1107,10 @@ def kernel_set_particles_actu(
     for i_p_, i_mg, i_b_ in qd.ndrange(particles_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos' in particle_solver.py
+        # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
             if mpm_info.particles.muscle_group[i_p] == i_mg:
                 mpm_state.particles.actu[0, i_p, i_b] = actus[i_b_, i_p_, i_mg]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_info(
-    particles_idx: qd.types.ndarray(), values: qd.types.ndarray(), particles_values: qd.Tensor
-):
-    """Set a scalar parameter of some particles, such as their muscle group, shared by every environment."""
-    for i_p_ in range(particles_idx.shape[0]):
-        i_p = particles_idx[i_p_]
-        # See 'kernel_set_particles_pos' in particle_solver.py
-        if i_p >= 0:
-            particles_values[i_p] = values[i_p_]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_info(
-    particles_idx: qd.types.ndarray(), values: qd.types.ndarray(), particles_values: qd.Tensor
-):
-    """Get a scalar parameter of some particles (see 'kernel_set_particles_info')."""
-    for i_p_ in range(particles_idx.shape[0]):
-        i_p = particles_idx[i_p_]
-        values[i_p_] = particles_values[i_p]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_muscle_direction(
-    particles_idx: qd.types.ndarray(), muscle_direction: qd.types.ndarray(), mpm_info: MPMInfo
-):
-    """Set the direction of the muscle fibers of some particles."""
-    for i_p_ in range(particles_idx.shape[0]):
-        i_p = particles_idx[i_p_]
-        # See 'kernel_set_particles_pos' in particle_solver.py
-        if i_p >= 0:
-            for i in qd.static(range(3)):
-                mpm_info.particles.muscle_direction[i_p][i] = muscle_direction[i_p_, i]
 
 
 @qd.func

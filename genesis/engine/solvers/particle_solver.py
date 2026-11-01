@@ -9,7 +9,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.geom import SpatialHashGrid
 
-from .base_solver import VVERTS, GravityMixin, Solver, TimeBasedMixin
+from .base_solver import VVERTS, GravityMixin, Solver, TimeBasedMixin, kernel_get_values, kernel_set_values
 
 
 # The supports of a visual vertex
@@ -111,7 +111,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         poss, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, (3,), batched_idx=True
         )
-        kernel_get_particles_vec3(particles_idx, envs_idx, poss, self._particles.pos, has_frames=self.has_frames)
+        kernel_get_values(particles_idx, envs_idx, poss, self._particles.pos, has_frames=self.has_frames)
         return poss[0] if self._scene.n_envs == 0 else poss
 
     @gs.assert_built
@@ -121,7 +121,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         vels, particles_idx, envs_idx = self._sanitize_io_variables(
             vels, particles_idx, self.n_particles, "particles_idx", envs_idx, (3,), batched_idx=True
         )
-        kernel_set_particles_vel(particles_idx, envs_idx, vels, self._particles.vel, has_frames=self.has_frames)
+        kernel_set_values(particles_idx, envs_idx, vels, self._particles.vel, has_frames=self.has_frames)
         self._reset_particles(particles_idx, envs_idx, pos_changed=False)
 
     def get_particles_vel(self, particles_idx=None, envs_idx=None):
@@ -129,7 +129,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         vels, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, (3,), batched_idx=True
         )
-        kernel_get_particles_vec3(particles_idx, envs_idx, vels, self._particles.vel, has_frames=self.has_frames)
+        kernel_get_values(particles_idx, envs_idx, vels, self._particles.vel, has_frames=self.has_frames)
         return vels[0] if self._scene.n_envs == 0 else vels
 
     @gs.assert_built
@@ -139,18 +139,14 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
             actives, particles_idx, self.n_particles, "particles_idx", envs_idx, dtype=gs.tc_bool, batched_idx=True
         )
-        kernel_set_particles_active(
-            particles_idx, envs_idx, actives, self._particles.is_active, has_frames=self.has_frames
-        )
+        kernel_set_values(particles_idx, envs_idx, actives, self._particles.is_active, has_frames=self.has_frames)
 
     def get_particles_active(self, particles_idx=None, envs_idx=None):
         """Get whether some particles take part in the simulation (see 'set_particles_pos')."""
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, dtype=gs.tc_bool, batched_idx=True
         )
-        kernel_get_particles_scalar(
-            particles_idx, envs_idx, actives, self._particles.is_active, has_frames=self.has_frames
-        )
+        kernel_get_values(particles_idx, envs_idx, actives, self._particles.is_active, has_frames=self.has_frames)
         return actives[0] if self._scene.n_envs == 0 else actives
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None):
@@ -242,10 +238,6 @@ def kernel_add_vverts(
             vverts_support.support_idxs[i_vv][i_s] = support_idxs_local[i_vv_, i_s] + particle_start
 
 
-# The accessors of the particles read and write frame 0 of a solver holding its state in frames, which holds the state
-# between two steps (see 'System.has_frames')
-
-
 @qd.kernel(fastcache=True)
 def kernel_set_particles_pos(
     particles_idx: qd.types.ndarray(),
@@ -259,78 +251,11 @@ def kernel_set_particles_pos(
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
-        # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
+        # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
             I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
             particles_pos[I_p] = qd.Vector([poss[i_b_, i_p_, 0], poss[i_b_, i_p_, 1], poss[i_b_, i_p_, 2]])
             particles_vel[I_p] = qd.Vector.zero(gs.qd_float, 3)
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_vel(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    vels: qd.types.ndarray(),
-    particles_vel: qd.Tensor,
-    has_frames: qd.template(),
-):
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos'
-        if i_p >= 0:
-            I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-            particles_vel[I_p] = qd.Vector([vels[i_b_, i_p_, 0], vels[i_b_, i_p_, 1], vels[i_b_, i_p_, 2]])
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_particles_active(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    actives: qd.types.ndarray(),
-    particles_is_active: qd.Tensor,
-    has_frames: qd.template(),
-):
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        # See 'kernel_set_particles_pos'
-        if i_p >= 0:
-            I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-            particles_is_active[I_p] = actives[i_b_, i_p_]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_vec3(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    values: qd.types.ndarray(),
-    particles_values: qd.Tensor,
-    has_frames: qd.template(),
-):
-    """Get a 3D vector of some particles, such as their position or velocity."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-        for k in qd.static(range(3)):
-            values[i_b_, i_p_, k] = particles_values[I_p][k]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_particles_scalar(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    values: qd.types.ndarray(),
-    particles_values: qd.Tensor,
-    has_frames: qd.template(),
-):
-    """Get a scalar of some particles, such as their activity."""
-    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-        i_p = particles_idx[i_b_, i_p_]
-        i_b = envs_idx[i_b_]
-        I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-        values[i_b_, i_p_] = particles_values[I_p]
 
 
 @qd.kernel(fastcache=True)
