@@ -871,6 +871,11 @@ class IPCCoupler(RBC, Coupler, Coupling):
         self._ipc_world.retrieve()
 
     @property
+    def is_active(self) -> bool:
+        """Check if IPC coupling is active"""
+        return self._ipc_world is not None
+
+    @property
     def has_any_rigid_coupling(self) -> bool:
         """
         Check if any rigid entity is coupled to IPC.
