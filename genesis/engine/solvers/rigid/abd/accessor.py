@@ -889,10 +889,7 @@ def kernel_set_dofs_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_set_dofs_zero_velocity(
-    dofs_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    dyn_state: DynState,
-    rigid_config: qd.template(),
+    dofs_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), dyn_state: DynState, rigid_config: qd.template()
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
@@ -1033,11 +1030,7 @@ def kernel_control_dofs_position_velocity(
 
 @qd.func
 def func_link_offset_shift(
-    i_l: int,
-    i_b: int,
-    links_offset_pos: qd.types.ndarray(),
-    links_offset_quat: qd.types.ndarray(),
-    dyn_state: DynState,
+    i_l: int, i_b: int, links_offset_pos: qd.types.ndarray(), links_offset_quat: qd.types.ndarray(), dyn_state: DynState
 ):
     """World-frame displacement from the authored link origin to the internal one.
 
@@ -1262,10 +1255,7 @@ def kernel_set_geom_friction_rolling(geoms_idx: qd.i32, friction_rolling: float,
 
 @qd.kernel(fastcache=True)
 def kernel_set_geoms_friction(
-    geoms_idx: qd.types.ndarray(),
-    friction: qd.types.ndarray(),
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    geoms_idx: qd.types.ndarray(), friction: qd.types.ndarray(), dyn_info: DynInfo, rigid_config: qd.template()
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_ in range(geoms_idx.shape[0]):
@@ -1286,10 +1276,7 @@ def kernel_set_geoms_friction_torsional(
 
 @qd.kernel(fastcache=True)
 def kernel_set_geoms_friction_rolling(
-    geoms_idx: qd.types.ndarray(),
-    friction_rolling: qd.types.ndarray(),
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    geoms_idx: qd.types.ndarray(), friction_rolling: qd.types.ndarray(), dyn_info: DynInfo, rigid_config: qd.template()
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_ in range(geoms_idx.shape[0]):

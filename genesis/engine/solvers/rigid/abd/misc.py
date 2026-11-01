@@ -179,12 +179,7 @@ def func_is_awake_tree(i_t: int, i_b: int, dyn_state: DynState, rigid_info: Rigi
 
 @qd.func
 def func_hibernate_link(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Put link i_l of env i_b to sleep: the link, its dofs and its geoms are flagged, the dof and link velocities and
     accelerations zeroed, and its dofs counted asleep (see n_awake_dofs in rigid/data.py).

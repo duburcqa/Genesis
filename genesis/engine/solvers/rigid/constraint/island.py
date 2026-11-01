@@ -752,11 +752,7 @@ def func_contact_island(i_col: int, i_b: int, hibernation_state: HibernationStat
 
 @qd.func
 def func_contact_tree_slots(
-    i_col: int,
-    i_b: int,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
+    i_col: int, i_b: int, collider_state: ColliderState, constraint_state: ConstraintState, rigid_info: RigidInfo
 ):
     """Island-local tree slots (rcm_tree_pos) of a contact's two endpoints, -1 for a fixed / dof-less side."""
     i_la = collider_state.contact_data.link_a[i_col, i_b]
@@ -928,11 +924,7 @@ def func_reorder_island_dofs(
 
 @qd.func
 def func_sort_contacts_coop(
-    i_b: int,
-    tid: int,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    constraint_state: ConstraintState,
+    i_b: int, tid: int, dyn_state: DynState, collider_state: ColliderState, constraint_state: ConstraintState
 ):
     """Sort the contacts of one env in the order of func_sort_contacts with the _K lanes of its block.
 

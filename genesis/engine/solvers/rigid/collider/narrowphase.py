@@ -4629,10 +4629,7 @@ def func_narrow_phase_diff_convex_vs_convex(
 
 @qd.func
 def func_fill_diff_contact_input_analytic(
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, collider_state: ColliderState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """Populate diff_contact_input for the contacts of analytic detection paths.
 

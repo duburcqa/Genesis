@@ -218,12 +218,7 @@ def kernel_set_links_contact_force(dyn_state: DynState, collider_state: Collider
 
 @qd.func
 def func_is_link_pair_hibernated(
-    i_la: int,
-    i_lb: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    i_la: int, i_lb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """Check whether two links stand still in an environment: one sleeps and the other sleeps or is fixed.
 
@@ -322,11 +317,7 @@ def func_collider_clear_env(
 
 @qd.func
 def func_promote_woken_contacts(
-    i_b: int,
-    dyn_state: DynState,
-    collider_state: ColliderState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    i_b: int, dyn_state: DynState, collider_state: ColliderState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """Move the kept contacts of the links of env i_b that woke this step among the live contacts.
 
@@ -927,12 +918,7 @@ def func_contact_sort_key(i_la: int, i_lb: int, i_ga: int, i_gb: int, frame_key:
 
 @qd.func
 def func_contact_is_before(
-    i_b: int,
-    i_q: int,
-    i_p: int,
-    key_q: qd.types.vector(5),
-    key_p: qd.types.vector(5),
-    collider_state: ColliderState,
+    i_b: int, i_q: int, i_p: int, key_q: qd.types.vector(5), key_p: qd.types.vector(5), collider_state: ColliderState
 ):
     """Whether one contact sorts before another in the order of phase 1 of the contact pruning.
 

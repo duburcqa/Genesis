@@ -293,12 +293,7 @@ def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info
 
 @qd.func
 def _func_support_sphere(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     sphere_center = pos
     sphere_radius = dyn_info.geoms.data[i_g][0]
@@ -340,12 +335,7 @@ def _func_support_ellipsoid(
 
 @qd.func
 def _func_support_capsule(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     """
     Support function for capsule geometry.
@@ -373,12 +363,7 @@ def _func_support_capsule(
 
 @qd.func
 def _func_support_cylinder(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     """
     Support function for cylinder geometry.

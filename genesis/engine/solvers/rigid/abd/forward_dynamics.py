@@ -291,12 +291,7 @@ def func_crb_fold(
 
 @qd.func
 def func_mass_mat_force(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Apply the composite inertia of one link to each of its own degrees of freedom."""
     is_awake = True
@@ -571,12 +566,7 @@ def func_compute_mass_matrix_masked(
 
 @qd.func
 def func_has_implicit_damping_tree(
-    i_t: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_t: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Whether the mass factor of kinematic tree i_t of env i_b takes an implicit damping term.
 
@@ -1902,12 +1892,7 @@ def func_compute_qacc(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidI
 
 @qd.func
 def func_midpoint_eligible(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Whether the link is a free rigid body eligible for midpoint integration this step.
 
@@ -1944,11 +1929,7 @@ def func_midpoint_eligible(
 
 @qd.func
 def func_midpoint_has_fixed_children(
-    i_l: int,
-    i_b: int,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Whether the body of the free root holds links other than the root itself."""
     has_fixed_children = False
@@ -1961,12 +1942,7 @@ def func_midpoint_has_fixed_children(
 
 @qd.func
 def func_midpoint_is_aligned(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Whether the center of mass of the free body sits at its joint origin.
 
@@ -2362,10 +2338,7 @@ def func_integrate(
 
 @qd.func
 def func_clear_coupling_wrench(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Clear the coupling wrench of every link, and count the substep in the settled-step counter of every awake link.
 
@@ -2384,12 +2357,7 @@ def func_clear_coupling_wrench(
 
 @qd.func
 def func_count_settled_step(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Count this substep in the settled-step counter of awake link i_l of env i_b.
 
@@ -2418,10 +2386,7 @@ def func_count_settled_step(
 
 @qd.kernel(fastcache=True)
 def kernel_compute_smooth_qacc(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """
     Factor the mass matrix and solve the smooth acceleration.

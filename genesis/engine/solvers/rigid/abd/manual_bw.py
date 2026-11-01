@@ -15,12 +15,7 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 @qd.func
 def func_forward_kinematics_link_bw(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Reverse the forward kinematics of link i_l of env i_b.
 
@@ -236,10 +231,7 @@ def func_forward_kinematics_link_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_forward_kinematics_bw(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Manual reverse of kernel_forward_kinematics_replay: link pos / quat grads back to qpos and parent-pose grads.
 
@@ -290,12 +282,7 @@ def func_cd_contraction_bw(i_b: int, i_l: int, i_slot: int, dof_lo: int, dof_hi:
 
 @qd.func
 def func_forward_velocity_link_bw(
-    i_l: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Reverse the forward velocity of link i_l of env i_b.
 
@@ -416,10 +403,7 @@ def func_forward_velocity_link_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_forward_velocity_bw(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Manual reverse of kernel_forward_velocity: link velocity grads back to dof velocity and cdof grads.
 

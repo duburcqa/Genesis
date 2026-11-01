@@ -77,12 +77,7 @@ def _func_clear_jac_row(i_con: int, i_b: int, constraint_state: ConstraintState)
 
 @qd.func
 def _append_relevant_dof(
-    i_con: qd.int32,
-    i_d: qd.int32,
-    i_b: qd.int32,
-    n: qd.int32,
-    dedup: qd.int32,
-    constraint_state: ConstraintState,
+    i_con: qd.int32, i_d: qd.int32, i_b: qd.int32, n: qd.int32, dedup: qd.int32, constraint_state: ConstraintState
 ):
     """Append dof i_d to jac_dofs_idx[i_con, :n, i_b] unless already present, returning the new count.
 
@@ -107,11 +102,7 @@ def _append_relevant_dof(
 
 @qd.func
 def _sort_relevant_dofs_descending(
-    i_con: qd.int32,
-    i_b: qd.int32,
-    n: qd.int32,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
+    i_con: qd.int32, i_b: qd.int32, n: qd.int32, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Insertion sort jac_dofs_idx[i_con, :n, i_b] in descending order.
 
@@ -2108,11 +2099,7 @@ def add_frictionloss_constraints(
 
 @qd.func
 def func_compute_island_envelope(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute one island's skyline envelope: the smallest island-local column that can be structurally nonzero in
     each local row of its Hessian block H = M + J.T @ D @ J. The two coupling sources are known a priori:
@@ -2298,10 +2285,7 @@ def func_add_cone_hessian_block_coop(
 
 @qd.func
 def func_wrap_cone_hessian(
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
-    is_removal: qd.template(),
-    is_enabled: bool,
+    constraint_state: ConstraintState, rigid_config: qd.template(), is_removal: qd.template(), is_enabled: bool
 ):
     """Add (is_removal=False) or remove (is_removal=True) the coupled elliptic-cone Hessian block of every improved
     env, a no-op unless the elliptic cone is active and is_enabled holds. is_enabled is a runtime value: the seed
@@ -2446,11 +2430,7 @@ def func_copy_cone_free_hessian_island(i_b: int, i_island: int, constraint_state
 
 @qd.func
 def func_update_cone_free_hessian_flip(
-    i_b: int,
-    i_c: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_c: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Accumulate a flipped constraint's signed J^T D J rank-1 block into the packed cone-free Hessian.
 
@@ -3279,10 +3259,7 @@ def func_island_hessian_patch_block(
 
 @qd.func
 def func_island_hessian_assemble_all(
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    patch: qd.template() = False,
+    constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template(), patch: qd.template() = False
 ):
     """Assemble the Hessian block of every island of the work-list into nt_H ahead of the tiled factor.
 
@@ -3467,11 +3444,7 @@ def func_island_tiled_factor_solve_all(
 
 @qd.func
 def func_cholesky_factor_direct_batch(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the Cholesky factorization L of the Hessian block H = L @ L.T of island i_island in place, at its
     global DOF rows/cols of nt_H[i_b].
@@ -3595,12 +3568,7 @@ def func_build_changed_constraint_list(i_b: int, constraint_state: ConstraintSta
 
 @qd.func
 def func_apply_rank1_dense_block(
-    i_b: int,
-    i_d_start: int,
-    n: int,
-    sign: float,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
+    i_b: int, i_d_start: int, n: int, sign: float, constraint_state: ConstraintState, rigid_info: RigidInfo
 ) -> bool:
     """Apply one rank-1 update (sign +1) or downdate (sign -1) to the dense factor L of the dof block
     [i_d_start, i_d_start + n) in nt_H, every dof of an env holding one island.
@@ -3669,10 +3637,7 @@ def func_rank1_flip_dense_block(
 
 @qd.func
 def func_hessian_and_cholesky_factor_incremental_dense_batch(
-    i_b: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     n_dofs = constraint_state.nt_H.shape[1]
     is_degenerated = False
@@ -3818,11 +3783,7 @@ def func_rank_batch_update_island(
 
 @qd.func
 def func_factor_island_incremental_batch(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     """Fold the active-set flips of island i_island into its Cholesky factor by fused rank-1 updates.
 
@@ -3864,11 +3825,7 @@ def func_factor_island_incremental_batch(
 
 @qd.func
 def func_cone_rank_update_island(
-    i_b: int,
-    i_island: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, i_island: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     """Maintain this island's coupled elliptic-cone contribution in the Cholesky factor L incrementally.
 
@@ -3956,10 +3913,7 @@ def func_cone_rank_update_island(
 
 @qd.func
 def func_cone_rank_update_whole_env(
-    i_b: int,
-    constraint_state: ConstraintState,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     """Maintain the whole-env coupled elliptic-cone contribution in the Cholesky factor L incrementally.
 
@@ -4133,11 +4087,7 @@ def func_factor_island_incremental_or_direct(
 
 @qd.func
 def func_hessian_and_cholesky_factor_incremental_batch(
-    i_b: int,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ) -> bool:
     is_degenerated = False
     # An env holding one island maintains its factor as the whole env, through the changed-row list; the per-island
@@ -4419,11 +4369,7 @@ def _func_cone_head_load(i_c: int, i_b: int, constraint_state: ConstraintState, 
 
 @qd.func
 def _func_cone_head_is_middle(
-    i_c: int,
-    i_b: int,
-    nef: int,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
+    i_c: int, i_b: int, nef: int, constraint_state: ConstraintState, rigid_config: qd.template()
 ) -> bool:
     """Whether elliptic cone contact head i_c sits in the middle (force-carrying) zone this iteration or last.
 
@@ -4838,11 +4784,7 @@ def _func_cone_cost_diff_along_alpha(
 
 @qd.func
 def func_relatch_cone(
-    i_cone: int,
-    i_b: int,
-    normal_force: float,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
+    i_cone: int, i_b: int, normal_force: float, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Move the latch of cone i_cone of env i_b toward normal_force and return it (see cone_latch in rigid/data.py).
 
@@ -5398,12 +5340,7 @@ def initialize_Jaref(qacc: qd.Tensor, constraint_state: ConstraintState, rigid_c
 
 @qd.func
 def _initialize_Jaref_body(
-    i_c: int,
-    i_b: int,
-    n_dofs: int,
-    qacc: qd.template(),
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
+    i_c: int, i_b: int, n_dofs: int, qacc: qd.template(), constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     Jaref = -constraint_state.aref[i_c, i_b]
     for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
@@ -5453,11 +5390,7 @@ def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: Constraint
 
 @qd.func
 def initialize_Ma(
-    Ma: qd.Tensor,
-    qacc: qd.Tensor,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    Ma: qd.Tensor, qacc: qd.Tensor, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     _B = rigid_info.mass_mat.shape[2]
     n_dofs = qacc.shape[0]
@@ -6052,10 +5985,7 @@ def kernel_resolve_post(
 
 @qd.func
 def func_update_qacc(
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
-    errno: qd.Tensor,
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template(), errno: qd.Tensor
 ):
     n_dofs = dyn_state.dofs.acc.shape[0]
     _B = dyn_state.dofs.acc.shape[1]

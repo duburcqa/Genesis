@@ -45,11 +45,7 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
 
 @qd.kernel(fastcache=True)
 def kernel_copy_next_to_curr_clear_coupling(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-    errno: qd.Tensor,
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
     """Copy the integrated state to the current one, then clear the coupling wrench (see func_clear_coupling_wrench)."""
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)

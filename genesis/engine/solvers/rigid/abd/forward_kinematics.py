@@ -239,12 +239,7 @@ def kernel_masked_forward_velocity(
 
 @qd.func
 def func_update_kinematics_root(
-    i_l_root: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the poses of the links of kinematic root i_l_root of env i_b, its center of mass and its link velocities.
 
@@ -262,12 +257,7 @@ def func_update_kinematics_root(
 
 @qd.func
 def func_COM_root_sum(
-    i_l_root,
-    i_b,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the mass and the center of mass of a kinematic root.
 
@@ -359,12 +349,7 @@ def func_COM_link(i_l, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: 
 
 @qd.func
 def func_COM_root(
-    i_l_root: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the center of mass of a kinematic root and the inertia of each of its links about it.
 
@@ -648,10 +633,7 @@ def func_update_geoms_root(
 
 @qd.func
 def func_update_geoms(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-    force_update_all_geoms: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), force_update_all_geoms: qd.template()
 ):
     """Place the movable geoms of every awake link of every env on their link, one thread per geom.
 
@@ -929,10 +911,7 @@ def func_forward_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_update_verts_for_geoms(
-    geoms_idx: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    geoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     n_geoms = geoms_idx.shape[0]
     _B = dyn_state.geoms.verts_updated.shape[1]
@@ -989,10 +968,7 @@ def kernel_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config
 
 @qd.func
 def func_update_geom_aabbs(
-    geoms_init_AABB: qd.Tensor,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    geoms_init_AABB: qd.Tensor, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """Fit the world-frame axis-aligned bounding box (AABB) of every geom in every environment.
 
@@ -1047,10 +1023,7 @@ def kernel_update_vgeoms(dyn_state: DynState, dyn_info: DynInfo, rigid_config: q
 
 @qd.kernel(fastcache=True)
 def kernel_update_vverts_for_vgeoms(
-    vgeoms_idx: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
+    vgeoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """
     Refresh vverts_state.pos for the requested vgeom range from FK output. Only iterates vverts that have a slot in
@@ -1341,10 +1314,7 @@ def kernel_forward_kinematics_replay(
 
 @qd.kernel(fastcache=True)
 def kernel_update_geoms_replay(
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     # The reversed kernels place every geom (see reverse_cartesian_space)
     func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)

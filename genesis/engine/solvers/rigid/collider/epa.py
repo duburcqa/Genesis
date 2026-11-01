@@ -875,15 +875,7 @@ def func_epa_support(
 
 @qd.func
 def func_attach_face_to_polytope(
-    i_b: int,
-    i_v1: int,
-    i_v2: int,
-    i_v3: int,
-    i_a1: int,
-    i_a2: int,
-    i_a3: int,
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
+    i_b: int, i_v1: int, i_v2: int, i_v3: int, i_a1: int, i_a2: int, i_a3: int, gjk_state: GJKState, gjk_info: GJKInfo
 ):
     """
     Attach a face to the polytope.
@@ -1319,15 +1311,7 @@ def func_safe_epa_init(i_ga: int, i_gb: int, i_b: int, gjk_state: GJKState, gjk_
 
 @qd.func
 def func_safe_attach_face_to_polytope(
-    i_b: int,
-    i_v1: int,
-    i_v2: int,
-    i_v3: int,
-    i_a1: int,
-    i_a2: int,
-    i_a3: int,
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
+    i_b: int, i_v1: int, i_v2: int, i_v3: int, i_a1: int, i_a2: int, i_a3: int, gjk_state: GJKState, gjk_info: GJKInfo
 ):
     """
     Attach a face to the polytope.

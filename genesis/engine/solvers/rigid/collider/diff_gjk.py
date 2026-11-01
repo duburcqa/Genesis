@@ -874,12 +874,7 @@ def func_plane_contact_frame(i_b: int, i_ga: int, i_gb: int, dyn_state: DynState
 
 @qd.func
 def func_differentiable_sphere_contact(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
+    i_ga: int, i_gb: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo
 ):
     """Differentiable sphere-sphere contact reconstruction.
 

@@ -1361,12 +1361,7 @@ def func_safe_gjk(
 
 @qd.func
 def func_is_new_simplex_vertex_valid(
-    i_b: int,
-    id1: int,
-    id2: int,
-    mink: qd.types.vector(3),
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
+    i_b: int, id1: int, id2: int, mink: qd.types.vector(3), gjk_state: GJKState, gjk_info: GJKInfo
 ):
     """
     Check validity of the incoming simplex vertex (defined by id1, id2 and mink).
@@ -1446,11 +1441,7 @@ def func_is_colinear(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.type
 
 @qd.func
 def func_is_coplanar(
-    v1: qd.types.vector(3),
-    v2: qd.types.vector(3),
-    v3: qd.types.vector(3),
-    v4: qd.types.vector(3),
-    gjk_info: GJKInfo,
+    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), v4: qd.types.vector(3), gjk_info: GJKInfo
 ):
     """
     Check if four points are coplanar.
@@ -1720,11 +1711,7 @@ def func_safe_gjk_support(
 
 @qd.func
 def count_support_driver(
-    i_g: int,
-    d: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: DynInfo,
-    support_field_info: SupportFieldInfo,
+    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, support_field_info: SupportFieldInfo
 ):
     """
     Count the number of possible support points in the given direction,

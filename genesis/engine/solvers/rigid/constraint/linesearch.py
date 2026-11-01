@@ -262,11 +262,7 @@ def func_cone_head_kinks(
 
 @qd.func
 def func_dof_p0_terms(
-    i_d: int,
-    i_b: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    rigid_config: qd.template(),
+    i_d: int, i_b: int, dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Per-dof terms of the line search initialization along the search direction.
 
@@ -565,11 +561,7 @@ def func_ls_state_advance(
 
 @qd.func
 def func_exit_decision(
-    terms: qd.types.vector(7),
-    improvement: float,
-    inertia: float,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+    terms: qd.types.vector(7), improvement: float, inertia: float, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Convergence test of one island from its exit terms (see func_dof_exit_terms) and the improvement of its last line
     search, on the island's own inertia scale: a flat gradient or a stalled improvement stops the iteration, and for

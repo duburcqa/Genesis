@@ -438,12 +438,7 @@ def func_cmp_bit(v1: int, v2: int, v3: int, n: int, shift: int):
 
 @qd.func
 def func_box_normal_from_collision_normal(
-    i_g: int,
-    i_b: int,
-    quat: qd.types.vector(4),
-    dir: qd.types.vector(3),
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
+    i_g: int, i_b: int, quat: qd.types.vector(4), dir: qd.types.vector(3), gjk_state: GJKState, gjk_info: GJKInfo
 ):
     """
     Among the 6 faces of the box, find the one of which normal is closest to the [dir].
@@ -733,12 +728,7 @@ def func_safe_normalize(v: qd.types.vector(3), gjk_info: GJKInfo):
 
 @qd.func
 def func_find_aligned_edge_face(
-    i_b: int,
-    nedge: int,
-    nface: int,
-    gjk_state: GJKState,
-    gjk_info: GJKInfo,
-    is_edge_face: bool,
+    i_b: int, nedge: int, nface: int, gjk_state: GJKState, gjk_info: GJKInfo, is_edge_face: bool
 ):
     """
     Find if an edge and face from [contact_faces] are aligned.
@@ -1058,11 +1048,7 @@ def func_halfspace(a: qd.types.vector(3), n: qd.types.vector(3), p: qd.types.vec
 
 @qd.func
 def func_plane_intersect(
-    pn: qd.types.vector(3),
-    pd: float,
-    v1: qd.types.vector(3),
-    v2: qd.types.vector(3),
-    gjk_info: GJKInfo,
+    pn: qd.types.vector(3), pd: float, v1: qd.types.vector(3), v2: qd.types.vector(3), gjk_info: GJKInfo
 ):
     """
     Compute the intersection point of the line segment [v1, v2]

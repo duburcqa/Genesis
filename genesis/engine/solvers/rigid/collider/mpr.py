@@ -117,11 +117,7 @@ def mpr_point_segment_dist2(P: qd.types.vector(3), A: qd.types.vector(3), B: qd.
 
 @qd.func
 def mpr_point_tri_depth(
-    P: qd.types.vector(3),
-    x0: qd.types.vector(3),
-    B: qd.types.vector(3),
-    C: qd.types.vector(3),
-    mpr_info: MPRInfo,
+    P: qd.types.vector(3), x0: qd.types.vector(3), B: qd.types.vector(3), C: qd.types.vector(3), mpr_info: MPRInfo
 ):
     d1 = B - x0
     d2 = C - x0
@@ -284,11 +280,7 @@ def compute_support(
 
 @qd.func
 def func_geom_support(
-    i_g: int,
-    direction: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: DynInfo,
+    i_g: int, direction: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo
 ):
     direction_in_init_frame = gu.qd_inv_transform_by_quat(direction, quat)
 
