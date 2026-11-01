@@ -440,7 +440,7 @@ def kernel_attach_mpm_particles(
     for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
         if particles_mask[i_b, i_p_]:
             i_p = i_p_ + particles_start
-            # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
+            # Between two steps, the state sits in frame 0 (see 'System.has_frames')
             pos = mpm_state.particles.pos[0, i_p, i_b]
             rigid_mpm_attachment_info.stiffness[i_p, i_b] = stiffness
             rigid_mpm_attachment_info.link_idx[i_p, i_b] = link_idx

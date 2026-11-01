@@ -8,7 +8,7 @@ from genesis.utils.repr import brief
 
 
 class CubeBoundaryBox(Data, kind=DataKind.CONSTANT, shape=()):
-    """An axis-aligned box confining the particles, which bounce off its walls with the given restitution."""
+    """The corners and the restitution of a cube boundary (see CubeBoundary)."""
 
     lower: qd.Tensor = field((float, 3))
     upper: qd.Tensor = field((float, 3))
@@ -16,7 +16,7 @@ class CubeBoundaryBox(Data, kind=DataKind.CONSTANT, shape=()):
 
 
 class FloorBoundaryPlane(Data, kind=DataKind.CONSTANT, shape=()):
-    """The floor of the FEM solver, at a height and with a restitution (see FloorBoundary in boundaries.py)."""
+    """The floor of the FEM solver, at a height and with a restitution (see FloorBoundary)."""
 
     height: qd.Tensor = field(float)
     restitution: qd.Tensor = field(float)

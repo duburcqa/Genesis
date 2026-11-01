@@ -1879,9 +1879,9 @@ class RigidEntity(KinematicEntity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         allow_fast_approx : bool
-            Whether to allow fast approximation for efficiency if supported, i.e. the options of the legacy coupler are used. In this
-            case, each collision geometry is approximated by their pre-computed AABB in geometry-local frame, which is
-            more efficiency but inaccurate.
+            Whether to allow fast approximation for efficiency if supported, i.e. 'LegacyCouplerOptions' are used. In
+            this case, each collision geometry is approximated by their pre-computed AABB in geometry-local frame, which
+            is more efficiency but inaccurate.
 
         Returns
         -------

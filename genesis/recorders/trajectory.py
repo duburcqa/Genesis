@@ -167,24 +167,15 @@ def _json_value(value):
 
     An enum member becomes its name, a numpy scalar a native, a tuple a list and a static config an object.
     """
-    root = [value]
-    # The slots left to convert, each converted in place before its own items are queued
-    pending = [(root, 0)]
-    while pending:
-        container, key = pending.pop()
-        item = container[key]
-        if isinstance(item, StaticConfig):
-            item = {name: config_value for name, config_value in vars(item).items() if not name.startswith("_")}
-            pending += [(item, name) for name in item]
-        elif isinstance(item, tuple):
-            item = list(item)
-            pending += [(item, i) for i in range(len(item))]
-        elif isinstance(item, enum.Enum):
-            item = item.name
-        elif isinstance(item, np.generic):
-            item = item.item()
-        container[key] = item
-    return root[0]
+    if isinstance(value, StaticConfig):
+        return {name: _json_value(item) for name, item in vars(value).items() if not name.startswith("_")}
+    if isinstance(value, tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, enum.Enum):
+        return value.name
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _fields_to_json(fields: list[FrameField]) -> list:

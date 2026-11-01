@@ -72,7 +72,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self._lower_bound = np.array(options.lower_bound)
 
         self._n_particles: int | None = None
-        # Held in frames for a solver whose state is (see 'Solver.has_frames')
+        # Held in frames for a solver whose state is (see 'System.has_frames')
         self._particles: Data | None = None
         self._particles_params: Data | None = None
         self._vverts_support: VVertsSupport | None = None
@@ -245,7 +245,7 @@ def kernel_add_vverts(
 
 
 # The accessors of the particles read and write frame 0 of a solver holding its state in frames, which holds the state
-# between two steps (see 'Solver.has_frames')
+# between two steps (see 'System.has_frames')
 
 
 @qd.kernel(fastcache=True)

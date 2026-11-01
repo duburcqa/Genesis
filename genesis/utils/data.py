@@ -682,11 +682,11 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
 
 
 class DataKind(IntEnum):
-    """The kind of every array or scalar a solver yields (see 'Solver.data'), which checkpoints and trajectories
+    """The kind of every array or scalar a solver yields (see 'System.data'), which checkpoints and trajectories
     select by.
 
     An array the next step reads before writing it is STATE or INFO, and a DERIVED array is recomputed before it is
-    read, by the next step or by the restore of a record without it (see 'Solver.__setstate__').
+    read, by the next step or by the restore of a record without it (see 'System.__setstate__').
     """
 
     CONSTANT = 0
@@ -818,7 +818,7 @@ def check_data(
     differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
     and so does a name on one side only, since the record comes from another build or version. An unused array, of
     shape () on either side, stays as built. With
-    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
+    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'System.has_frames').
     """
     items = tuple(items)
     unshared = sorted({item.name for item in items} ^ set(values))

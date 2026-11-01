@@ -291,9 +291,7 @@ class Visualizer(RBC):
                 for entity in solver.entities:
                     if isinstance(entity, gs.engine.entities.DroneEntity):
                         entity.update_propeller_vgeoms()
-            elif isinstance(
-                solver, (gs.engine.solvers.MPMSolver, gs.engine.solvers.SPHSolver, gs.engine.solvers.PBDSolver)
-            ):
+            elif isinstance(solver, gs.engine.solvers.ParticleSolver):
                 solver.update_render_fields()
 
         if solvers is None:

@@ -23,7 +23,7 @@ class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
     The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
 
     A cell of integer coordinates hashes to one of the slots, whose particles take the indices from `slot_start` to
-    `slot_start + slot_size` once sorted (see func_hash_compute_reordered_idx in genesis/utils/geom.py).
+    `slot_start + slot_size` once sorted (see func_hash_compute_reordered_idx).
     """
 
     slot_size: qd.Tensor = field(int)

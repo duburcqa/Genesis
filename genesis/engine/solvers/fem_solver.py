@@ -742,7 +742,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         poss, verts_idx, envs_idx = self._sanitize_io_variables(
             poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
+        # Between two steps, the state sits in frame 0 (see 'System.has_frames')
         kernel_set_verts_values(0, verts_idx, envs_idx, poss, self.fem_state.vertices.pos)
 
     def get_verts_pos(self, verts_idx=None, envs_idx=None):

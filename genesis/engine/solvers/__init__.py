@@ -1,6 +1,7 @@
 from .fem_solver import FEMSolver
 from .kinematic_solver import KinematicSolver
 from .mpm_solver import MPMSolver
+from .particle_solver import ParticleSolver
 from .pbd_solver import PBDSolver
 from .rigid.collider import Collider
 from .rigid.constraint import ConstraintSolver

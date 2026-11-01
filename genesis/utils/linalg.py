@@ -21,9 +21,9 @@ class FixedOrderSums(Data, kind=DataKind.SCRATCH):
     The terms of fixed-order sums over the items of each environment, and their partial sums.
 
     A sum runs in three steps, so that it is bitwise reproducible whatever the scheduling of the threads. Each item
-    writes its term of sum k into `terms[i_item, k, i_b]`, func_reduce_terms in genesis/utils/linalg.py sums the terms
-    over contiguous chunks of the items into `partials[i_chunk, k, i_b]`, and func_sum_chunks sums the partials of an
-    environment in order. Items no more numerous than SUM_MAX_CHUNKS are their own chunks.
+    writes its term of sum k into `terms[i_item, k, i_b]`, func_reduce_terms sums the terms over contiguous chunks of
+    the items into `partials[i_chunk, k, i_b]`, and func_sum_chunks sums the partials of an environment in order. Items
+    no more numerous than SUM_MAX_CHUNKS are their own chunks.
     """
 
     terms: qd.Tensor = field(float, shape=(SUM_ITEMS, SUMS, ENVS))

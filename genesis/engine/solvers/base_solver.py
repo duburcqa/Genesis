@@ -89,7 +89,7 @@ class TimeBasedMixin:
         The number of frames of substeps the solver holds.
 
         A solver holding its state in frames keeps those of one step with gradients, whose backward pass replays it
-        whole, and those of one substep otherwise (see 'Solver.has_frames').
+        whole, and those of one substep otherwise (see 'System.has_frames').
         """
         return self._substeps + 1 if self._requires_grad else 2
 
