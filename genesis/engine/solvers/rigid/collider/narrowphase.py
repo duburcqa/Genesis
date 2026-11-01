@@ -1357,15 +1357,20 @@ def func_contact_convex_convex_sdf(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     sdf_info: SDFInfo,
+    enable_edge_detection_fallback: qd.template(),
 ):
     """
     Detect the contact of the convex geom A with the signed distance field (SDF) of B at the deepest vertex of A.
 
     The deepest vertex is found by descending the signed distance of B over the edge graph of A, from the vertex of A
     closest to the center of B. The descent strictly decreases the signed distance, so it visits every vertex at most
-    once. Returns whether the vertex penetrates B, the normal pointing from B to A, the penetration and the midpoint
-    between the vertex and the surface of B.
+    once. When no vertex penetrates B, 'enable_edge_detection_fallback' searches the edges of A around the closest
+    vertex for a point inside B, by bisection along the gradient of the SDF of B down to the SDF cell size of A. Returns
+    whether A penetrates B, the normal pointing from B to A, the penetration and the midpoint between the deepest point
+    of A and the surface of B.
     """
+    EPS = rigid_info.EPS[None]
+
     is_col = False
     penetration = gs.qd_float(0.0)
     normal = qd.Vector.zero(gs.qd_float, 3)
@@ -1396,7 +1401,69 @@ def func_contact_convex_convex_sdf(
             i_gb, pos_v_closest, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
         )
         penetration = -sd_v_closest
-        contact_pos = pos_v_closest + 0.5 * penetration * normal
+        contact_pos = pos_v_closest
+    elif qd.static(enable_edge_detection_fallback):
+        i_va = i_v_closest
+        i_n_start = collider_info.vert_neighbor_start[i_va]
+        for i_neighbor_ in range(i_n_start, i_n_start + collider_info.vert_n_neighbors[i_va]):
+            if not is_col:
+                i_neighbor = collider_info.vert_neighbors[i_neighbor_]
+
+                p_0 = pos_v_closest
+                p_1 = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
+                vec_01 = gu.qd_normalize(p_1 - p_0, EPS)
+
+                sdf_grad_0_b = sdf.sdf_func_grad_world_local(
+                    i_gb, p_0, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+                )
+                sdf_grad_1_b = sdf.sdf_func_grad_world_local(
+                    i_gb, p_1, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+                )
+
+                # The edge of A faces B when the outward normal of A across the edge opposes the gradient of B
+                sdf_grad_0_a = sdf.sdf_func_grad_world_local(
+                    i_ga, p_0, ga_pos, ga_quat, dyn_info.geoms, rigid_info, sdf_info
+                )
+                sdf_grad_1_a = sdf.sdf_func_grad_world_local(
+                    i_ga, p_1, ga_pos, ga_quat, dyn_info.geoms, rigid_info, sdf_info
+                )
+                normal_edge_0 = sdf_grad_0_a - sdf_grad_0_a.dot(vec_01) * vec_01
+                normal_edge_1 = sdf_grad_1_a - sdf_grad_1_a.dot(vec_01) * vec_01
+
+                if normal_edge_0.dot(sdf_grad_0_b) < 0 or normal_edge_1.dot(sdf_grad_1_b) < 0:
+                    # The point of the edge closest to B lies between its ends when the gradient of B turns along it
+                    if sdf_grad_0_b.dot(vec_01) < 0 and sdf_grad_1_b.dot(vec_01) > 0:
+                        ga_sdf_cell_size_vec = sdf_info.geoms_info.sdf_cell_size[i_ga]
+                        ga_sdf_cell_size = qd.min(
+                            qd.min(ga_sdf_cell_size_vec[0], ga_sdf_cell_size_vec[1]), ga_sdf_cell_size_vec[2]
+                        )
+                        # Halve the edge until it is no longer than the SDF cell size of A
+                        n_bisections = qd.cast(
+                            qd.ceil(qd.log(qd.max((p_1 - p_0).norm() / ga_sdf_cell_size, 1.0)) / qd.log(2.0)),
+                            gs.qd_int,
+                        )
+                        for _ in range(n_bisections):
+                            p_mid = 0.5 * (p_0 + p_1)
+                            side = sdf.sdf_func_grad_world_local(
+                                i_gb, p_mid, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+                            ).dot(vec_01)
+                            if side < 0:
+                                p_0 = p_mid
+                            else:
+                                p_1 = p_mid
+
+                        p = 0.5 * (p_0 + p_1)
+                        new_penetration = -sdf.sdf_func_world_local(i_gb, p, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
+                        if new_penetration > 0.0:
+                            is_col = True
+                            normal = sdf.sdf_func_normal_world_local(
+                                i_gb, p, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info
+                            )
+                            contact_pos = p
+                            penetration = new_penetration
+
+    # The contact point lies midway between the deepest point of A and the surface of B
+    contact_pos = contact_pos + 0.5 * penetration * normal
 
     return is_col, normal, penetration, contact_pos
 
@@ -1454,6 +1521,8 @@ def func_contact_sdf(
                 i_g1, i_g2 = i_gb, i_ga
                 g1_pos, g1_quat, g2_pos, g2_quat = gb_pos, gb_quat, ga_pos, ga_quat
             # The vertices of a plane bound a finite patch of an infinite surface, so they hold no contact
+            # The edge fallback is compiled out: across an edge the gradient of a grid SDF is smoothed, so the depth
+            # and the normal it yields fall far from those of the edge crossing it detects
             if dyn_info.geoms.type[i_g1] != gs.GEOM_TYPE.PLANE:
                 is_col_i, normal_i, penetration_i, contact_pos_i = func_contact_convex_convex_sdf(
                     i_g1,
@@ -1468,6 +1537,7 @@ def func_contact_sdf(
                     rigid_info,
                     collider_info,
                     sdf_info,
+                    enable_edge_detection_fallback=False,
                 )
                 if is_col_i and penetration_i > penetration:
                     is_col = True
