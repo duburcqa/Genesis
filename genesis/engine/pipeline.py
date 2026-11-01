@@ -172,11 +172,6 @@ class System:
         """Allocate the Data whose sizes the scene decides, once the Systems it depends on are built."""
 
     @property
-    def requires(self) -> "tuple[type[System], ...]":
-        """The components a System the scene holds already uses beyond its constructor, created on demand for it."""
-        return ()
-
-    @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         """
         Yield every array and static config the System holds, named by the attributes reaching it (see iter_data).
@@ -958,7 +953,6 @@ def assemble_systems(
         if all([dependency is not other for other in systems])
     }
     classes_pending = [cls for cls in _SYSTEM_CLASSES if all([type(system) is not cls for system in systems])]
-    classes_pending += list(dict.fromkeys([cls for system in systems for cls in system.requires]))
     dependencies_by_cls: dict[type, list[_Dependency]] = {}
 
     def decide(cls: type[System]) -> "dict[str, Any] | str | None":

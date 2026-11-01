@@ -2,12 +2,12 @@ import importlib
 import pkgutil
 import sys
 import traceback
-from typing import ForwardRef, get_args, get_origin
+from typing import Annotated, ForwardRef, get_args, get_origin
 
 import torch
 
 import genesis as gs
-from genesis.engine.pipeline import System
+from genesis.engine.pipeline import Enabled, System, register_system
 from genesis.engine.step import Observation
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
@@ -328,11 +328,11 @@ class SensorManager(Observation):
             )
 
     @property
-    def requires(self) -> tuple[type[System], ...]:
-        """The signed distance fields (SDF) of the rigid geoms, which a tactile sensor querying them reads."""
-        if any([isinstance(sensor, ContactDepthQuerySensorMixin) and sensor.is_sdf_queried for sensor in self.sensors]):
-            return (SDF,)
-        return ()
+    def is_sdf_queried(self) -> bool:
+        """Whether a tactile sensor queries the signed distance fields (SDF) of the rigid geoms."""
+        return any(
+            [isinstance(sensor, ContactDepthQuerySensorMixin) and sensor.is_sdf_queried for sensor in self.sensors]
+        )
 
     def observe(self):
         # Timeline rings must rotate before `_update_shared_cache` because `_apply_transform` mutates `at(0)` of the
@@ -510,3 +510,11 @@ class SensorManager(Observation):
     @property
     def sensors(self):
         return gs.List([sensor for sensor_list in self._sensors_by_type.values() for sensor in sensor_list])
+
+
+@register_system
+class SensorSDF(System):
+    """The signed distance fields (SDF) of the rigid geoms, created for the tactile sensors querying them."""
+
+    def __init__(self, sensor_manager: Annotated[SensorManager, Enabled("is_sdf_queried")], sdf: SDF) -> None:
+        pass
