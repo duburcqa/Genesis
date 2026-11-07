@@ -125,7 +125,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             mat_idx=gs.qd_int,  # material model index
             B=gs.qd_mat3,  # inverse of the deformation gradient at rest state
             V=gs.qd_float,  # rest volume of the element
-            V_scaled=gs.qd_float,  # scaled rest volume of the element
             friction_mu=gs.qd_float,  # friction coefficient for contact
             # for muscle
             muscle_group=gs.qd_int,
@@ -436,42 +435,34 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_v[f + 1, i_v, i_b].pos = self.elements_v[f, i_v, i_b].pos
             self.elements_v[f + 1, i_v, i_b].vel = self.elements_v[f, i_v, i_b].vel
 
+    @qd.func
+    def _func_element_internal_force(self, f: int, i_e: int, i_b: int):
+        # The elastic force of the element on each of its vertices, one per column, from the stress its solver uses. The
+        # columns sum to zero, so the forces conserve momentum once each vertex divides its own by its own mass.
+        J, F = self._compute_ele_J_F(f, i_e, i_b)
+        mu = self.elements_i[i_e].mu
+        lam = self.elements_i[i_e].lam
+        actu = self.elements_el[f, i_e, i_b].actu
+        m_dir = self.elements_i[i_e].muscle_direction
+        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for mat_idx in qd.static(self._mats_idx):
+            if self.elements_i[i_e].mat_idx == mat_idx:
+                if qd.static(self._use_implicit_solver):
+                    _, stress = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
+                else:
+                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
+        H = -self.elements_i[i_e].V * stress @ self.elements_i[i_e].B.transpose()
+        return qd.Matrix.cols([H[:, 0], H[:, 1], H[:, 2], -H[:, 0] - H[:, 1] - H[:, 2]])
+
     @qd.kernel
     def compute_vel(self, f: qd.i32):
         for i_e, i_b in qd.ndrange(self.n_elements, self._B):
-            i_v0, i_v1, i_v2, i_v3 = self.elements_i[i_e].el2v
-            pos_v0 = self.elements_v[f, i_v0, i_b].pos
-            pos_v1 = self.elements_v[f, i_v1, i_b].pos
-            pos_v2 = self.elements_v[f, i_v2, i_b].pos
-            pos_v3 = self.elements_v[f, i_v3, i_b].pos
-            D = qd.Matrix.cols([pos_v0 - pos_v3, pos_v1 - pos_v3, pos_v2 - pos_v3])
-
-            V_scaled = self.elements_i[i_e].V_scaled
-            B = self.elements_i[i_e].B
-            F = D @ B
-            J = F.determinant()
-
-            mu = self.elements_i[i_e].mu
-            lam = self.elements_i[i_e].lam
-            actu = self.elements_el[f, i_e, i_b].actu
-            m_dir = self.elements_i[i_e].muscle_direction
-            stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
-
-            verts = self.elements_i[i_e].el2v
-            mass_scaled = self.elements_i[i_e].mass_scaled
-            H_scaled = -V_scaled * stress @ B.transpose()
-            for k in qd.static(range(3)):
-                force_scaled = qd.Vector([H_scaled[j, k] for j in range(3)])
-
-                # store so forces can be read out
-                self.elements_v_energy[i_b, verts[k]].force = force_scaled
-
-                dv = self.substep_dt * force_scaled / mass_scaled
-                self.elements_v[f + 1, verts[k], i_b].vel += dv
-                self.elements_v[f + 1, verts[3], i_b].vel -= dv
+            force = self._func_element_internal_force(f, i_e, i_b)
+            i_vs = self.elements_i[i_e].el2v
+            for i in qd.static(range(4)):
+                i_v = i_vs[i]
+                dv = self.substep_dt * self.elements_v_info[i_v].mass_inv * force[:, i]
+                qd.atomic_add(self.elements_v[f + 1, i_v, i_b].vel, dv)
 
     @qd.kernel
     def apply_uniform_force(self, f: qd.i32):
@@ -1118,7 +1109,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def get_forces(self):
         """
-        Get forces on all vertices.
+        Get the internal elastic force on every vertex, computed from the current state.
+
+        The force of each element follows the material model of the solver in use, and the forces of a body sum to zero.
+        Damping, gravity and contact forces are left out.
 
         Returns:
             torch.Tensor : shape (B, n_vertices, 3) where B is batch size
@@ -1126,7 +1120,25 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if not self.is_active:
             return None
 
-        return qd_to_torch(self.elements_v_energy.force, copy=True)
+        # Between two steps, the state sits in frame 0 (see 'Solver.has_frames'). The linear corotated model takes the
+        # rotation of each element from this state.
+        if self._use_implicit_solver:
+            self.precompute_material_data(0)
+        forces = torch.zeros((self._B, self.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
+        self._kernel_get_forces(0, forces)
+        return forces
+
+    @qd.kernel
+    def _kernel_get_forces(self, f: int, forces: qd.types.ndarray()):
+        # One thread per environment adds up the forces of the elements in their order, so the sum is reproducible
+        for i_b in range(self._B):
+            for i_e in range(self.n_elements):
+                force = self._func_element_internal_force(f, i_e, i_b)
+                i_vs = self.elements_i[i_e].el2v
+                for i in qd.static(range(4)):
+                    i_v = i_vs[i]
+                    for j in qd.static(range(3)):
+                        forces[i_b, i_v, j] = forces[i_b, i_v, j] + force[j, i]
 
     @qd.kernel
     def add_elements(
@@ -1175,8 +1187,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.tet_wrong_order[None] = True
             V = qd.abs(det) / 6.0
             self.elements_i[i_global].V = V
-            V_scaled = V * self._vol_scale
-            self.elements_i[i_global].V_scaled = V_scaled
 
             for j in qd.static(range(4)):
                 self.elements_i[i_global].el2v[j] = elems[i_e, j] + v_start
@@ -1184,7 +1194,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_i[i_global].mu = mat_mu
             self.elements_i[i_global].lam = mat_lam
             self.elements_i[i_global].friction_mu = mat_friction_mu
-            self.elements_i[i_global].mass_scaled = mat_rho * V_scaled
+            self.elements_i[i_global].mass_scaled = mat_rho * V * self._vol_scale
             self.elements_i[i_global].muscle_group = 0
             self.elements_i[i_global].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
 
