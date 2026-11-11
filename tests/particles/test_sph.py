@@ -461,6 +461,9 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
             p_bottom = pressures[heights < 0.05].mean()
             if i_step >= 80:
                 assert_allclose(p_bottom, weight_per_area, rtol=0.5)
+                # A settled column only keeps a residual sloshing, far slower than a gravity wave over its depth
+                speeds = liquid.get_particles_vel()[0].norm(dim=-1)
+                assert (speeds < 0.05 * np.sqrt(GRAVITY * LIQUID_SIZE[2])).all()
             p_bottoms.append(p_bottom)
             p_middles.append(pressures[(heights >= 0.2) & (heights < 0.25)].mean())
             p_tops.append(pressures[heights >= 0.3].mean())
