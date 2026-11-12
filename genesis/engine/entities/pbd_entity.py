@@ -198,6 +198,8 @@ class PBDTetEntity(PBDBaseEntity):
         self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
 
         self._mesh = self._vmesh.copy()
+        if isinstance(self._morph, gs.options.morphs.Mesh) and self._morph.decimate:
+            self._mesh.decimate(self._morph.decimate_face_num, self._morph.decimate_aggressiveness)
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
     # ------------------------------------------------------------------------------------

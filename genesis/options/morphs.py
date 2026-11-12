@@ -706,9 +706,9 @@ class Mesh(FileMorph, TetGenMixin):
 
     Note
     ----
-    In order to speed up simulation, the loaded mesh will first be decimated (simplified) to a target number of faces,
-    followed by convexification (for collision mesh only).
-    Such process can be disabled by setting `decimate` and `convexify` to False.
+    In order to speed up simulation, the mesh the entity simulates is decimated (simplified) to a target number of
+    faces, whatever the entity type, and the collision mesh of a rigid entity is convexified. Both processes can be
+    disabled by setting `decimate` and `convexify` to False.
 
     Parameters
     ----------
@@ -726,16 +726,21 @@ class Mesh(FileMorph, TetGenMixin):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
-        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
-        RigidEntity.**
+        Whether to decimate (simplify) the mesh the entity simulates, for every entity type: the collision mesh of a
+        rigid entity, the surface a FEM or PBD entity is tetrahedralized from or simulated with, and the volume the
+        particles of a particle-based entity are sampled in. Decimation speeds up building and simulating a dense mesh
+        (fewer elements, cheaper collision detection) at the cost of geometric detail. A separate visual mesh (rigid
+        and particle-based entities) keeps its detail, whereas a FEM entity renders its decimated surface, without the
+        textures of the file. A watertight mesh must stay watertight, else an exception is raised. Defaults to True,
+        except for cloth, whose authored triangles decimation would turn into irregular slivers, and for a rigid
+        entity whose collision mesh is not convexified, since decimation removes the surface detail it is kept for.
     decimate_face_num : int, optional
-        The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
+        The number of faces to decimate to. Defaults to 500.
     decimate_aggressiveness : int
         How hard the decimation process will try to match the target number of faces, as a integer ranging from 0 to 8.
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
-        geometry if necessary. 8 does what needs to be done at all costs. Defaults to 5.
-        **This is only used for RigidEntity.**
+        geometry if necessary. 8 does what needs to be done at all costs. Higher values yield fewer elements, but are
+        more likely to break the watertightness of the mesh. Defaults to 2.
     watertighten : int, optional
         Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
         integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or

@@ -214,17 +214,27 @@ class ParticleEntity(Entity):
         """
         self.init_sampler()
 
+        if isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+            # The particles fill the volume of the decimated meshes, while the visual meshes keep their detail
+            meshes = self._vmesh if isinstance(self._morph, gs.options.morphs.MeshSet) else [self._vmesh]
+            if isinstance(self._morph, gs.options.morphs.Mesh) and self._morph.decimate:
+                meshes = [mesh.copy() for mesh in meshes]
+                for mesh in meshes:
+                    mesh.decimate(self._morph.decimate_face_num, self._morph.decimate_aggressiveness)
+
         if isinstance(self._morph, gs.options.morphs.MeshSet):
             particles = []
-            for vmesh_i, pos_i, euler_i in zip(self._vmesh, self._morph.poss, self._morph.eulers, strict=True):
+            for mesh_i, vmesh_i, pos_i, euler_i in zip(
+                meshes, self._vmesh, self._morph.poss, self._morph.eulers, strict=True
+            ):
                 trans_i = np.array(pos_i, dtype=gs.np_float)
                 quat_i = gu.xyz_to_quat(np.array(euler_i, dtype=gs.np_float), rpy=True, degrees=True)
                 # Sample before posing the mesh, so the lattice and the sampling cache depend on the member shape alone
-                particles_i = vmesh_i.particlize(self._particle_size, self.sampler)
+                particles_i = mesh_i.particlize(self._particle_size, self.sampler)
                 particles.append(gu.transform_by_trans_quat(particles_i, trans_i, quat_i))
                 vmesh_i.apply_transform(gu.trans_quat_to_T(trans_i, quat_i))
         elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
-            particles = self._vmesh.particlize(self._particle_size, self.sampler)
+            particles = meshes[0].particlize(self._particle_size, self.sampler)
             particles = particles.astype(gs.np_float, order="C", copy=False)
         elif isinstance(self._morph, gs.options.morphs.Nowhere):
             particles = pu.nowhere_particles(self._morph.n_particles)

@@ -386,6 +386,15 @@ class Scene(RBC):
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
+        # Rigid entities resolve decimation along with convexification (see 'KinematicEntityDescription.resolve'). A
+        # cloth simulates the triangles of its mesh as authored, which decimation would turn into irregular slivers.
+        if (
+            isinstance(morph, gs.morphs.Mesh)
+            and morph.decimate is None
+            and not isinstance(material, gs.materials.Kinematic)
+        ):
+            morph.decimate = not isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
+
         if vis_mode is not None:
             surface.vis_mode = vis_mode
         # validate and populate default surface.vis_mode considering morph type

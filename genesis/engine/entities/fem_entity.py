@@ -373,6 +373,15 @@ class FEMEntity(Entity):
         surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
             [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
         )
+        is_mesh_morph = isinstance(self._morph, gs.options.morphs.Mesh)
+        if is_mesh_morph and self._morph.decimate and len(surface_faces) > self._morph.decimate_face_num:
+            # The welded surface is decimated, so that sub-meshes sharing their boundary stay closed. The vertices of
+            # the sub-meshes are gone, so the decimated surface becomes the only visual geom, losing the file textures.
+            mesh = gs.Mesh.from_trimesh(trimesh.Trimesh(surface_verts, surface_faces, process=False))
+            mesh.decimate(self._morph.decimate_face_num, self._morph.decimate_aggressiveness)
+            meshes = [gs.Mesh.from_trimesh(mesh.trimesh, surface=self._surface)]
+            surface_verts, surface_faces = mesh.verts, mesh.faces
+            verts_maps = [np.arange(len(surface_verts))]
         self._vgeoms = gs.List()
         vvert_start, vface_start = self._vvert_start, self._vface_start
         for mesh, verts_idx in zip(meshes, verts_maps):
@@ -396,7 +405,6 @@ class FEMEntity(Entity):
             # Tetgen refinement depends on the absolute coordinates of its input. File meshes are tetrahedralized
             # untranslated so the result, and its on-disk cache, are shared across all placements of the same asset;
             # primitives keep the position baked in, as the simulated rest state is sensitive to the exact refinement.
-            is_mesh_morph = isinstance(self._morph, gs.options.morphs.Mesh)
             if not is_mesh_morph:
                 surface_verts = surface_verts + self._morph.pos
             surface_trimesh = trimesh.Trimesh(vertices=surface_verts, faces=surface_faces, process=False)

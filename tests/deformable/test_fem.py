@@ -3,6 +3,7 @@ import math
 import numpy as np
 import pytest
 import torch
+import trimesh
 
 import igl
 
@@ -125,7 +126,7 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
 
 
 @pytest.mark.required
-def test_maxvolume(box_obj_path, show_viewer):
+def test_tetrahedralization_resolution(box_obj_path, show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
 
     # Mesh without any maximum-element-volume constraint
@@ -153,6 +154,26 @@ def test_maxvolume(box_obj_path, show_viewer):
         f"Mesh with maxvolume=0.01 generated {len(fem2.elems)} elements; "
         f"expected more than {len(fem1.elems)} elements without a volume limit."
     )
+
+    # A dense scanned mesh is decimated by default, while 'decimate=False' tetrahedralizes it at full density
+    duck = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    duck_dense = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            decimate=False,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    (vgeom_dense,) = duck_dense.vgeoms
+    assert len(vgeom_dense.vmesh.faces) == len(trimesh.load_mesh(duck_dense.morph.file).faces)
+    assert 5 * duck.n_elements < duck_dense.n_elements
 
 
 @pytest.mark.required

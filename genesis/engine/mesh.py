@@ -228,9 +228,14 @@ class Mesh(RBC, serialization.SerializationMixin):
     def decimate(self, decimate_face_num, decimate_aggressiveness):
         """
         Decimate the mesh.
+
+        A watertight mesh stays watertight, else an exception is raised, since tetrahedralization, particle sampling
+        and signed distance fields all rely on its closed surface. A convex hull is exempt, its vertices alone defining
+        its shape.
         """
         if self._mesh.vertices.shape[0] > 3 and len(self._mesh.faces) > decimate_face_num:
             self._mesh.process(validate=True)
+            is_watertight = self._mesh.is_watertight
             self._mesh = trimesh.Trimesh(
                 *fast_simplification.simplify(
                     self._mesh.vertices,
@@ -240,6 +245,12 @@ class Mesh(RBC, serialization.SerializationMixin):
                     lossless=(decimate_aggressiveness == 0),
                 ),
             )
+            if is_watertight and not self._mesh.is_watertight and not self._metadata.get("convexified", False):
+                gs.raise_exception(
+                    f"Decimating mesh to {decimate_face_num} faces with aggressiveness {decimate_aggressiveness} broke "
+                    "its watertightness. Increase 'decimate_face_num', decrease 'decimate_aggressiveness', or disable "
+                    "'decimate' (see Mesh morph options)."
+                )
             self._metadata["decimated"] = True
 
         self.clear_visuals()
