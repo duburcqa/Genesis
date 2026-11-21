@@ -33,6 +33,7 @@ from .forward_kinematics import (
 )
 from .misc import (
     MASS_MAT_ASSEMBLY,
+    has_mass_mat_assembly_choice,
     func_add_safe_backward,
     func_is_awake_link,
     func_is_awake_tree,
@@ -124,9 +125,14 @@ def func_vel_at_point(link_idx: int, i_b: int, pos_world: qd.types.vector(3), li
 
 
 @qd.func
-def func_is_mass_mat_assembled(mass_mat_assembly: int, is_awake: bool):
+def func_is_mass_mat_assembled(mass_mat_assembly: int, is_awake: bool, rigid_config: qd.template()):
     """Whether a substep assembles the mass matrix of a link or a dof, awake or not (see MASS_MAT_ASSEMBLY)."""
-    return mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL or (mass_mat_assembly == MASS_MAT_ASSEMBLY.AWAKE and is_awake)
+    is_assembled = True
+    if qd.static(has_mass_mat_assembly_choice(rigid_config)):
+        is_assembled = mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL or (
+            mass_mat_assembly == MASS_MAT_ASSEMBLY.AWAKE and is_awake
+        )
+    return is_assembled
 
 
 @qd.func
@@ -143,14 +149,16 @@ def func_is_mass_mat_factored(
 
     The damped factor of the implicit pass is computed whatever the forward dynamics left of the smooth one.
     """
-    is_factoring_awake = True
-    if qd.static(not implicit_damping):
-        is_factoring_awake = (
-            mass_mat_assembly == MASS_MAT_ASSEMBLY.AWAKE or mass_mat_assembly == MASS_MAT_ASSEMBLY.FACTOR
-        )
-    is_factored = mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL
-    if is_factoring_awake and not is_factored:
-        is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+    is_factored = True
+    if qd.static(has_mass_mat_assembly_choice(rigid_config)):
+        is_factoring_awake = True
+        if qd.static(not implicit_damping):
+            is_factoring_awake = (
+                mass_mat_assembly == MASS_MAT_ASSEMBLY.AWAKE or mass_mat_assembly == MASS_MAT_ASSEMBLY.FACTOR
+            )
+        is_factored = mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL
+        if is_factoring_awake and not is_factored:
+            is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
     return is_factored
 
 
@@ -221,7 +229,12 @@ def func_crb_fold(
     folds the link forces in the same walk. A sleeping root is folded where mass_mat_assembly assembles every tree.
     """
     i_l_root = rigid_info.roots_link_idx[i_r]
-    if mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL or func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = mass_mat_assembly == MASS_MAT_ASSEMBLY.ALL or func_is_awake_link(
+            i_l_root, i_b, dyn_state, rigid_config
+        )
+    if is_awake:
         i_l_end = rigid_info.links_root_end[i_l_root]
         for k in range(i_l_end - i_l_root):
             i_l = i_l_end - 1 - k
@@ -253,7 +266,7 @@ def func_mass_mat_force(
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
-    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake):
+    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake, rigid_config):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
         for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
@@ -286,7 +299,7 @@ def func_mass_mat_add_diag(
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
-    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake):
+    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake, rigid_config):
         I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
         func_add_safe_backward((i_d, i_d, i_b), dyn_info.dofs.armature[I_d], rigid_info.mass_mat, is_backward)
         if qd.static(implicit_damping):
@@ -387,7 +400,7 @@ def func_mass_mat_assemble_dof(
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
-    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake):
+    if func_is_mass_mat_assembled(mass_mat_assembly, is_awake, rigid_config):
         for j_d in range(rigid_info.dofs_mass_block_start[i_d], qd.min(i_d + 1, rigid_info.dofs_mass_block_end[i_d])):
             val = (
                 dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
@@ -468,7 +481,7 @@ def func_compute_mass_matrix_and_link_force(
             i_t = i_tb % n_trees
             i_b = i_tb // n_trees
             is_awake = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
-            if func_is_mass_mat_assembled(mass_mat_assembly, is_awake):
+            if func_is_mass_mat_assembled(mass_mat_assembly, is_awake, rigid_config):
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -533,7 +546,7 @@ def func_compute_mass_matrix_masked(
             i_t = i_tb % n_trees
             i_b = envs_idx[i_tb // n_trees]
             is_awake = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
-            if func_is_mass_mat_assembled(mass_mat_assembly, is_awake):
+            if func_is_mass_mat_assembled(mass_mat_assembly, is_awake, rigid_config):
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -1051,49 +1064,48 @@ def func_factor_mass_tree_shared(
                         rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = mass_mat[i_d_, j_d_]
                 qd.simt.block.sync()
 
-                # A sleeping tree factored along keeps the acceleration it was put to sleep with (see func_compute_qacc)
-                is_solved = False
                 if qd.static(solve_acc):
-                    is_solved = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
-                if is_solved:
-                    # Same substitutions as func_solve_mass_block: L^T w = force, then z = D^-1 w, then L acc = z.
-                    sh_acc = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK,), gs.qd_float)
-                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
-                        i_d_ = i_chunk_ * BLOCK_DIM + tid
-                        if i_d_ < n_block_dofs:
-                            sh_acc[i_d_] = dyn_state.dofs.force[block_start + i_d_, i_b]
-                    qd.simt.block.sync()
-                    for i_rev in range(n_block_dofs):
-                        i_d_ = n_block_dofs - 1 - i_rev
-                        dot = gs.qd_float(0.0)
-                        for i_chunk_ in range((i_rev + BLOCK_DIM - 1) // BLOCK_DIM):
-                            j_d_ = i_d_ + 1 + i_chunk_ * BLOCK_DIM + tid
-                            if j_d_ < n_block_dofs:
-                                dot = dot + mass_mat[j_d_, i_d_] * sh_acc[j_d_]
-                        dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
-                        if tid == 0:
-                            sh_acc[i_d_] = sh_acc[i_d_] - dot
+                    # A sleeping tree factored along keeps the acceleration it was put to sleep with (see
+                    # func_compute_qacc).
+                    if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
+                        # Same substitutions as func_solve_mass_block: L^T w = force, then z = D^-1 w, then L acc = z.
+                        sh_acc = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK,), gs.qd_float)
+                        for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                            i_d_ = i_chunk_ * BLOCK_DIM + tid
+                            if i_d_ < n_block_dofs:
+                                sh_acc[i_d_] = dyn_state.dofs.force[block_start + i_d_, i_b]
                         qd.simt.block.sync()
-                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
-                        i_d_ = i_chunk_ * BLOCK_DIM + tid
-                        if i_d_ < n_block_dofs:
-                            sh_acc[i_d_] = sh_acc[i_d_] / mass_mat[i_d_, i_d_]
-                    qd.simt.block.sync()
-                    for i_d_ in range(n_block_dofs):
-                        dot = gs.qd_float(0.0)
-                        for i_chunk_ in range((i_d_ + BLOCK_DIM - 1) // BLOCK_DIM):
-                            j_d_ = i_chunk_ * BLOCK_DIM + tid
-                            if j_d_ < i_d_:
-                                dot = dot + mass_mat[i_d_, j_d_] * sh_acc[j_d_]
-                        dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
-                        if tid == 0:
-                            sh_acc[i_d_] = sh_acc[i_d_] - dot
+                        for i_rev in range(n_block_dofs):
+                            i_d_ = n_block_dofs - 1 - i_rev
+                            dot = gs.qd_float(0.0)
+                            for i_chunk_ in range((i_rev + BLOCK_DIM - 1) // BLOCK_DIM):
+                                j_d_ = i_d_ + 1 + i_chunk_ * BLOCK_DIM + tid
+                                if j_d_ < n_block_dofs:
+                                    dot = dot + mass_mat[j_d_, i_d_] * sh_acc[j_d_]
+                            dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
+                            if tid == 0:
+                                sh_acc[i_d_] = sh_acc[i_d_] - dot
+                            qd.simt.block.sync()
+                        for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                            i_d_ = i_chunk_ * BLOCK_DIM + tid
+                            if i_d_ < n_block_dofs:
+                                sh_acc[i_d_] = sh_acc[i_d_] / mass_mat[i_d_, i_d_]
                         qd.simt.block.sync()
-                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
-                        i_d_ = i_chunk_ * BLOCK_DIM + tid
-                        if i_d_ < n_block_dofs:
-                            dyn_state.dofs.acc_smooth[block_start + i_d_, i_b] = sh_acc[i_d_]
-                    qd.simt.block.sync()
+                        for i_d_ in range(n_block_dofs):
+                            dot = gs.qd_float(0.0)
+                            for i_chunk_ in range((i_d_ + BLOCK_DIM - 1) // BLOCK_DIM):
+                                j_d_ = i_chunk_ * BLOCK_DIM + tid
+                                if j_d_ < i_d_:
+                                    dot = dot + mass_mat[i_d_, j_d_] * sh_acc[j_d_]
+                            dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
+                            if tid == 0:
+                                sh_acc[i_d_] = sh_acc[i_d_] - dot
+                            qd.simt.block.sync()
+                        for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                            i_d_ = i_chunk_ * BLOCK_DIM + tid
+                            if i_d_ < n_block_dofs:
+                                dyn_state.dofs.acc_smooth[block_start + i_d_, i_b] = sh_acc[i_d_]
+                        qd.simt.block.sync()
 
 
 @qd.func
@@ -1654,6 +1666,12 @@ def kernel_update_mass_mat(
         implicit_damping=False,
         is_backward=False,
     )
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_mass_mat_assembly(mass_mat_assembly: int, rigid_info: RigidInfo):
+    for _ in range(1):
+        rigid_info.mass_mat_assembly[None] = mass_mat_assembly
 
 
 @qd.kernel(fastcache=True)

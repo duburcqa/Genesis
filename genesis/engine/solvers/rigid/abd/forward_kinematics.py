@@ -1047,9 +1047,10 @@ def func_sweep_links_by_level(
         elif qd.static(IS_LEAF_TO_ROOT):
             # The links of a root sleep as a unit (see func_crb_fold in forward_dynamics.py). The accelerations gate
             # their links one by one below.
-            if is_awake and mass_mat_assembly != MASS_MAT_ASSEMBLY.ALL:
-                i_l_root = rigid_info.roots_link_idx[i_group]
-                is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
+            if qd.static(rigid_config.use_hibernation):
+                if is_awake and mass_mat_assembly != MASS_MAT_ASSEMBLY.ALL:
+                    i_l_root = rigid_info.roots_link_idx[i_group]
+                    is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
         # From the leaves up, the walk starts past the deepest level, where the entries of the next group begin, and
         # steps back through the level starts
         i_k_start = groups_level_start[i_group]

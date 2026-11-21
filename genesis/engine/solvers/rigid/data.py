@@ -131,6 +131,9 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     n_candidate_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
     hibernation_thresh_vel: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     EPS: qd.Tensor = field(float, shape=())
+    # The kinematic trees whose mass matrix the substep assembles and factors (see MASS_MAT_ASSEMBLY), which the kernels
+    # of the substep read rather than take as an argument, a launch passing every argument anew.
+    mass_mat_assembly: qd.Tensor = field(int, shape=(), kind=DataKind.SCRATCH)
 
 
 # The counts of the largest entity of the solver, each taken over every entity

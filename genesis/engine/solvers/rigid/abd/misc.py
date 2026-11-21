@@ -5,7 +5,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidConfig, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import eoa
 from genesis.utils.simt import func_exact_sum_add, func_exact_sum_take
@@ -126,15 +126,15 @@ def func_wakeup_link(
         dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
 
 
+# A kernel reads the selection from a field (see 'RigidInfo.mass_mat_assembly'), and a func passing it on to its loops
+# takes it as a template, which aliases the read: a scalar a func binds at the top level of a kernel is a statement
+# autodiff cannot reverse.
 class MASS_MAT_ASSEMBLY(IntEnum):
     """Select the kinematic trees whose mass matrix a substep assembles and factors (see func_forward_dynamics).
 
     A sleeping tree keeps the mass matrix and the factor of its last awake substep (see func_is_awake_tree), which a
     write of the mass matrix outside the step overwrites, and a refresh of the mass matrix outside the step may leave
     the substep nothing to compute.
-
-    A kernel takes the selection as a runtime argument, and a func passing it on to its loops as a template, which
-    aliases the argument: a scalar a func binds at the top level of a kernel is a statement autodiff cannot reverse.
     """
 
     AWAKE = 0
@@ -148,6 +148,20 @@ class MASS_MAT_ASSEMBLY(IntEnum):
 
     NONE = 3
     """Neither, the mass matrix of the awake trees and its factor being current."""
+
+
+def has_mass_mat_assembly_choice(rigid_config: RigidConfig) -> bool:
+    """Whether a substep may assemble another selection of kinematic trees than the awake ones (see MASS_MAT_ASSEMBLY).
+
+    A substep assembles the awake trees alone, every tree being awake, unless hibernation puts some to sleep or a refresh
+    of the mass matrix outside the step may leave it nothing to compute, which its implicit damping term, MuJoCo
+    compatibility and gradients rule out.
+    """
+    return rigid_config.use_hibernation or not (
+        rigid_config.integrator == gs.integrator.approximate_implicitfast
+        or rigid_config.enable_mujoco_compatibility
+        or rigid_config.requires_grad
+    )
 
 
 @qd.func
