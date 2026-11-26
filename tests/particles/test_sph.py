@@ -83,14 +83,18 @@ def get_sph_density(scene, n_particles):
     densities : np.ndarray
         Array of density values for all particles.
     """
-    from genesis.engine.solvers.sph_solver import kernel_compute_rho_and_diag, kernel_reorder_particles
+    from genesis.engine.solvers.sph_solver import (
+        kernel_compute_rho_and_diag,
+        kernel_find_interactions,
+        kernel_reorder_particles,
+    )
 
     sph_solver = scene.sph_solver
 
-    # Reorder particles into spatial grid cells for efficient neighbor queries,
-    # then compute density. This mirrors what happens in substep_pre_coupling.
-    # We must reorder first because kernel_compute_rho_and_diag operates on particles_reordered.
+    # Reorder particles into spatial grid cells, find the interactions of each particle, then compute density. This
+    # mirrors what happens in substep_pre_coupling.
     kernel_reorder_particles(sph_solver.sph_state)
+    kernel_find_interactions(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
     kernel_compute_rho_and_diag(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
 
     # Get density values from reordered particles (where kernel_compute_rho_and_diag stores results)

@@ -114,6 +114,8 @@ class SPHPressureSolve(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
     # The diagonal of the operator of each contact of the particle: the inverse mass of the particle along the normal of
     # its surface, plus that of the link of the surface, which gives way to the particle (see func_contacts)
     diag_contacts: qd.Tensor = field((float, 3))
+    # The velocity change of the particle under the pressures, which the passes correcting the gradient compute
+    pressures_vel: qd.Tensor = field((float, 3))
 
 
 class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
@@ -124,23 +126,19 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     and takes the same steps from one run to the next.
     """
 
-    # One slot per sum: the preconditioned norms of the chopped gradient and of the reduced free gradient, the product
-    # of the preconditioned free gradient with the operator times the search direction, then the dot products of the
-    # search direction with its product with the operator and with the gradient. The slots that a stage adds or takes
-    # are contiguous, so that it does so in a loop around a single inlined call.
+    # One slot per sum: the preconditioned norm of the gradient of the objective over the free unknowns, then the dot
+    # products of the search direction with its product with the operator and with the gradient. The slots that a
+    # stage adds or takes are contiguous, so that it does so in a loop around a single inlined call.
     sums: ExactSums
     is_solving: qd.Tensor = field(bool)
-    # Whether the environment recomputes the gradient of its objective from the pressures, after an expansion step or
-    # at the start of the solve, takes a proportioning step along the chopped gradient, or expands the active set
-    is_recomputing: qd.Tensor = field(bool)
-    is_proportioning: qd.Tensor = field(bool)
-    is_expanding: qd.Tensor = field(bool)
-    # The longest step along the search direction that keeps every pressure non-negative, the step taken, the dot
-    # product of the direction with its product with the operator, and the coefficient of the previous direction in the
-    # next one
-    step_max: qd.Tensor = field(float)
+    # Whether the next pass also multiplies the operator with the pressures, which makes the gradient exact again after
+    # a step that clipped a pressure to zero, and whether the last step clipped one
+    is_correcting: qd.Tensor = field(bool)
+    is_clipped: qd.Tensor = field(bool)
+    # The step taken along the search direction, the preconditioned norm of the free gradient at the last step, and the
+    # coefficient of the previous direction in the next one
     step: qd.Tensor = field(float)
-    dir_prod_norm: qd.Tensor = field(float)
+    grad_norm: qd.Tensor = field(float)
     dir_coef: qd.Tensor = field(float)
     # The largest relative density error of the particles, the largest entry of the projected gradient of the
     # objective, which a maximum keeps the same whatever the order of the particles
@@ -199,11 +197,12 @@ INTERACTIONS = Size("sph_interactions")
 
 class SPHInteractions(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, INTERACTIONS, ENVS)):
     """
-    The particles and images each sorted particle interacts with over the substep, which the pressure solve sweeps.
+    The particles and images each sorted particle interacts with over the substep, which every kernel of the substep
+    sweeps.
 
-    The particles keep their positions through the pressure solve, so the neighbor walk finds the interactions once per
-    substep (see kernel_find_interactions), in increasing order of their ids so that the sums over them are the same
-    from one run to the next.
+    The particles keep their positions until the end of the substep, so the neighbor walk finds the interactions once
+    per substep (see kernel_find_interactions), in increasing order of their ids so that the sums over them are the
+    same from one run to the next.
     """
 
     # The sorted index of the other particle in the low 'interaction_index_bits' bits, and its query of
@@ -257,12 +256,6 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
     density_err_tol: qd.Tensor = field(float, shape=())
     # The share of the density excess of a particle at the start of the substep that the substep corrects
     drift_relaxation: qd.Tensor = field(float, shape=())
-    # The fixed step of the projected steepest descent of an expansion step, below twice the inverse of the largest
-    # eigenvalue of the preconditioned operator
-    expansion_step: qd.Tensor = field(float, shape=())
-    # The ratio of the norm of the chopped gradient to that of the reduced free gradient above which the next step is a
-    # proportioning step
-    proportioning_ratio: qd.Tensor = field(float, shape=())
     # The diagonal of the operator below which a particle takes no pressure
     diag_min: qd.Tensor = field(float, shape=())
     # The distance below which a particle meets a surface (see func_contacts)
@@ -338,7 +331,7 @@ class SPHSolver(ParticleSolver):
             sizes=dict(
                 sizes,
                 # Each sum of an environment takes one slot, its terms spanning 96 bits (see SPHEnvsSolve)
-                exact_sum_slots=5,
+                exact_sum_slots=3,
                 exact_sum_bins=3,
                 sph_interactions=self._max_interactions,
                 **hash_grid_sizes(math.prod(self._hash_grid_res)),
@@ -394,10 +387,6 @@ class SPHSolver(ParticleSolver):
                 # Correcting the whole density excess at once kicks the liquid by the velocity that removes it within a
                 # substep, which the pressure solve turns into kinetic energy
                 drift_relaxation=0.2,
-                # Twice the inverse of an estimate of the largest eigenvalue of the preconditioned operator: the ratio
-                # of the row sum of the coupling terms of a particle in the bulk to its own diagonal
-                expansion_step=1.9 / 4.0,
-                proportioning_ratio=1.0,
                 diag_min=1e-20,
                 # The kernel gradient between a particle and its own image peaks at a third of the support radius
                 contact_dist=self._support_radius / 6.0,
@@ -484,13 +473,13 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         if not self.is_active:
             return
         kernel_reorder_particles(self.sph_state)
+        kernel_find_interactions(self.sph_state, self.sph_info, self.sph_config)
         kernel_compute_rho_and_diag(self.sph_state, self.sph_info, self.sph_config)
         kernel_compute_non_pressure_forces(
             self._sim.sim_state, self.sph_state, self.sph_info, self.sph_config, self._force_fields
         )
         kernel_predict_velocity(self.sph_state, self.sph_info)
         kernel_compute_rhs(self.sph_state, self.sph_info, self.sph_config)
-        kernel_find_interactions(self.sph_state, self.sph_info, self.sph_config)
         kernel_solve_pressure(
             self._n_pressure_iters_max,
             self.sph_state.solve_loop.is_looping,
@@ -992,7 +981,7 @@ def kernel_compute_non_pressure_forces(
     force_fields: qd.template(),
 ):
     """Compute the acceleration of the sorted particles from gravity, surface tension, viscosity and force fields."""
-    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_interactions)
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_cached_interactions)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
     # The environments run fastest, as the arrays keep them innermost
@@ -1017,7 +1006,7 @@ def kernel_compute_non_pressure_forces(
         )
         if is_active:
             # The images share the shear of the liquid, which makes the walls and the moving boundaries free-slip
-            func_for_all_interactions(
+            func_for_all_cached_interactions(
                 i_p,
                 i_b,
                 i_lane,
@@ -1091,7 +1080,7 @@ def kernel_compute_rho_and_diag(sph_state: SPHState, sph_info: SPHInfo, sph_conf
 
     The pressure solve takes the inverse of the diagonal of its operator as preconditioner (see kernel_solve_pressure).
     """
-    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_interactions)
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_cached_interactions)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
     # The environments run fastest, as the arrays keep them innermost
@@ -1113,7 +1102,7 @@ def kernel_compute_rho_and_diag(sph_state: SPHState, sph_info: SPHInfo, sph_conf
             i_surface=-1,
         )
         if is_active:
-            func_for_all_interactions(
+            func_for_all_cached_interactions(
                 i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_compute_rho, n_lanes=N_LANES
             )
         if qd.static(N_LANES > 1):
@@ -1260,61 +1249,76 @@ def func_task_add_interaction(
 
 
 @qd.func
-def func_interaction_grad(
+def func_for_all_cached_interactions(
     i_p: int,
-    i_k: int,
     i_b: int,
+    i_lane: int,
     ret: qd.template(),
     sph_state: SPHState,
     sph_info: SPHInfo,
     sph_config: qd.template(),
+    task: qd.template(),
+    n_lanes: qd.template(),
 ):
     """
-    Return the other particle of an interaction of a sorted particle, and the kernel gradient between them.
+    Run a task on every interaction of a sorted particle found at the start of the substep (see SPHInteractions).
 
-    The gradient is that of the kernel between the particle and the other particle or its image, scaled by the volume of
-    a particle (see SPHInteractions).
+    The task runs on the interactions func_for_all_interactions finds, with the same arguments, in the increasing order
+    of their ids.
 
     Parameters
     ----------
     i_p : int
         The sorted particle.
-    i_k : int
-        The interaction of the particle.
     i_b : int
         The environment.
+    i_lane : int
+        The lane of the subgroup tile that takes the particle, among `n_lanes`. With `n_lanes` above one, the lanes of
+        the tile stride the interactions of the particle, and their shares of `ret` sum up after.
     ret : qd.template()
-        The result of the walk, which holds the position of the particle `ret.pos_i` and takes the image transform of
-        the interaction (see func_for_all_interactions).
+        The result `task` accumulates, which holds the position of the particle and the image transform of each
+        interaction (see func_for_all_interactions).
     sph_state : SPHState
         The state of the solver.
     sph_info : SPHInfo
         The parameters of the solver.
     sph_config : qd.template()
         The parts of the solver its kernels compile in.
+    task : qd.template()
+        The task (see func_for_all_interactions).
+    n_lanes : qd.template()
+        The number of lanes of the subgroup tile that take the particle together, 1 or 32.
     """
-    interaction_id = sph_state.interactions.ids[i_p, i_k, i_b]
+    ret.pos_i = sph_state.particles_reordered.pos[i_p, i_b]
     index_bits = sph_info.interaction_index_bits[None]
-    j_p = interaction_id & ((1 << index_bits) - 1)
-    i_query = interaction_id >> index_bits
+    n_interactions = sph_state.interactions.counts[i_p, i_b]
+    for i_k_ in range((n_interactions + n_lanes - 1) // n_lanes):
+        i_k = i_k_ * n_lanes + i_lane
+        if i_k < n_interactions:
+            interaction_id = sph_state.interactions.ids[i_p, i_k, i_b]
+            j_p = interaction_id & ((1 << index_bits) - 1)
+            i_query = interaction_id >> index_bits
+            ret.i_surface = -1
+            ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
+            ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
+            ret.image_vel = qd.Vector.zero(gs.qd_float, 3)
+            # Most interactions are with a neighbor itself, whose transform is the identity
+            if i_query > 0:
+                if i_query < 27:
+                    ret.image_rot, ret.image_shift = func_wall_image(
+                        i_query, sph_info.boundary.lower[None], sph_info.boundary.upper[None]
+                    )
+                else:
+                    # The plane of an image across a moving boundary is shared by both particles (see
+                    # func_is_interacting)
+                    if qd.static(sph_config.has_boundary):
+                        ret.i_surface = i_query - 27
+                        func_is_interacting(i_p, j_p, i_b, i_query, ret, sph_state, sph_info, sph_config)
+            task(i_p, j_p, i_b, i_query, ret, sph_state, sph_info)
     ret.i_surface = -1
     ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
     ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
     ret.image_vel = qd.Vector.zero(gs.qd_float, 3)
-    if i_query < 27:
-        ret.image_rot, ret.image_shift = func_wall_image(
-            i_query, sph_info.boundary.lower[None], sph_info.boundary.upper[None]
-        )
-    else:
-        # The plane of an image across a moving boundary is shared by both particles (see func_is_interacting)
-        if qd.static(sph_config.has_boundary):
-            ret.i_surface = i_query - 27
-            func_is_interacting(i_p, j_p, i_b, i_query, ret, sph_state, sph_info, sph_config)
-    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
-    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
-        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
-    )
-    return j_p, grad_ij
 
 
 @qd.kernel(fastcache=True)
@@ -1374,14 +1378,13 @@ def kernel_compute_rhs(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
     excess the particle already has at the start of the substep is corrected over several substeps, at the rate of
     'drift_relaxation', which spares the liquid the kick of correcting it at once, while a particle below its rest
     density may reach it within the substep. The solve starts from the pressure of the previous substep, so that it
-    computes the gradient of its objective first (see kernel_solve_pressure).
+    computes the gradient of its objective first, with no search direction (see kernel_solve_pressure).
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
-        sph_state.envs_solve.is_recomputing[i_b] = True
-        sph_state.envs_solve.is_proportioning[i_b] = False
-        sph_state.envs_solve.is_expanding[i_b] = False
-        sph_state.envs_solve.step_max[i_b] = gs.qd_float(float("inf"))
+        sph_state.envs_solve.is_correcting[i_b] = True
+        sph_state.envs_solve.is_clipped[i_b] = False
+        sph_state.envs_solve.grad_norm[i_b] = 0.0
         sph_state.envs_solve.err_max[i_b] = 0.0
 
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
@@ -1404,12 +1407,15 @@ def kernel_compute_rhs(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
         )
         if is_active:
             ret.vel_i = sph_state.particles_reordered.vel[i_p, i_b]
-            func_for_all_interactions(
+            func_for_all_cached_interactions(
                 i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_compute_density_rate, n_lanes=N_LANES
             )
         rate = ret.rate
         if qd.static(N_LANES > 1):
             rate = qd_block_sum(rate, sph_config.log2_neighbor_lanes)
+        if i_lane == 0:
+            sph_state.pressure_solve.dir[i_p, i_b] = 0.0
+            sph_state.pressure_solve.dir_contacts[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if is_active and i_lane == 0:
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             density_excess = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.particles.rho[i_o] - 1.0
@@ -1439,14 +1445,30 @@ def kernel_compute_rhs(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
 
 
 @qd.func
+def func_task_pressure_product(
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+):
+    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
+    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
+        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
+    )
+    vel_j = sph_state.pressure_solve.dir_vel[j_p, i_b]
+    ret.rates[0] = ret.rates[0] + (ret.vel_i - ret.image_rot @ vel_j).dot(grad_ij)
+    if ret.is_correcting:
+        pressures_vel_j = sph_state.pressure_solve.pressures_vel[j_p, i_b]
+        ret.rates[1] = ret.rates[1] + (ret.pressures_vel_i - ret.image_rot @ pressures_vel_j).dot(grad_ij)
+
+
+@qd.func
 def func_pressure_product(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
     """
-    Multiply the operator of the pressure solve with the pressures or the search direction of the sorted particles.
+    Multiply the operator of the pressure solve with the search direction of the sorted particles, and with their
+    pressures where the environment corrects its gradient.
 
     The operator is the rate at which the pressures change the relative density of the particles over the substep, which
-    the velocity change per unit step along the search direction, computed by the previous pass, gives. An environment
-    that recomputes the gradient of its objective multiplies the pressures, and takes the rest of its steps along the
-    search direction, which also yields the dot products and the longest feasible step of its next step.
+    the velocity changes per unit step computed by the previous pass give. The product with the pressures gives the
+    exact gradient of the objective. The pass yields the dot products of the direction, and the largest relative density
+    error of the particles (see func_pressure_step).
     """
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1455,80 +1477,102 @@ def func_pressure_product(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
-        # The rate at which the velocity change per unit step changes the density, over the interactions of the particle
+        # The rates at which the velocity changes per unit step along the direction and under the pressures change the
+        # density, over the interactions of the particle
         ret = qd.Struct(
+            rates=qd.Vector.zero(gs.qd_float, 2),
+            vel_i=sph_state.pressure_solve.dir_vel[i_p, i_b],
+            pressures_vel_i=sph_state.pressure_solve.pressures_vel[i_p, i_b],
+            is_correcting=sph_state.envs_solve.is_correcting[i_b],
             pos_i=qd.Vector.zero(gs.qd_float, 3),
             image_rot=qd.Matrix.identity(gs.qd_float, 3),
             image_shift=qd.Vector.zero(gs.qd_float, 3),
             image_vel=qd.Vector.zero(gs.qd_float, 3),
             i_surface=-1,
         )
-        rate = gs.qd_float(0.0)
         if is_solved:
-            ret.pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-            vel_i = sph_state.pressure_solve.dir_vel[i_p, i_b]
-            n_interactions = sph_state.interactions.counts[i_p, i_b]
-            for i_k_ in range((n_interactions + N_LANES - 1) // N_LANES):
-                i_k = i_k_ * N_LANES + i_lane
-                if i_k < n_interactions:
-                    j_p, grad_ij = func_interaction_grad(i_p, i_k, i_b, ret, sph_state, sph_info, sph_config)
-                    rate = rate + (vel_i - ret.image_rot @ sph_state.pressure_solve.dir_vel[j_p, i_b]).dot(grad_ij)
+            func_for_all_cached_interactions(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_pressure_product, n_lanes=N_LANES
+            )
+        rates = ret.rates
         if qd.static(N_LANES > 1):
-            rate = qd_block_sum(rate, sph_config.log2_neighbor_lanes)
+            for i_s in qd.static(range(2)):
+                rates[i_s] = qd_block_sum(rates[i_s], sph_config.log2_neighbor_lanes)
         if is_solved and i_lane == 0:
             dt = sph_info.substep_dt[None]
-            # The liquid gives way under pressure by its compliance
-            pressure_src = sph_state.particles_reordered.p[i_p, i_b]
-            if not sph_state.envs_solve.is_recomputing[i_b]:
-                pressure_src = sph_state.pressure_solve.dir[i_p, i_b]
-            prod = sph_info.compliance[None] * pressure_src - dt * rate
             normals, depths, normal_vels, contacts_weight = func_contacts(i_p, i_b, sph_state, sph_info, sph_config)
-            prod_contacts = contacts_weight * (
-                dt / sph_info.particle_size[None] * (normals @ sph_state.pressure_solve.dir_vel[i_p, i_b])
-            )
+            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+            # The links giving way to the particle add to the diagonal alone (see 'links_compliance')
+            links_compliance = gs.qd_float(0.0)
+            links_diags = qd.Vector.zero(gs.qd_float, 3)
             if qd.static(sph_config.has_boundary):
-                # The links giving way to the particle add to the diagonal alone (see 'links_compliance')
-                pressures_src = sph_state.pressure_solve.p_contacts[i_p, i_b]
-                if not sph_state.envs_solve.is_recomputing[i_b]:
-                    pressures_src = sph_state.pressure_solve.dir_contacts[i_p, i_b]
-                i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
                 particle_diags = (dt / sph_info.particle_size[None]) ** 2 / sph_info.particles.rho[i_o]
+                links_compliance = sph_state.pressure_solve.links_compliance[i_p, i_b]
                 links_diags = sph_state.pressure_solve.diag_contacts[i_p, i_b] - particle_diags
-                prod = prod + sph_state.pressure_solve.links_compliance[i_p, i_b] * pressure_src
-                prod_contacts = prod_contacts + contacts_weight * links_diags * pressures_src
-            if sph_state.envs_solve.is_recomputing[i_b]:
-                sph_state.pressure_solve.grad[i_p, i_b] = prod - sph_state.pressure_solve.rhs[i_p, i_b]
-                grad_contacts = prod_contacts - sph_state.pressure_solve.rhs_contacts[i_p, i_b]
-                sph_state.pressure_solve.grad_contacts[i_p, i_b] = grad_contacts
-            else:
-                direction = sph_state.pressure_solve.dir[i_p, i_b]
-                dir_contacts = sph_state.pressure_solve.dir_contacts[i_p, i_b]
-                sph_state.pressure_solve.dir_prod[i_p, i_b] = prod
-                sph_state.pressure_solve.dir_prod_contacts[i_p, i_b] = prod_contacts
-                grad_contacts = sph_state.pressure_solve.grad_contacts[i_p, i_b]
-                terms = qd.Vector(
-                    [
-                        direction * prod + dir_contacts.dot(prod_contacts),
-                        direction * sph_state.pressure_solve.grad[i_p, i_b] + dir_contacts.dot(grad_contacts),
-                    ]
+            # The product with the direction first, then with the pressures, which makes the gradient exact
+            for i_src in range(1 + qd.cast(ret.is_correcting, qd.i32)):
+                pressure_src = sph_state.pressure_solve.dir[i_p, i_b]
+                pressures_src = sph_state.pressure_solve.dir_contacts[i_p, i_b]
+                vel_src = ret.vel_i
+                if i_src == 1:
+                    pressure_src = sph_state.particles_reordered.p[i_p, i_b]
+                    pressures_src = sph_state.pressure_solve.p_contacts[i_p, i_b]
+                    vel_src = ret.pressures_vel_i
+                # The liquid gives way under pressure by its compliance
+                prod = (sph_info.compliance[None] + links_compliance) * pressure_src - dt * rates[i_src]
+                prod_contacts = contacts_weight * (
+                    dt / sph_info.particle_size[None] * (normals @ vel_src) + links_diags * pressures_src
                 )
-                # The slots of the dot products of the search direction (see SPHEnvsSolve)
-                for i_s in range(2):
-                    func_exact_sum_add(3 + i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
-                # The longest step that keeps every pressure non-negative
-                if direction > 0.0:
-                    qd.atomic_min(
-                        sph_state.envs_solve.step_max[i_b], sph_state.particles_reordered.p[i_p, i_b] / direction
-                    )
-                p_contacts = sph_state.pressure_solve.p_contacts[i_p, i_b]
-                for i_d in qd.static(range(3)):
-                    if dir_contacts[i_d] > 0.0:
-                        qd.atomic_min(sph_state.envs_solve.step_max[i_b], p_contacts[i_d] / dir_contacts[i_d])
+                if i_src == 0:
+                    sph_state.pressure_solve.dir_prod[i_p, i_b] = prod
+                    sph_state.pressure_solve.dir_prod_contacts[i_p, i_b] = prod_contacts
+                else:
+                    sph_state.pressure_solve.grad[i_p, i_b] = prod - sph_state.pressure_solve.rhs[i_p, i_b]
+                    grad_contacts = prod_contacts - sph_state.pressure_solve.rhs_contacts[i_p, i_b]
+                    sph_state.pressure_solve.grad_contacts[i_p, i_b] = grad_contacts
+            dirs = func_pack_unknowns(
+                sph_state.pressure_solve.dir[i_p, i_b], sph_state.pressure_solve.dir_contacts[i_p, i_b]
+            )
+            dir_prods = func_pack_unknowns(
+                sph_state.pressure_solve.dir_prod[i_p, i_b], sph_state.pressure_solve.dir_prod_contacts[i_p, i_b]
+            )
+            grads = func_pack_unknowns(
+                sph_state.pressure_solve.grad[i_p, i_b], sph_state.pressure_solve.grad_contacts[i_p, i_b]
+            )
+            pressures = func_pack_unknowns(
+                sph_state.particles_reordered.p[i_p, i_b], sph_state.pressure_solve.p_contacts[i_p, i_b]
+            )
+            terms = qd.Vector([(dirs * dir_prods).sum(), (dirs * grads).sum()])
+            # The slots of the dot products of the search direction (see SPHEnvsSolve)
+            for i_s in range(2):
+                func_exact_sum_add(1 + i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
+            # The relative density error of a particle under pressure, or the density excess of one free of it
+            err = qd.select(pressures > 0.0, qd.abs(grads), qd.max(-grads, 0.0)).max()
+            qd.atomic_max(sph_state.envs_solve.err_max[i_b], err)
+
+
+@qd.func
+def func_task_pressure_dir_vel(
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+):
+    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
+    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
+        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
+    )
+    # The pair takes the sum of both pressures, an image of a particle takes its pressure (see
+    # func_for_all_interactions)
+    ret.force_dir = ret.force_dir + (ret.dir_i + sph_state.pressure_solve.dir[j_p, i_b]) * grad_ij
+    if ret.is_correcting:
+        pressure_j = sph_state.particles_reordered.p[j_p, i_b]
+        ret.force_pressures = ret.force_pressures + (ret.pressure_i + pressure_j) * grad_ij
 
 
 @qd.func
 def func_pressure_dir_vel(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
-    """Compute the velocity change of the sorted particles per unit step along the vector the next product takes."""
+    """
+    Compute the velocity change of the sorted particles per unit step along the search direction, and under their
+    pressures where the environment corrects its gradient.
+    """
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
     for i_t in range(n_envs * n_particles * N_LANES):
@@ -1541,78 +1585,70 @@ def func_pressure_dir_vel(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
             sph_state.solve_loop.is_looping[()] = 0
             sph_state.solve_loop.n_passes[None] = sph_state.solve_loop.n_passes[None] + 1
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
-        # The pressures themselves when the solve recomputes its gradient, the search direction otherwise
-        is_recomputing = sph_state.envs_solve.is_recomputing[i_b]
-        pressure_i = gs.qd_float(0.0)
-        pressures_contacts = qd.Vector.zero(gs.qd_float, 3)
-        if is_solved:
-            pressure_i = sph_state.pressure_solve.dir[i_p, i_b]
-            pressures_contacts = sph_state.pressure_solve.dir_contacts[i_p, i_b]
-            if is_recomputing:
-                pressure_i = sph_state.particles_reordered.p[i_p, i_b]
-                pressures_contacts = sph_state.pressure_solve.p_contacts[i_p, i_b]
         ret = qd.Struct(
-            force=qd.Vector.zero(gs.qd_float, 3),
-            pressure_i=pressure_i,
-            is_recomputing=is_recomputing,
+            force_dir=qd.Vector.zero(gs.qd_float, 3),
+            force_pressures=qd.Vector.zero(gs.qd_float, 3),
+            dir_i=sph_state.pressure_solve.dir[i_p, i_b],
+            pressure_i=sph_state.particles_reordered.p[i_p, i_b],
+            is_correcting=sph_state.envs_solve.is_correcting[i_b],
             pos_i=qd.Vector.zero(gs.qd_float, 3),
             image_rot=qd.Matrix.identity(gs.qd_float, 3),
             image_shift=qd.Vector.zero(gs.qd_float, 3),
             image_vel=qd.Vector.zero(gs.qd_float, 3),
             i_surface=-1,
         )
-        # The pair takes the sum of both pressures, an image of a particle takes its pressure (see
-        # func_for_all_interactions), and the contacts push the particle along the normal of their surface
         if is_solved:
-            ret.pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-            n_interactions = sph_state.interactions.counts[i_p, i_b]
-            for i_k_ in range((n_interactions + N_LANES - 1) // N_LANES):
-                i_k = i_k_ * N_LANES + i_lane
-                if i_k < n_interactions:
-                    j_p, grad_ij = func_interaction_grad(i_p, i_k, i_b, ret, sph_state, sph_info, sph_config)
-                    pressure_j = sph_state.pressure_solve.dir[j_p, i_b]
-                    if ret.is_recomputing:
-                        pressure_j = sph_state.particles_reordered.p[j_p, i_b]
-                    ret.force = ret.force + (ret.pressure_i + pressure_j) * grad_ij
+            func_for_all_cached_interactions(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_pressure_dir_vel, n_lanes=N_LANES
+            )
         if qd.static(N_LANES > 1):
             for i_d in qd.static(range(3)):
-                ret.force[i_d] = qd_block_sum(ret.force[i_d], sph_config.log2_neighbor_lanes)
+                ret.force_dir[i_d] = qd_block_sum(ret.force_dir[i_d], sph_config.log2_neighbor_lanes)
+                ret.force_pressures[i_d] = qd_block_sum(ret.force_pressures[i_d], sph_config.log2_neighbor_lanes)
         if is_solved and i_lane == 0:
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+            # The contacts push the particle along the normal of their surface
             normals, depths, normal_vels, contacts_weight = func_contacts(i_p, i_b, sph_state, sph_info, sph_config)
-            force = normals.transpose() @ pressures_contacts / sph_info.particle_size[None] - ret.force
-            vel = sph_info.substep_dt[None] / sph_info.particles.rho[i_o] * force
-            sph_state.pressure_solve.dir_vel[i_p, i_b] = vel
+            scale = sph_info.substep_dt[None] / sph_info.particles.rho[i_o]
+            for i_src in range(1 + qd.cast(ret.is_correcting, qd.i32)):
+                pressures_contacts = sph_state.pressure_solve.dir_contacts[i_p, i_b]
+                force_pairs = ret.force_dir
+                if i_src == 1:
+                    pressures_contacts = sph_state.pressure_solve.p_contacts[i_p, i_b]
+                    force_pairs = ret.force_pressures
+                vel = scale * (normals.transpose() @ pressures_contacts / sph_info.particle_size[None] - force_pairs)
+                if i_src == 0:
+                    sph_state.pressure_solve.dir_vel[i_p, i_b] = vel
+                else:
+                    sph_state.pressure_solve.pressures_vel[i_p, i_b] = vel
 
 
 @qd.func
-def func_pressure_step(sph_state: SPHState):
+def func_pressure_step(sph_state: SPHState, sph_info: SPHInfo):
     """
-    Compute the length of the next step of the pressure solve of each environment.
+    Stop the pressure solve of the environments that converged, and compute the length of the next step of the others.
 
-    A step along the search direction is that of conjugate gradients, or of steepest descent along the chopped gradient,
-    the exact minimum of the objective along the direction. A conjugate gradient step that would drive a pressure
-    negative stops where the first pressure reaches zero and expands the active set from there (see
-    func_pressure_update).
+    Each environment stops once the largest relative density error of its particles, the largest entry of the projected
+    gradient, meets the tolerance, so that its result is the same whatever the other environments simulate alongside it.
+    The step is the exact minimum of the objective along the search direction. A direction that is no descent direction,
+    the empty one at the start of the solve, takes no step and starts the conjugation over.
     """
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
-        if sph_state.envs_solve.is_solving[i_b] and not sph_state.envs_solve.is_recomputing[i_b]:
+        if sph_state.envs_solve.is_solving[i_b]:
             # The slots of the dot products of the search direction (see SPHEnvsSolve)
             sums = qd.Vector.zero(gs.qd_float, 2)
             for i_s in range(2):
-                sums[i_s] = func_exact_sum_take(3 + i_s, i_b, sph_state.envs_solve.sums)
+                sums[i_s] = func_exact_sum_take(1 + i_s, i_b, sph_state.envs_solve.sums)
             dir_prod_sum, grad_dir_sum = sums[0], sums[1]
             step = gs.qd_float(0.0)
-            if dir_prod_sum > 0.0:
+            if dir_prod_sum > 0.0 and grad_dir_sum > 0.0:
                 step = grad_dir_sum / dir_prod_sum
-            step_max = sph_state.envs_solve.step_max[i_b]
-            is_expanding = not sph_state.envs_solve.is_proportioning[i_b] and step > step_max
-            if is_expanding:
-                step = step_max
+            else:
+                sph_state.envs_solve.grad_norm[i_b] = 0.0
             sph_state.envs_solve.step[i_b] = step
-            sph_state.envs_solve.dir_prod_norm[i_b] = dir_prod_sum
-            sph_state.envs_solve.is_expanding[i_b] = is_expanding
-            sph_state.envs_solve.step_max[i_b] = gs.qd_float(float("inf"))
+            if sph_state.envs_solve.err_max[i_b] <= sph_info.density_err_tol[None]:
+                sph_state.envs_solve.is_solving[i_b] = False
+            sph_state.envs_solve.err_max[i_b] = 0.0
 
 
 @qd.func
@@ -1621,68 +1657,17 @@ def func_pack_unknowns(value: float, values_contacts: qd.types.vector(3)):
 
 
 @qd.func
-def func_update_particle(i_p: int, i_b: int, sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+def func_pressure_update(sph_state: SPHState, sph_config: qd.template()):
     """
-    Take the step of the pressure solve of a sorted particle, and return its terms of the sums of func_pressure_next
-    and its relative density error, both zero for an expansion step.
-    """
-    expansion_step = sph_info.expansion_step[None]
-    # The pressure of the particle comes first, then those of its contacts (see func_contacts)
-    pressures = func_pack_unknowns(
-        sph_state.particles_reordered.p[i_p, i_b], sph_state.pressure_solve.p_contacts[i_p, i_b]
-    )
-    grads = func_pack_unknowns(
-        sph_state.pressure_solve.grad[i_p, i_b], sph_state.pressure_solve.grad_contacts[i_p, i_b]
-    )
-    dirs = func_pack_unknowns(sph_state.pressure_solve.dir[i_p, i_b], sph_state.pressure_solve.dir_contacts[i_p, i_b])
-    dir_prods = func_pack_unknowns(
-        sph_state.pressure_solve.dir_prod[i_p, i_b], sph_state.pressure_solve.dir_prod_contacts[i_p, i_b]
-    )
-    diags_inv = func_pack_unknowns(
-        sph_state.pressure_solve.diag_inv[i_p, i_b], 1.0 / sph_state.pressure_solve.diag_contacts[i_p, i_b]
-    )
-    if not sph_state.envs_solve.is_recomputing[i_b]:
-        step = sph_state.envs_solve.step[i_b]
-        pressures = qd.max(pressures - step * dirs, 0.0)
-        grads = grads - step * dir_prods
-    grads_free = qd.select(pressures > 0.0, grads, 0.0)
-    terms = qd.Vector.zero(gs.qd_float, 3)
-    err = gs.qd_float(0.0)
-    if sph_state.envs_solve.is_expanding[i_b]:
-        pressures = qd.max(pressures - expansion_step * diags_inv * grads_free, 0.0)
-    else:
-        grads_chopped = qd.select(pressures > 0.0, 0.0, qd.min(grads, 0.0))
-        # The particles free of pressure have no free gradient, and would divide zero by zero
-        grads_reduced = qd.select(pressures > 0.0, qd.min(pressures / (expansion_step * diags_inv), grads_free), 0.0)
-        # The search direction is stale while the environment recomputes its gradient
-        free_prod = gs.qd_float(0.0)
-        if not sph_state.envs_solve.is_recomputing[i_b]:
-            free_prod = (diags_inv * grads_free * dir_prods).sum()
-        terms = qd.Vector(
-            [(diags_inv * grads_chopped**2).sum(), (diags_inv * grads_reduced * grads_free).sum(), free_prod]
-        )
-        err = qd.abs(grads_free + grads_chopped).max()
-    sph_state.particles_reordered.p[i_p, i_b] = pressures[0]
-    sph_state.pressure_solve.p_contacts[i_p, i_b] = qd.Vector([pressures[1], pressures[2], pressures[3]])
-    sph_state.pressure_solve.grad[i_p, i_b] = grads[0]
-    sph_state.pressure_solve.grad_contacts[i_p, i_b] = qd.Vector([grads[1], grads[2], grads[3]])
-    return terms, err
+    Take the step of the pressure solve of each environment, and sum the preconditioned norm of the free gradient.
 
-
-@qd.func
-def func_pressure_update(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+    The step clips the pressures that would turn negative to zero. The gradient follows the step along the product of
+    the operator with the direction, which misses the share of the clipped pressures, so that the next pass corrects
+    it. An unknown is free where it is positive, or where the gradient asks for pressure.
     """
-    Take the step of the pressure solve of each environment, and sum what decides the next one.
-
-    An expansion step continues with a fixed step of projected steepest descent along the free gradient, which releases
-    the particles whose pressure would need to turn negative, after which the environment recomputes its gradient. The
-    other steps yield the sums of func_pressure_next: the projected gradient, the norms of the chopped gradient and of
-    the reduced free gradient, which decide between conjugate gradients and proportioning, and the product of the free
-    gradient with the operator times the search direction, which conjugates the next direction.
-    """
-    # Every particle adds to the same few sums of its environment, so where a block of lanes holds the particles of a
-    # single environment (see 'log2_neighbor_lanes'), the block sums its terms before the atomic operations. A single
-    # lane takes the environments of a particle in turn instead, which reads them from neighboring addresses.
+    # Every particle adds to the same sum of its environment, so where a block of lanes holds the particles of a single
+    # environment (see 'log2_neighbor_lanes'), the block sums its terms before the atomic operations. A single lane
+    # takes the environments of a particle in turn instead, which reads them from neighboring addresses.
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
     n_particles_padded = (n_particles + N_LANES - 1) // N_LANES * N_LANES
@@ -1690,72 +1675,75 @@ def func_pressure_update(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.
         i_b, i_p = i_t // n_particles_padded, i_t % n_particles_padded
         if qd.static(N_LANES == 1):
             i_b, i_p = i_t % n_envs, i_t // n_envs
-        terms = qd.Vector.zero(gs.qd_float, 3)
-        err = gs.qd_float(0.0)
-        is_adding = False
+        term = gs.qd_float(0.0)
         if i_p < n_particles:
             if sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
-                terms, err = func_update_particle(i_p, i_b, sph_state, sph_info, sph_config)
-                is_adding = True
+                step = sph_state.envs_solve.step[i_b]
+                diags_inv = func_pack_unknowns(
+                    sph_state.pressure_solve.diag_inv[i_p, i_b],
+                    1.0 / sph_state.pressure_solve.diag_contacts[i_p, i_b],
+                )
+                pressures = func_pack_unknowns(
+                    sph_state.particles_reordered.p[i_p, i_b], sph_state.pressure_solve.p_contacts[i_p, i_b]
+                )
+                grads = func_pack_unknowns(
+                    sph_state.pressure_solve.grad[i_p, i_b], sph_state.pressure_solve.grad_contacts[i_p, i_b]
+                )
+                dirs = func_pack_unknowns(
+                    sph_state.pressure_solve.dir[i_p, i_b], sph_state.pressure_solve.dir_contacts[i_p, i_b]
+                )
+                dir_prods = func_pack_unknowns(
+                    sph_state.pressure_solve.dir_prod[i_p, i_b], sph_state.pressure_solve.dir_prod_contacts[i_p, i_b]
+                )
+                pressures_next = pressures - step * dirs
+                if (pressures_next < 0.0).any():
+                    sph_state.envs_solve.is_clipped[i_b] = True
+                pressures = qd.max(pressures_next, 0.0)
+                grads = grads - step * dir_prods
+                term = qd.select((pressures > 0.0) | (grads < 0.0), diags_inv * grads**2, 0.0).sum()
+                sph_state.particles_reordered.p[i_p, i_b] = pressures[0]
+                sph_state.pressure_solve.p_contacts[i_p, i_b] = qd.Vector([pressures[1], pressures[2], pressures[3]])
+                sph_state.pressure_solve.grad[i_p, i_b] = grads[0]
+                sph_state.pressure_solve.grad_contacts[i_p, i_b] = qd.Vector([grads[1], grads[2], grads[3]])
+        is_adding = i_p < n_particles and sph_state.envs_solve.is_solving[i_b]
         if qd.static(N_LANES > 1):
-            for i_s in qd.static(range(3)):
-                terms[i_s] = qd_block_sum(terms[i_s], sph_config.log2_neighbor_lanes)
-            err = qd_block_max(err)
+            term = qd_block_sum(term, sph_config.log2_neighbor_lanes)
             is_adding = i_p % N_LANES == 0 and sph_state.envs_solve.is_solving[i_b]
-        if is_adding and not sph_state.envs_solve.is_expanding[i_b]:
-            for i_s in range(3):
-                func_exact_sum_add(i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
-            qd.atomic_max(sph_state.envs_solve.err_max[i_b], err)
+        if is_adding:
+            # The slot of the norm of the free gradient (see SPHEnvsSolve)
+            func_exact_sum_add(0, i_b, term, sph_state.envs_solve.sums)
 
 
 @qd.func
-def func_pressure_next(n_iters_max: int, sph_state: SPHState, sph_info: SPHInfo):
+def func_pressure_next(n_iters_max: int, sph_state: SPHState):
     """
-    Stop the pressure solve of the environments that converged, and choose the next step of the others.
+    Choose the coefficient of the previous search direction in the next one, and whether the loop runs on.
 
-    Each environment stops once the largest relative density error of its particles, the largest entry of the projected
-    gradient, meets the tolerance, so that its result is the same whatever the other environments simulate alongside it.
-    The next step is a conjugate gradient step while the chopped gradient is small against the reduced free gradient,
-    and a proportioning step along the chopped gradient otherwise (modified proportioning with reduced gradient
-    projections, MPRGP). The loop runs on as long as an environment iterates on, for `n_iters_max` iterations at most.
+    The coefficient is the ratio of the preconditioned norms of the free gradient at the last two steps (projected
+    preconditioned conjugate gradients). A step that clipped a pressure makes the next pass correct the gradient. The
+    loop runs on as long as an environment iterates on, for `n_iters_max` iterations at most.
     """
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
         if sph_state.envs_solve.is_solving[i_b]:
-            if sph_state.envs_solve.is_expanding[i_b]:
-                sph_state.envs_solve.is_expanding[i_b] = False
-                sph_state.envs_solve.is_recomputing[i_b] = True
-                if sph_state.solve_loop.n_passes[None] < n_iters_max:
-                    sph_state.solve_loop.is_looping[()] = 1
-            else:
-                sums = qd.Vector.zero(gs.qd_float, 3)
-                for i_s in range(3):
-                    sums[i_s] = func_exact_sum_take(i_s, i_b, sph_state.envs_solve.sums)
-                chopped_norm, reduced_norm, free_prod_sum = sums[0], sums[1], sums[2]
-                err_max = sph_state.envs_solve.err_max[i_b]
-                sph_state.envs_solve.err_max[i_b] = 0.0
-                is_conjugating = not (
-                    sph_state.envs_solve.is_recomputing[i_b] or sph_state.envs_solve.is_proportioning[i_b]
-                )
-                is_proportioning = chopped_norm > sph_info.proportioning_ratio[None] * reduced_norm
-                dir_coef = gs.qd_float(0.0)
-                if is_conjugating and not is_proportioning and sph_state.envs_solve.dir_prod_norm[i_b] > 0.0:
-                    dir_coef = free_prod_sum / sph_state.envs_solve.dir_prod_norm[i_b]
-                sph_state.envs_solve.dir_coef[i_b] = dir_coef
-                sph_state.envs_solve.is_proportioning[i_b] = is_proportioning
-                sph_state.envs_solve.is_recomputing[i_b] = False
-                if err_max <= sph_info.density_err_tol[None]:
-                    sph_state.envs_solve.is_solving[i_b] = False
-                elif sph_state.solve_loop.n_passes[None] < n_iters_max:
-                    sph_state.solve_loop.is_looping[()] = 1
+            grad_norm = func_exact_sum_take(0, i_b, sph_state.envs_solve.sums)
+            dir_coef = gs.qd_float(0.0)
+            if sph_state.envs_solve.grad_norm[i_b] > 0.0:
+                dir_coef = grad_norm / sph_state.envs_solve.grad_norm[i_b]
+            sph_state.envs_solve.dir_coef[i_b] = dir_coef
+            sph_state.envs_solve.grad_norm[i_b] = grad_norm
+            sph_state.envs_solve.is_correcting[i_b] = sph_state.envs_solve.is_clipped[i_b]
+            sph_state.envs_solve.is_clipped[i_b] = False
+            if sph_state.solve_loop.n_passes[None] < n_iters_max:
+                sph_state.solve_loop.is_looping[()] = 1
 
 
 @qd.func
-def func_pressure_dir(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+def func_pressure_dir(sph_state: SPHState):
     """Compute the next search direction of the pressure solve of each environment (see func_pressure_next)."""
     for i_p, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.pressure_solve.dir))
     ):
-        if sph_state.envs_solve.is_solving[i_b] and not sph_state.envs_solve.is_recomputing[i_b]:
+        if sph_state.envs_solve.is_solving[i_b]:
             dirs = qd.Vector.zero(gs.qd_float, 4)
             if sph_state.particles_reordered.is_active[i_p, i_b]:
                 diags_inv = func_pack_unknowns(
@@ -1767,15 +1755,14 @@ def func_pressure_dir(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.tem
                 grads = func_pack_unknowns(
                     sph_state.pressure_solve.grad[i_p, i_b], sph_state.pressure_solve.grad_contacts[i_p, i_b]
                 )
-                if sph_state.envs_solve.is_proportioning[i_b]:
-                    dirs = qd.select(pressures > 0.0, 0.0, diags_inv * qd.min(grads, 0.0))
-                else:
-                    dirs_prev = func_pack_unknowns(
-                        sph_state.pressure_solve.dir[i_p, i_b], sph_state.pressure_solve.dir_contacts[i_p, i_b]
-                    )
-                    dirs = qd.select(
-                        pressures > 0.0, diags_inv * grads - sph_state.envs_solve.dir_coef[i_b] * dirs_prev, 0.0
-                    )
+                dirs_prev = func_pack_unknowns(
+                    sph_state.pressure_solve.dir[i_p, i_b], sph_state.pressure_solve.dir_contacts[i_p, i_b]
+                )
+                dirs = qd.select(
+                    (pressures > 0.0) | (grads < 0.0),
+                    diags_inv * grads + sph_state.envs_solve.dir_coef[i_b] * dirs_prev,
+                    0.0,
+                )
             sph_state.pressure_solve.dir[i_p, i_b] = dirs[0]
             sph_state.pressure_solve.dir_contacts[i_p, i_b] = qd.Vector([dirs[1], dirs[2], dirs[3]])
 
@@ -1794,9 +1781,12 @@ def kernel_solve_pressure(
     The pressures are the non-negative minimizers of a convex quadratic, whose gradient is the relative density deficit
     of the particles at the end of the substep and whose operator, the rate at which the pressures change the density,
     is symmetric positive semi-definite. Its minimum keeps every particle at most at its rest density, and the particles
-    under pressure at exactly their rest density. Modified proportioning with reduced gradient projections (MPRGP), a
-    conjugate gradient method that expands and shrinks the set of the particles under pressure, solves it, with the
-    inverse diagonal of the operator as preconditioner.
+    under pressure at exactly their rest density. Projected preconditioned conjugate gradients solve it, with the inverse
+    diagonal of the operator as preconditioner: the pressures a step would turn negative are clipped to zero, and the
+    particles free of pressure whose density exceeds the rest density join the search, without restarting the
+    conjugation. Near a free surface, where many particles hold a pressure close to zero, the set of the particles under
+    pressure changes at nearly every step, which a method restarting on every change of the set handles one particle at
+    a time.
     """
     sph_state.solve_loop.n_passes[None] = 0
     is_looping[()] = 1
@@ -1805,10 +1795,10 @@ def kernel_solve_pressure(
     while qd.graph.do_while(is_looping):
         func_pressure_dir_vel(sph_state, sph_info, sph_config)
         func_pressure_product(sph_state, sph_info, sph_config)
-        func_pressure_step(sph_state)
-        func_pressure_update(sph_state, sph_info, sph_config)
-        func_pressure_next(n_iters_max, sph_state, sph_info)
-        func_pressure_dir(sph_state, sph_info, sph_config)
+        func_pressure_step(sph_state, sph_info)
+        func_pressure_update(sph_state, sph_config)
+        func_pressure_next(n_iters_max, sph_state)
+        func_pressure_dir(sph_state)
 
 
 @qd.func
@@ -1853,7 +1843,7 @@ def kernel_apply_pressure(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
             i_surface=-1,
         )
         if is_active:
-            func_for_all_interactions(
+            func_for_all_cached_interactions(
                 i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_apply_pressure, n_lanes=N_LANES
             )
         if qd.static(N_LANES > 1):
