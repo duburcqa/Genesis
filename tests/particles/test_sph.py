@@ -309,7 +309,7 @@ def test_resume_from_pickle(show_viewer):
 
 
 @pytest.mark.required
-def test_dfsph_resting_liquid_stability(show_viewer):
+def test_resting_liquid_conserves_energy(show_viewer):
     LIQUID_HEIGHT = 0.5
     GRAVITY = 9.81
 
@@ -345,7 +345,7 @@ def test_dfsph_resting_liquid_stability(show_viewer):
     # inviscid liquid never rises above its initial value while it settles under its own weight from the lattice it is
     # sampled on. The potential energy is taken relative to the initial positions, which keeps its rounding far below
     # the bound.
-    particles_mass = qd_to_numpy(scene.sph_solver.sph_info.particles.mass)
+    particles_mass = tensor_to_array(scene.sph_solver.get_particles_mass(), dtype=np.float64)
     pos_init = tensor_to_array(liquid.get_particles_pos(), dtype=np.float64)
     for _ in range(50):
         scene.step()
@@ -401,6 +401,7 @@ def test_viscosity_damps_vortex(show_viewer):
     RHO = 1000.0
     WIDTH = 0.2
     SPEED = 0.01
+    N_STEPS = 50
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -429,22 +430,22 @@ def test_viscosity_damps_vortex(show_viewer):
             mu=VISCOSITY,
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
     # The Taylor-Green vortex filling the domain has no divergence, no velocity across the walls and no shear along
     # them, so the viscosity alone damps it, at the rate of its kinematic viscosity times its squared wave number.
     wave_number = np.pi / WIDTH
     pos = tensor_to_array(liquid.get_particles_pos())
-    sin_x, cos_x = np.sin(wave_number * pos[:, 0]), np.cos(wave_number * pos[:, 0])
-    sin_y, cos_y = np.sin(wave_number * pos[:, 1]), np.cos(wave_number * pos[:, 1])
+    sin_x, cos_x = np.sin(wave_number * pos[..., 0]), np.cos(wave_number * pos[..., 0])
+    sin_y, cos_y = np.sin(wave_number * pos[..., 1]), np.cos(wave_number * pos[..., 1])
     vortex = np.stack([sin_x * cos_y, -cos_x * sin_y, np.zeros_like(sin_x)], axis=-1)
     liquid.set_particles_vel(SPEED * vortex)
     amplitudes = []
-    for _ in range(50):
+    for _ in range(N_STEPS):
         scene.step()
         vel = tensor_to_array(liquid.get_particles_vel())
         amplitudes.append((vel * vortex).sum() / (vortex**2).sum())
-    times = scene.dt * np.arange(1, 51)
+    times = scene.dt * np.arange(1, N_STEPS + 1)
     decay_rate = -np.polyfit(times, np.log(amplitudes), deg=1)[0]
     assert_allclose(decay_rate, 2.0 * VISCOSITY / RHO * wave_number**2, rtol=5e-2)
 

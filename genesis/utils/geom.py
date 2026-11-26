@@ -658,6 +658,53 @@ def qd_transform_inertia_by_trans_quat(i_inertial, i_mass, trans, quat, eps):
 
 
 @qd.func
+def qd_closest_point_on_triangle(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3), eps: float):
+    """
+    Return the point of a triangle closest to a point.
+
+    Parameters
+    ----------
+    pos : qd.types.vector(3)
+        The point.
+    corners : qd.types.matrix(3, 3)
+        The corners of the triangle, one per row.
+    eps : float
+        The area below which the triangle has no inside, its closest point lying on its edges.
+    """
+    corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
+    corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
+    corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
+    area_normal = (corner_1 - corner_0).cross(corner_2 - corner_0)
+    normal = area_normal / qd.max(area_normal.norm(), eps)
+    closest = pos - (pos - corner_0).dot(normal) * normal
+    # The projection lies inside the triangle where it is on the inner side of its three edges, a degenerate triangle
+    # having no inside
+    is_inside = (
+        area_normal.norm() > eps
+        and (corner_1 - corner_0).cross(closest - corner_0).dot(normal) >= 0.0
+        and (corner_2 - corner_1).cross(closest - corner_1).dot(normal) >= 0.0
+        and (corner_0 - corner_2).cross(closest - corner_2).dot(normal) >= 0.0
+    )
+    if not is_inside:
+        dist = gs.qd_float(1e30)
+        for i_edge in qd.static(range(3)):
+            edge_start = corner_0 if i_edge == 0 else (corner_1 if i_edge == 1 else corner_2)
+            edge_end = corner_1 if i_edge == 0 else (corner_2 if i_edge == 1 else corner_0)
+            edge_param = qd.min(
+                qd.max(
+                    (pos - edge_start).dot(edge_end - edge_start) / qd.max((edge_end - edge_start).norm_sqr(), 1e-30),
+                    0.0,
+                ),
+                1.0,
+            )
+            edge_point = edge_start + edge_param * (edge_end - edge_start)
+            if (pos - edge_point).norm() < dist:
+                dist = (pos - edge_point).norm()
+                closest = edge_point
+    return closest
+
+
+@qd.func
 def qd_atan2_fast(y, x):
     """Compute the four-quadrant arctangent from a polynomial, within 4e-8 rad of the exact angle before rounding.
 

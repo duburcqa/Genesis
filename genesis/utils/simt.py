@@ -73,6 +73,21 @@ def qd_block_shuffle(value, i_lane):
 
 
 @qd.func
+def qd_block_run_lane(i_run, items_end):
+    """Return the lane of a block whose items hold an item of the run the lanes of the block number together.
+
+    Each lane holds `items_end`, the inclusive prefix sum over the block of the numbers of items of the lanes (see
+    qd_block_scan), so the item `i_run` of the run belongs to the first lane whose `items_end` exceeds it, which a
+    bisection over the 32 lanes finds in five shuffles. Every lane of the block calls it.
+    """
+    i_lane = 0
+    for i_step in qd.static(range(5)):
+        if qd_block_shuffle(items_end, i_lane + (16 >> i_step) - 1) <= i_run:
+            i_lane = i_lane + (16 >> i_step)
+    return i_lane
+
+
+@qd.func
 def qd_block_ballot(predicate):
     """Mask of the lanes of a block that a predicate holds on, every lane of the block receiving it.
 

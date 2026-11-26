@@ -868,8 +868,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
     """
-    Options configuring the SPHSolver, which keeps the smoothed particle hydrodynamics (SPH) liquid incompressible by
-    solving for the non-negative pressures that hold every particle at most at its rest density.
+    Options configuring the SPHSolver, which simulates incompressible liquids with smoothed particle hydrodynamics
+    (SPH).
 
     The liquid is a single incompressible phase, without air to cushion its impacts, so the pressure it exerts on a wall
     it strikes exceeds measured values: averaged over a few milliseconds, the first impact of a dam break on the
@@ -903,12 +903,11 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     max_density_solver_iterations : int, optional
         Maximum number of iterations of the pressure solve per substep. Defaults to 100.
     max_interactions : int, optional
-        Maximum number of particles, and of their mirror images across walls and bodies, that each particle interacts
-        with at once. The pressure solve keeps them in memory for the whole substep, 4 bytes per particle, environment
-        and unit of this option, which makes each of its iterations several times faster. A liquid at rest takes about
-        30 interactions per particle, and bodies falling into it up to about 60. A larger value accommodates particles
-        packed more densely than a flowing liquid, such as droplets emitted on top of each other, at the cost of
-        memory. Exceeding it at runtime halts the simulation with an error. Defaults to 64.
+        Maximum number of neighbors each particle interacts with at once, walls and entities nearby counting as more of
+        them. A liquid at rest takes about 30 and entities falling into it up to about 60. A larger value accommodates
+        particles packed more densely, such as droplets emitted on top of each other, at the cost of 4 bytes of memory
+        per particle, environment and unit of this option. Exceeding it at runtime halts the simulation with an error.
+        Defaults to 64.
     vis : gs.options.ParticleVisOptions, optional
         How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """

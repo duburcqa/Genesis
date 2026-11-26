@@ -27,11 +27,7 @@ from genesis.engine.solvers.pbd_solver import PBDInfo, PBDState
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidData, RigidInfo
-from genesis.engine.solvers.sph_solver import (
-    SPHInfo,
-    SPHState,
-    func_segment_closest,
-)
+from genesis.engine.solvers.sph_solver import SPHInfo, SPHState
 from genesis.grad.bridge import reversed_with
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
@@ -44,6 +40,7 @@ from genesis.utils.geom import (
     func_hash_sort_particles,
     func_hash_wrap_cell,
     hash_grid_sizes,
+    qd_closest_point_on_triangle,
     qd_inv_transform_by_trans_quat,
     qd_quat_to_R,
     qd_transform_by_quat,
@@ -65,6 +62,7 @@ from genesis.utils.simt import (
     func_exact_sum_take,
     qd_block_max,
     qd_block_min,
+    qd_block_run_lane,
     qd_block_scan,
     qd_block_shuffle,
     qd_block_sum,
@@ -245,6 +243,15 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
     mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
     EPS: qd.Tensor = field(float, shape=())
+    # The cosine of the angle between the normals of two surfaces of the same boundary above which an SPH particle meets
+    # them as one surface, and the distance of the closest point of one to the tangent plane of the other, relative to
+    # their distances to the particle, within which the point lies on the plane (see func_surfaces_add)
+    surfaces_normals_cos_min: qd.Tensor = field(float, shape=())
+    surfaces_dist_rtol: qd.Tensor = field(float, shape=())
+    # The distance from the point of a segment closest to an SPH particle to the projection of the particle on the
+    # plane of the segment, relative to the support radius, within which the point lies inside the segment (see
+    # func_boundary_walk)
+    segments_inside_rtol: qd.Tensor = field(float, shape=())
 
 
 class LegacyCouplerConfig(Config):
@@ -334,7 +341,7 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
         opt_in(SDFInfo, cond=lambda: any([self.rigid_couplings[i] for i in (0, 2, 3)]))
         # The surfaces of the FEM entities and of the rigid geoms are moving boundaries of the SPH liquid
         opt_in(SPHState.boundary, cond=lambda: self.has_fem_sph or bool(self.rigid_sph_geoms))
-        opt_in(SPHState.pressure_solve.body_compliance, cond=lambda: self.has_fem_sph or bool(self.rigid_sph_geoms))
+        opt_in(SPHState.pressure_solve.links_compliance, cond=lambda: self.has_fem_sph or bool(self.rigid_sph_geoms))
         # The SPH liquid sums its forces on the rigid links exactly, whatever the order of the sums
         opt_in(
             RigidData.dyn_state.links.cfrc_external_sums,
@@ -449,6 +456,9 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
                 mpm_pbd_stencil_size=mpm_pbd_stencil_size,
                 EPS=gs.EPS,
+                surfaces_normals_cos_min=0.7,
+                surfaces_dist_rtol=1e-3,
+                segments_inside_rtol=1e-3,
             )
         )
 
@@ -771,9 +781,7 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
             np.arange(len(self.fem_solver.entities)),
             [len(entity.surface_triangles) for entity in self.fem_solver.entities],
         )
-        geoms_boundary_idx = np.array(
-            [0 if geom.is_fixed else 1 + geom.link.idx for geom in self.rigid_solver.geoms], dtype=gs.np_int
-        )
+        geoms_boundary_idx = np.array([0 if geom.is_fixed else 1 + geom.link.idx for geom in self.rigid_solver.geoms])
         segments_boundary_idx = np.concatenate(
             [
                 1 + self.rigid_solver.n_links + fem_tris_entity_idx[fem_segments_tri_idx],
@@ -923,8 +931,8 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
                 self.sph_boundaries,
                 self.fem_solver.fem_info,
                 self.sph_solver.sph_info,
-                self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_info.links,
+                self.rigid_solver.dyn_info.geoms,
                 self.legacy_coupler_info,
                 self.legacy_coupler_config,
             )
@@ -1655,14 +1663,29 @@ def func_boundary_source_cells(
     eps: float,
 ):
     """
-    Return the frame of a source of boundary segments, a point in it, the first cell and number of cells along each
-    axis of the source within the reach of the point, the lower corner of the first cell in the frame of the source,
-    the size of the cells and the reach beyond which a cell holds no segment within the reach of the point.
+    Return the frame of a source of boundary segments and the cells of the source within the reach of a point.
 
     Source 0 is the hash grid of the segments placed in the world frame every substep, and source 1 + i_k the grid of
     the k-th fixed geom near the domain in the environment in its own frame (see 'fixed_tris_corners' and
     'fixed_envs_geoms'), which a point reaches where it lies within the support radius plus the largest extent of its
     segments from the cells of the grid.
+
+    Returns
+    -------
+    pos_src : qd.types.vector(3)
+        The point in the frame of the source.
+    rot : qd.types.matrix(3, 3)
+        The rotation of the frame of the source.
+    cell_base : qd.types.vector(3, dtype=qd.i32)
+        The first cell of the source within the reach of the point.
+    n_cells : qd.types.vector(3, dtype=qd.i32)
+        The number of cells within the reach of the point along each axis.
+    cell_origin : qd.types.vector(3)
+        The lower corner of the first cell, in the frame of the source.
+    cell_size : float
+        The size of the cells.
+    reach : float
+        The distance from the point beyond which a cell holds no segment within its reach.
     """
     pos_src = pos
     rot = qd.Matrix.identity(gs.qd_float, 3)
@@ -2048,8 +2071,10 @@ def func_segment_corners(
     n_fem_segments: int,
 ):
     """
-    Return the corners of a segment of the moving boundaries of the SPH liquid, one per row, with the velocity of the
-    point of its FEM triangle at its centroid, zero for a rigid segment, and whether it takes part in the environment.
+    Return the corners of a segment of the moving boundaries of the SPH liquid, its velocity and whether it is active.
+
+    The corners come one per row, the velocity is that of the point of its FEM triangle at its centroid, zero for a
+    rigid segment, and the segment is active where it takes part in the environment.
     """
     corners = qd.Matrix.zero(gs.qd_float, 3, 3)
     vel = qd.Vector.zero(gs.qd_float, 3)
@@ -2099,8 +2124,8 @@ def kernel_place_sph_boundary_segments(
     sph_boundaries: SPHBoundaries,
     fem_info: FEMInfo,
     sph_info: SPHInfo,
-    geoms_info: GeomsInfo,
     links_info: LinksInfo,
+    geoms_info: GeomsInfo,
     legacy_coupler_info: LegacyCouplerInfo,
     legacy_coupler_config: qd.template(),
 ):
@@ -2130,14 +2155,7 @@ def kernel_place_sph_boundary_segments(
         extent = gs.qd_float(0.0)
         if i_sg < n_segments:
             corners, _, is_active = func_segment_corners(
-                i_sg,
-                i_b,
-                fem_state,
-                geoms_state,
-                sph_boundaries,
-                fem_info,
-                legacy_coupler_config,
-                n_fem_segments,
+                i_sg, i_b, fem_state, geoms_state, sph_boundaries, fem_info, legacy_coupler_config, n_fem_segments
             )
             centroid = (
                 qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
@@ -2169,14 +2187,7 @@ def kernel_place_sph_boundary_segments(
         if i_q < sph_boundaries.hash_grid.n_particles[i_b]:
             i_sg = sph_boundaries.hash_grid.particles_idx[i_q, i_b]
             corners, vel, _ = func_segment_corners(
-                i_sg,
-                i_b,
-                fem_state,
-                geoms_state,
-                sph_boundaries,
-                fem_info,
-                legacy_coupler_config,
-                n_fem_segments,
+                i_sg, i_b, fem_state, geoms_state, sph_boundaries, fem_info, legacy_coupler_config, n_fem_segments
             )
             corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
             corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
@@ -2234,7 +2245,6 @@ def kernel_place_sph_boundary_segments(
                 sph_info,
                 legacy_coupler_info,
                 legacy_coupler_config,
-                func_surfaces_add,
                 n_lanes=N_LANES,
             )
         # The lanes merge their surfaces along a fixed tree, in five steps of three surfaces each, so that the first
@@ -2282,7 +2292,7 @@ def kernel_place_sph_boundary_segments(
                             normal[i_d_] = qd.select(is_lower, 1.0, -1.0)
                             offset = qd.select(is_lower, lower[i_d_], -upper[i_d_])
                             key = -2 - 2 * i_d_ - qd.select(is_lower, 0, 1)
-            func_surfaces_add(i_sg, key, dist, normal, offset, vel, ret)
+            func_surfaces_add(i_sg, key, dist, normal, offset, vel, ret, legacy_coupler_info)
         if i_lane == 0:
             for i_s in qd.static(range(3)):
                 sph_state.boundary.surfaces_key[i_p, i_s, i_b] = ret.keys[i_s]
@@ -2319,13 +2329,14 @@ def func_surfaces_add(
     offset: float,
     vel: qd.types.vector(3),
     ret: qd.template(),
+    legacy_coupler_info: LegacyCouplerInfo,
 ):
     """
     Add a surface to the three nearest that a particle meets, held in `ret` (see SPHBoundaryParticles).
 
     A surface of the same boundary as one already held is the same surface, which keeps its nearest point, when both
     face the same way or when the closest point of one lies on or behind the tangent plane of the other: the seams
-    between the segments of a face, the faces of a convex body and the two sides of a body thinner than the reach of
+    between the segments of a face, the faces of a convex geom and the two sides of a geom thinner than the reach of
     the particle merge, and the faces of a concave edge stay apart. Otherwise the surface replaces the farthest one
     held if it is nearer, the empty slots lying infinitely far.
 
@@ -2345,6 +2356,8 @@ def func_surfaces_add(
         The velocity of the surface at that point.
     ret : qd.template()
         The surfaces held so far, which the surface joins.
+    legacy_coupler_info : LegacyCouplerInfo
+        The parameters of the coupler.
     """
     # The surface is dropped if a nearer version of it is held, and otherwise takes the place of every version of it,
     # the slots holding one marked by a bit each
@@ -2354,10 +2367,11 @@ def func_surfaces_add(
         normal_s = qd.Vector([ret.normals[i_s, 0], ret.normals[i_s, 1], ret.normals[i_s, 2]])
         normals_dot = normal_s.dot(normal)
         # The signed distance of the closest point of each surface to the tangent plane of the other
-        dist_tol = 1e-3 * (qd.abs(ret.dists[i_s]) + qd.abs(dist))
+        dist_tol = legacy_coupler_info.surfaces_dist_rtol[None] * (qd.abs(ret.dists[i_s]) + qd.abs(dist))
         is_behind_held = ret.dists[i_s] - dist * normals_dot <= dist_tol
         is_behind_new = dist - ret.dists[i_s] * normals_dot <= dist_tol
-        if ret.keys[i_s] == key and (normals_dot > 0.7 or is_behind_held or is_behind_new):
+        is_aligned = normals_dot > legacy_coupler_info.surfaces_normals_cos_min[None]
+        if ret.keys[i_s] == key and (is_aligned or is_behind_held or is_behind_new):
             matched_bits = matched_bits | (1 << i_s)
             if qd.abs(ret.dists[i_s]) <= qd.abs(dist):
                 is_kept = False
@@ -2394,11 +2408,10 @@ def func_boundary_walk(
     sph_info: SPHInfo,
     legacy_coupler_info: LegacyCouplerInfo,
     legacy_coupler_config: qd.template(),
-    task: qd.template(),
     n_lanes: qd.template(),
 ):
     """
-    Run a task on every segment of the moving boundaries of the SPH liquid near a point, within the support radius.
+    Add every segment of the moving boundaries of the SPH liquid near a point to the surfaces the point meets.
 
     The segments come from the hash grid of the segments placed in the world frame, then from the grid of each fixed
     geom near the domain, in the frame of the geom.
@@ -2424,13 +2437,6 @@ def func_boundary_walk(
         The parameters of the coupler.
     legacy_coupler_config : qd.template()
         The couplings the kernels of the coupler compile in.
-    task : qd.template()
-        The task, which takes the arguments of func_surfaces_add: the index of the segment in the world frame (-1 for a
-        fixed geom), its boundary, the signed distance from the point to the surface, the unit normal
-        of the surface at the point of the segment closest to the point, out of the solid, the offset of the tangent
-        plane there, and the velocity of the segment, all in the world frame, then `ret`. The normal is that of the
-        segment where its closest point lies inside it, and the direction to the point where it lies on its border, a
-        convex edge. A segment whose closest point lies on its border, with the point behind it, is skipped.
     n_lanes : qd.template()
         The number of lanes of the subgroup that take the point together.
     """
@@ -2475,10 +2481,7 @@ def func_boundary_walk(
                 i_item = item_start + i_run
                 i_cell_item = i_cell
                 if qd.static(n_lanes > 1):
-                    i_cell_lane = 0
-                    for i_step in qd.static(range(5)):
-                        if qd_block_shuffle(items_end, i_cell_lane + (16 >> i_step) - 1) <= i_run:
-                            i_cell_lane = i_cell_lane + (16 >> i_step)
+                    i_cell_lane = qd_block_run_lane(i_run, items_end)
                     cell_items_end = qd_block_shuffle(items_end, i_cell_lane)
                     cell_n_items = qd_block_shuffle(n_items, i_cell_lane)
                     i_item = qd_block_shuffle(item_start, i_cell_lane) + i_run - (cell_items_end - cell_n_items)
@@ -2534,11 +2537,12 @@ def func_boundary_walk(
                                 # The surface of the solid at a point in front of a segment whose closest point lies
                                 # on its border is that of a convex edge, normal to the direction to the point. A point
                                 # behind it lies across another face of the solid, which holds the closest point inside.
-                                closest = func_segment_closest(pos_src, corners, eps)
+                                closest = qd_closest_point_on_triangle(pos_src, corners, eps)
                                 offset_src = pos_src - closest
                                 dist = offset_src.norm()
                                 normal_dist = normal.dot(offset_src)
-                                is_inside = (offset_src - normal_dist * normal).norm() <= 1e-3 * support_radius
+                                inside_tol = legacy_coupler_info.segments_inside_rtol[None] * support_radius
+                                is_inside = (offset_src - normal_dist * normal).norm() <= inside_tol
                                 if is_inside or normal_dist > 0.0:
                                     normal_surface = normal
                                     dist_signed = normal_dist
@@ -2547,7 +2551,9 @@ def func_boundary_walk(
                                         dist_signed = dist
                                     normal_world = rot @ normal_surface
                                     offset = normal_world.dot(pos + rot @ (closest - pos_src))
-                                    task(i_sg, i_bd, dist_signed, normal_world, offset, vel, ret)
+                                    func_surfaces_add(
+                                        i_sg, i_bd, dist_signed, normal_world, offset, vel, ret, legacy_coupler_info
+                                    )
 
 
 @qd.kernel(fastcache=True)
@@ -2639,13 +2645,10 @@ def kernel_sph_boundaries_impulse(
                     i_run = i_run_ * N_LANES + i_lane
                     i_r = slot_start + i_run
                     if qd.static(N_LANES > 1):
-                        i_cell_lane = 0
-                        for i_step in qd.static(range(5)):
-                            if qd_block_shuffle(cells_end, i_cell_lane + (16 >> i_step) - 1) <= i_run:
-                                i_cell_lane = i_cell_lane + (16 >> i_step)
+                        i_cell_lane = qd_block_run_lane(i_run, cells_end)
                         cell_end = qd_block_shuffle(cells_end, i_cell_lane)
-                        cell_size = qd_block_shuffle(slot_size, i_cell_lane)
-                        i_r = qd_block_shuffle(slot_start, i_cell_lane) + i_run - (cell_end - cell_size)
+                        cell_n_particles = qd_block_shuffle(slot_size, i_cell_lane)
+                        i_r = qd_block_shuffle(slot_start, i_cell_lane) + i_run - (cell_end - cell_n_particles)
                     if i_run < n_run:
                         # The particles whose nearest point of a surface lies on the segment give it their impulse
                         i_p = sph_state.hash_grid.particles_idx[i_r, i_b]

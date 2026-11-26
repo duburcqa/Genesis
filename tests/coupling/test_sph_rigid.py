@@ -24,14 +24,10 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
     PARTICLE_SIZE = 0.02
     BALL_RADIUS = 0.06
     RAFT_SIZE = (0.1, 0.1, 0.04)
-    BLOCK_SIZE = 0.1
-    BLOCK_DENSITY_RATIO = 0.5
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             substeps=10,
-            gravity=(0.0, 0.0, -9.81),
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
@@ -57,9 +53,7 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
             pos=(0.0, 0.0, 0.25),
             size=(0.5, 0.5, 0.5),
         ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-        ),
+        material=gs.materials.SPH.Liquid(),
     )
     light_ball = scene.add_entity(
         morph=gs.morphs.Sphere(
@@ -89,16 +83,6 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
             rho=200.0,
         ),
     )
-    block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.13, 0.51 + 0.5 * BLOCK_SIZE),
-            size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
-        ),
-    )
     scene.build(n_envs=n_envs)
 
     # The liquid sampled inside the rigid bodies, or within half a particle size of their surface where liquid rests
@@ -111,26 +95,15 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
         + math.pi * offset**2 * sum(RAFT_SIZE)
         + 4.0 / 3.0 * math.pi * offset**3
     )
-    bodies_volume = 2 * 4.0 / 3.0 * math.pi * (BALL_RADIUS + offset) ** 3 + raft_volume
+    entities_volume = 2 * 4.0 / 3.0 * math.pi * (BALL_RADIUS + offset) ** 3 + raft_volume
     removed_volume = (~liquid.get_particles_active().bool()).sum(dim=-1) * PARTICLE_SIZE**3
-    assert_allclose(removed_volume, bodies_volume, rtol=5e-3)
+    assert_allclose(removed_volume, entities_volume, rtol=5e-3)
 
     # The light ball first sinks with the settling fluid before buoyancy lifts it above the surface
-    raft_rolls, block_drafts = [], []
-    for i_step in range(100):
+    raft_rolls = []
+    for _ in range(100):
         scene.step()
         raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
-
-        # The draft of the block below the free surface of the liquid around it, the surface lying half a particle size
-        # above the centers of the topmost particles
-        if i_step >= 80:
-            particles_pos, verts_pos = liquid.get_particles_pos(), block.get_verts_pos()
-            block_center = verts_pos.mean(dim=-2, keepdim=True)
-            offsets = (particles_pos[..., :2] - block_center[..., :2]).abs().amax(dim=-1)
-            is_around = (offsets > 0.5 * BLOCK_SIZE + PARTICLE_SIZE) & (offsets < 0.5 * BLOCK_SIZE + 3 * PARTICLE_SIZE)
-            heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
-            level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
-            block_drafts.append(level - verts_pos[..., 2].amin(dim=-1))
     raft_rolls = torch.stack(raft_rolls)
 
     # The static fluid pressure must push the light ball (rho well below the fluid rest density) up toward the
@@ -143,22 +116,19 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
     # The pressure on the tilted raft acts off its center of mass, so the buoyancy torque rocks it about its roll
     # axis. That torque reaches the rigid body through the coupling wrench alone.
     assert (raft_rolls.amax(dim=0) - raft_rolls.amin(dim=0) > 2.0).all(), f"Raft must rock, got rolls={raft_rolls}"
-    # The FEM block floats with the draft at which the weight of the liquid it displaces balances its own, up to the
-    # smoothing of the surface by the kernel over half a particle size
-    assert_allclose(torch.stack(block_drafts).mean(dim=0), BLOCK_DENSITY_RATIO * BLOCK_SIZE, atol=0.5 * PARTICLE_SIZE)
 
 
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_floating_body_settles_at_draft(show_viewer):
+def test_floating_entities_settle_at_draft(show_viewer):
     PARTICLE_SIZE = 0.02
     RAFT_SIZE = (0.1, 0.1, 0.04)
     RAFT_DENSITY_RATIO = 0.2
+    BLOCK_SIZE = 0.1
+    BLOCK_DENSITY_RATIO = 0.5
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             substeps=10,
-            gravity=(0.0, 0.0, -9.81),
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
@@ -184,38 +154,51 @@ def test_floating_body_settles_at_draft(show_viewer):
             pos=(0.0, 0.0, 0.25),
             size=(0.5, 0.5, 0.5),
         ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-        ),
+        material=gs.materials.SPH.Liquid(),
     )
-    # The raft starts just above the free surface, at the center of the pool
+    # The rigid raft and the FEM block start just above the free surface
     raft = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.505 + 0.5 * RAFT_SIZE[2]),
+            pos=(0.0, 0.12, 0.505 + 0.5 * RAFT_SIZE[2]),
             size=RAFT_SIZE,
         ),
         material=gs.materials.Rigid(
             rho=RAFT_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
         ),
     )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.12, 0.51 + 0.5 * BLOCK_SIZE),
+            size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+        ),
+    )
     scene.build(n_envs=2)
 
-    # The draft of the raft below the free surface of the liquid around it, the surface lying half a particle size above
-    # the centers of the topmost particles, and the bottom of the raft half its thickness below its center
-    raft_drafts = []
+    # The draft of each floating entity below the free surface of the liquid around it, the surface lying half a
+    # particle size above the centers of the topmost particles
+    raft_drafts, block_drafts = [], []
     for i_step in range(100):
         scene.step()
         if i_step >= 80:
-            particles_pos, raft_pos = liquid.get_particles_pos(), raft.get_pos()
-            offsets = (particles_pos[..., :2] - raft_pos[..., None, :2]).abs().amax(dim=-1) - 0.5 * RAFT_SIZE[0]
-            is_around = (offsets > PARTICLE_SIZE) & (offsets < 3 * PARTICLE_SIZE)
-            heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
-            level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
-            raft_drafts.append(level - (raft_pos[..., 2] - 0.5 * RAFT_SIZE[2]))
+            particles_pos, raft_pos, verts_pos = liquid.get_particles_pos(), raft.get_pos(), block.get_verts_pos()
+            for drafts, center, half_width, bottom in (
+                (raft_drafts, raft_pos, 0.5 * RAFT_SIZE[0], raft_pos[..., 2] - 0.5 * RAFT_SIZE[2]),
+                (block_drafts, verts_pos.mean(dim=-2), 0.5 * BLOCK_SIZE, verts_pos[..., 2].amin(dim=-1)),
+            ):
+                offsets = (particles_pos[..., :2] - center[..., None, :2]).abs().amax(dim=-1) - half_width
+                is_around = (offsets > PARTICLE_SIZE) & (offsets < 3 * PARTICLE_SIZE)
+                heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
+                level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
+                drafts.append(level - bottom)
 
-    # The raft floats with the draft at which the weight of the liquid it displaces balances its own, up to the
+    # Each entity floats with the draft at which the weight of the liquid it displaces balances its own, up to the
     # smoothing of the surface by the kernel over half a particle size
     assert_allclose(torch.stack(raft_drafts).mean(dim=0), RAFT_DENSITY_RATIO * RAFT_SIZE[2], atol=0.5 * PARTICLE_SIZE)
+    assert_allclose(torch.stack(block_drafts).mean(dim=0), BLOCK_DENSITY_RATIO * BLOCK_SIZE, atol=0.5 * PARTICLE_SIZE)
 
 
 # On a GPU with a core per particle, the non-batched scene sums the boundaries around each particle over a subgroup of
@@ -228,7 +211,7 @@ def test_floating_body_settles_at_draft(show_viewer):
     ],
 )
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_bodies_hold_liquid_back_under_impacts(n_envs, show_viewer):
+def test_entities_hold_liquid_back_under_impacts(n_envs, show_viewer):
     PARTICLE_SIZE = 0.02
     BALL_RADIUS = 0.06
     BLOCK_SIZE = 0.1
@@ -239,9 +222,7 @@ def test_bodies_hold_liquid_back_under_impacts(n_envs, show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             substeps=10,
-            gravity=(0.0, 0.0, -9.81),
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
@@ -267,9 +248,7 @@ def test_bodies_hold_liquid_back_under_impacts(n_envs, show_viewer):
             pos=(0.0, 0.0, 0.25),
             size=(0.5, 0.5, 0.5),
         ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-        ),
+        material=gs.materials.SPH.Liquid(),
     )
     # This ball starts above the liquid, falls into it and comes to rest on the plane, pressing the liquid under it
     scene.add_entity(
@@ -312,7 +291,17 @@ def test_bodies_hold_liquid_back_under_impacts(n_envs, show_viewer):
     )
     scene.build(n_envs=n_envs)
 
-    # The liquid that the pillar lands in is removed with it, as the liquid sampled inside the bodies at build
+    # The liquid sampled inside the pressing ball, or within half a particle size of its surface, is removed at build:
+    # the volume of the removed particles is that of the ball inflated by half a particle size, which dips below the
+    # plane where no liquid is sampled
+    offset = 0.5 * PARTICLE_SIZE
+    cap_height = BALL_RADIUS + offset - PRESSING_BALL_POS[2]
+    cap_volume = math.pi * cap_height**2 * (3.0 * (BALL_RADIUS + offset) - cap_height) / 3.0
+    ball_volume = 4.0 / 3.0 * math.pi * (BALL_RADIUS + offset) ** 3 - cap_volume
+    removed_volume = (~liquid.get_particles_active().bool()).sum(dim=-1) * PARTICLE_SIZE**3
+    assert_allclose(removed_volume, ball_volume, rtol=5e-2)
+
+    # The liquid that the pillar lands in is removed with it, as the liquid sampled inside the entities at build
     pillar_pos, pillar_size = torch.tensor(PILLAR_POS, device=gs.device), torch.tensor(PILLAR_SIZE, device=gs.device)
     is_in_pillar = ((liquid.get_particles_pos() - pillar_pos).abs() < 0.5 * (pillar_size + PARTICLE_SIZE)).all(dim=-1)
     particles_is_active = liquid.get_particles_active().bool() & ~is_in_pillar
